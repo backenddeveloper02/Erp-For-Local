@@ -35,7 +35,7 @@ export const getStaffWithStats = async (req, res) => {
     if (search) {
       whereClause += `
         AND (
-          LOWER(name) LIKE LOWER(:search)
+          LOWER(username) LIKE LOWER(:search)
           OR LOWER(email) LIKE LOWER(:search)
           OR LOWER(user_code) LIKE LOWER(:search)
           OR LOWER(address) LIKE LOWER(:search)
