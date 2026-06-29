@@ -2,128 +2,412 @@
 
 // import sequelize from "../config/db.js";
 // import { QueryTypes } from "sequelize";
+export const getHeadOfficeStock = async (req, res) => {
+  try {
+    const user = req.user || {};
 
-// export const getHeadOfficeStock = async (req, res) => {
-//   try {
-//     const { search = "", category = "" } = req.query;
+    const {
+      search,
+      category,
+      metal_type,
+      page = 1,
+      limit = 1000,
+    } = req.query;
 
-//     const user = {
-//       organization_level: req.headers.organization_level,
-//       store_code: req.headers.store_code, 
-//     };
+    // =================================================
+    // USER / STORE CODE
+    // =================================================
 
-    
-//     if (user.organization_level !== "head_office") {
-//       return res.status(403).json({ message: "Access denied" });
-//     }
+    const role = String(user.role || "").toLowerCase();
 
-    
+    const storeCode = String(
+      user.store_code ||
+        user.storeCode ||
+        req.headers.store_code ||
+        req.headers.storecode ||
+        req.headers["store-code"] ||
+        ""
+    )
+      .trim()
+      .toUpperCase();
 
-//     const summary = await sequelize.query(
-//       `
-//       SELECT
-//         COUNT(i.id) AS total_items,
+    if (!storeCode && role !== "super_admin") {
+      return res.status(400).json({
+        success: false,
+        message: "Store code missing in login user",
+      });
+    }
 
-//         COUNT(
-//           CASE 
-//             WHEN i."createdAt" < NOW() - INTERVAL '90 days'
-//             THEN 1
-//           END
-//         ) AS dead_stock,
+    // =================================================
+    // PAGINATION
+    // =================================================
 
-//         COUNT(
-//           CASE 
-//             WHEN s.available_qty < 25
-//             THEN 1
-//           END
-//         ) AS low_stock,
+    const pageNumber = Number(page) || 1;
+    const pageLimit = Number(limit) || 1000;
+    const offset = (pageNumber - 1) * pageLimit;
 
-//         COALESCE(SUM(s.transit_qty), 0) AS transit_stock
+    // =================================================
+    // COMMON WHERE
+    // =================================================
 
-//       FROM items i
+    let whereClause = `WHERE 1=1`;
+    const replacements = {
+      limit: pageLimit,
+      offset,
+    };
 
-//       LEFT JOIN stocks s 
-//         ON i.id = s.item_id
+    if (role !== "super_admin") {
+      whereClause += ` AND UPPER(s.store_code) = :store_code`;
+      replacements.store_code = storeCode;
+    }
 
-//       LEFT JOIN stores st 
-//         ON st.id = s.organization_id
+    if (category) {
+      whereClause += ` AND i.category = :category`;
+      replacements.category = category;
+    }
 
-//       WHERE st.store_code = :storeCode;
-//       `,
-//       {
-//         replacements: {
-//           storeCode: user.store_code, 
-//         },
-//         type: QueryTypes.SELECT,
-//       }
-//     );
+    if (metal_type) {
+      whereClause += ` AND i.metal_type = :metal_type`;
+      replacements.metal_type = metal_type;
+    }
 
-   
+    if (search) {
+      whereClause += `
+        AND (
+          i.item_name ILIKE :search
+          OR i.article_code ILIKE :search
+          OR i.sku_code ILIKE :search
+          OR i.purity ILIKE :search
+        )
+      `;
+      replacements.search = `%${search}%`;
+    }
 
-//     const inventory = await sequelize.query(
-//       `
-//       SELECT 
-//         i.id,
-//         i.item_name AS item,
-//         i.article_code AS code,
+    // =================================================
+    // FETCH ITEMS
+    // =================================================
 
-//         COALESCE(s.available_qty, 0) AS quantity,
+    const items = await sequelize.query(
+      `
+      SELECT
+        i.id,
+        i.item_name,
+        i.article_code,
+        i.sku_code,
+        i.category,
+        i.metal_type,
+        i.purity,
+        i.net_weight,
+        i.stone_weight,
+        i.gross_weight,
+        i.sale_rate,
+        i.making_charge,
+        i.current_status,
+        i."storeCode",
+        i.organization_id,
+        i."createdAt",
+        i.image_url,
 
-//         i.purchase_rate AS purchase_price,
-//         i.sale_rate AS selling_price,
-//         i.making_charge,
-//         i.purity,
+        s.id AS stock_id,
+        s.item_id AS stock_item_id,
+        s.store_code AS stock_store_code,
+        COALESCE(s.available_qty, 0) AS available_qty,
+        COALESCE(s.available_weight, 0) AS available_weight,
+        COALESCE(s.reserved_qty, 0) AS reserved_qty,
+        COALESCE(s.reserved_weight, 0) AS reserved_weight,
+        COALESCE(s.transit_qty, 0) AS transit_qty,
+        COALESCE(s.transit_weight, 0) AS transit_weight,
+        COALESCE(s.dead_qty, 0) AS dead_qty,
+        COALESCE(s.dead_weight, 0) AS dead_weight
 
-//         ROUND(i.net_weight::numeric, 3) AS net_weight,
-//         ROUND(i.stone_weight::numeric, 3) AS stone_weight,
-//         ROUND(i.gross_weight::numeric, 3) AS gross_weight
+      FROM items i
 
-//       FROM items i
+      LEFT JOIN stocks s
+      ON s.item_id = i.id
 
-//       LEFT JOIN stocks s 
-//         ON i.id = s.item_id
+      ${whereClause}
 
-//       LEFT JOIN stores st 
-//         ON st.id = s.organization_id
+      ORDER BY i.id DESC
 
-//       WHERE 
-//         st.store_code = :storeCode
-//         AND (:search = '' OR i.item_name ILIKE '%' || :search || '%')
-//         AND (:category = '' OR i.category = :category)
+      LIMIT :limit OFFSET :offset
+      `,
+      {
+        replacements,
+        type: QueryTypes.SELECT,
+      }
+    );
 
-//       ORDER BY i."createdAt" DESC;
-//       `,
-//       {
-//         replacements: {
-//           storeCode: user.store_code,
-//           search,
-//           category,
-//         },
-//         type: QueryTypes.SELECT,
-//       }
-//     );
+    // =================================================
+    // SUMMARY
+    // =================================================
 
-//     return res.json({
-//       success: true,
-//       data: {
-//         summary: {
-//           total_items: Number(summary[0]?.total_items || 0),
-//           dead_stock: Number(summary[0]?.dead_stock || 0),
-//           low_stock: Number(summary[0]?.low_stock || 0),
-//           transit_stock: Number(summary[0]?.transit_stock || 0),
-//         },
-//         inventory,
-//       },
-//     });
+    let transitGoods = 0;
+    let lowStock = 0;
 
-//   } catch (error) {
-//     console.error("Head Office Stock Error:", error);
-//     return res.status(500).json({
-//       success: false,
-//       message: "Something went wrong",
-//     });
-//   }
-// };
+    const categoryCounts = {};
+    const categoryQuantityMap = {};
+
+    items.forEach((item) => {
+      const key = item.category || "Others";
+
+      const categoryKey = String(item.category || "Others")
+        .trim()
+        .toLowerCase();
+
+      const availableQty = Number(item.available_qty || 0);
+
+      categoryCounts[key] = (categoryCounts[key] || 0) + 1;
+
+      categoryQuantityMap[categoryKey] =
+        (categoryQuantityMap[categoryKey] || 0) + availableQty;
+    });
+
+    items.forEach((item) => {
+      const availableQty = Number(item.available_qty || 0);
+      const transitQty = Number(item.transit_qty || 0);
+
+      transitGoods += transitQty;
+
+      if (availableQty > 0 && availableQty <= 5) {
+        lowStock++;
+      }
+    });
+
+    // =================================================
+    // CATEGORY DUPLICACY REMOVE ONLY FOR RESPONSE DATA
+    // =================================================
+
+    const seenCategories = new Set();
+
+    const filteredItems = items.filter((item) => {
+      const categoryKey = String(item.category || "Others")
+        .trim()
+        .toLowerCase();
+
+      if (seenCategories.has(categoryKey)) {
+        return false;
+      }
+
+      seenCategories.add(categoryKey);
+      return true;
+    });
+
+    // =================================================
+    // BATCH MAP
+    // =================================================
+
+    const batchMap = {};
+
+    const batches = await sequelize.query(
+      `
+      SELECT
+        item_id,
+        id AS parent_batch_id,
+        root_batch_id,
+        batch_no
+      FROM inventory_batches
+      WHERE
+        parent_batch_id IS NULL
+        OR parent_batch_id = root_batch_id
+      `,
+      {
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    for (const batch of batches) {
+      if (!batchMap[batch.item_id]) {
+        batchMap[batch.item_id] = batch;
+      }
+    }
+
+    // =================================================
+    // RESPONSE DATA
+    // =================================================
+
+    const data = filteredItems.map((item) => {
+      const categoryKey = String(item.category || "Others")
+        .trim()
+        .toLowerCase();
+
+      return {
+        id: item.id,
+
+        item_name: item.item_name,
+
+        article_code: item.article_code,
+
+        sku_code: item.sku_code,
+
+        parent_batch_id: batchMap[item.id]?.parent_batch_id || null,
+
+        root_batch_id: batchMap[item.id]?.root_batch_id || null,
+
+        batch_id: batchMap[item.id]?.parent_batch_id || null,
+
+        batch_no: batchMap[item.id]?.batch_no || null,
+
+        category: item.category,
+
+        image_url: item.image_url,
+
+        total_category_items: categoryCounts[item.category || "Others"] || 0,
+
+        metal_type: item.metal_type,
+
+        purity: item.purity,
+
+        quantity: categoryQuantityMap[categoryKey] || 0,
+
+        available_qty: categoryQuantityMap[categoryKey] || 0,
+
+        available_weight: Number(item.available_weight || 0),
+
+        reserved_qty: Number(item.reserved_qty || 0),
+
+        transit_qty: Number(item.transit_qty || 0),
+
+        dead_qty: Number(item.dead_qty || 0),
+
+        net_weight: Number(item.net_weight || 0),
+
+        gross_weight: Number(item.gross_weight || 0),
+
+        stone_weight: Number(item.stone_weight || 0),
+
+        selling_price: Number(item.sale_rate || 0),
+
+        making_charge: Number(item.making_charge || 0),
+
+        current_status: item.current_status,
+
+        storeCode: item.storeCode || null,
+
+        organization_id: item.organization_id,
+
+        stocks: [
+          {
+            id: item.stock_id,
+            item_id: item.stock_item_id,
+            store_code: item.stock_store_code,
+            available_qty: Number(item.available_qty || 0),
+            available_weight: Number(item.available_weight || 0),
+            reserved_qty: Number(item.reserved_qty || 0),
+            reserved_weight: Number(item.reserved_weight || 0),
+            transit_qty: Number(item.transit_qty || 0),
+            transit_weight: Number(item.transit_weight || 0),
+            dead_qty: Number(item.dead_qty || 0),
+            dead_weight: Number(item.dead_weight || 0),
+          },
+        ],
+      };
+    });
+
+    // =================================================
+    // TOTAL STOCK - SAME AS RETAIL DASHBOARD
+    // =================================================
+
+    let totalStockWhere = `WHERE 1=1`;
+    const totalStockReplacements = {};
+
+    if (role !== "super_admin") {
+      totalStockWhere += ` AND UPPER(s.store_code) = :store_code`;
+      totalStockReplacements.store_code = storeCode;
+    }
+
+    const totalStockResult = await sequelize.query(
+      `
+      SELECT
+        COALESCE(SUM(s.available_qty), 0) AS total
+      FROM stocks s
+      INNER JOIN items i
+      ON i.id = s.item_id
+      ${totalStockWhere}
+      `,
+      {
+        replacements: totalStockReplacements,
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    const totalStock = Number(totalStockResult?.[0]?.total || 0);
+
+    // =================================================
+    // DEAD STOCK - SAME AS RETAIL DASHBOARD
+    // =================================================
+
+    const deadStockResult = await sequelize.query(
+      `
+      SELECT
+        COUNT(
+          DISTINCT CASE
+            WHEN
+              s.available_qty > 0
+              AND i."createdAt" < NOW() - INTERVAL '30 days'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM invoice_items ii
+                JOIN invoices inv
+                ON inv.id = ii.invoice_id
+                WHERE ii.item_id = i.id
+                AND inv."createdAt" > NOW() - INTERVAL '30 days'
+              )
+            THEN i.id
+          END
+        )::int AS dead_stock_items
+
+      FROM stocks s
+
+      INNER JOIN items i
+      ON i.id = s.item_id
+
+      ${totalStockWhere}
+      `,
+      {
+        replacements: totalStockReplacements,
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    const deadStock = Number(deadStockResult?.[0]?.dead_stock_items || 0);
+
+    return res.status(200).json({
+      success: true,
+
+      message: "Head office inventory fetched successfully",
+
+      summary: {
+        total_stock_items: totalStock,
+
+        dead_stock_items: deadStock,
+
+        low_stock_items: lowStock,
+
+        transit_goods: transitGoods,
+      },
+
+      pagination: {
+        page: pageNumber,
+
+        limit: pageLimit,
+      },
+
+      count: data.length,
+
+      data,
+    });
+  } catch (error) {
+    console.error("getHeadOfficeStock error:", error);
+
+    return res.status(500).json({
+      success: false,
+
+      message: "Failed to fetch head office inventory",
+
+      error: error.message,
+    });
+  }
+};
 
 
 
@@ -131,9 +415,88 @@
 import sequelize from "../../config/db.js";
 import { QueryTypes } from "sequelize";
 
+// ================= COMMON FILTER HELPER =================
+const buildStockFilter = (query) => {
+  const { organization_id, store_code } = query;
+
+  const replacements = {};
+
+  if (organization_id) {
+    replacements.organization_id = organization_id;
+    return {
+      where: `WHERE s.organization_id = :organization_id`,
+      and: `AND s.organization_id = :organization_id`,
+      replacements,
+    };
+  }
+
+  if (store_code) {
+    replacements.store_code = store_code;
+    return {
+      where: `WHERE s.store_code = :store_code`,
+      and: `AND s.store_code = :store_code`,
+      replacements,
+    };
+  }
+
+  return {
+    where: "",
+    and: "",
+    replacements,
+  };
+};
+
+// ================= GET DISTRICT / RETAIL LIST =================
+export const getInventoryOrganizations = async (req, res) => {
+  try {
+    const { type } = req.query;
+
+    if (!type || !["district", "retail"].includes(type.toLowerCase())) {
+      return res.status(400).json({
+        success: false,
+        message: "type is required: district or retail",
+      });
+    }
+
+    const level = type.toLowerCase() === "district" ? "District" : "Retail";
+
+    const data = await sequelize.query(
+      `
+      SELECT
+        id AS organization_id,
+        store_code,
+        store_name,
+        organization_level
+      FROM stores
+      WHERE organization_level = :level
+      AND is_active = true
+      ORDER BY store_name ASC
+      `,
+      {
+        replacements: { level },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    return res.json({
+      success: true,
+      data,
+    });
+  } catch (error) {
+    console.error("Inventory Organizations Error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+    });
+  }
+};
+
+// ================= OVERALL INVENTORY DASHBOARD =================
 export const getOverallInventoryDashboard = async (req, res) => {
   try {
-    // ================= CARDS =================
+    const filter = buildStockFilter(req.query);
+
     const [cards] = await sequelize.query(
       `
       SELECT 
@@ -166,11 +529,14 @@ export const getOverallInventoryDashboard = async (req, res) => {
 
       FROM items i
       LEFT JOIN stocks s ON s.item_id = i.id
+      ${filter.where}
       `,
-      { type: QueryTypes.SELECT }
+      {
+        replacements: filter.replacements,
+        type: QueryTypes.SELECT,
+      }
     );
 
-    // ================= TABLE DATA =================
     const tableData = await sequelize.query(
       `
       SELECT 
@@ -211,12 +577,16 @@ export const getOverallInventoryDashboard = async (req, res) => {
 
       FROM items i
       LEFT JOIN stocks s ON s.item_id = i.id
+      ${filter.where}
 
       GROUP BY i.category
 
       ORDER BY MAX(i."createdAt") DESC
       `,
-      { type: QueryTypes.SELECT }
+      {
+        replacements: filter.replacements,
+        type: QueryTypes.SELECT,
+      }
     );
 
     return res.json({
@@ -234,14 +604,14 @@ export const getOverallInventoryDashboard = async (req, res) => {
   } catch (error) {
     console.error("Dashboard Error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       message: error.message,
     });
   }
 };
 
-
+// ================= OVERALL CATEGORY ITEMS =================
 export const getOverallCategoryItems = async (req, res) => {
   try {
     const { category } = req.query;
@@ -252,6 +622,8 @@ export const getOverallCategoryItems = async (req, res) => {
         message: "Category is required",
       });
     }
+
+    const filter = buildStockFilter(req.query);
 
     const data = await sequelize.query(
       `
@@ -281,6 +653,7 @@ export const getOverallCategoryItems = async (req, res) => {
         ON s.item_id = i.id
 
       WHERE i.category = :category
+      ${filter.and}
 
       GROUP BY 
         i.id,
@@ -292,7 +665,10 @@ export const getOverallCategoryItems = async (req, res) => {
       ORDER BY i.item_name ASC
       `,
       {
-        replacements: { category },
+        replacements: {
+          category,
+          ...filter.replacements,
+        },
         type: QueryTypes.SELECT,
       }
     );
@@ -310,11 +686,12 @@ export const getOverallCategoryItems = async (req, res) => {
     });
   }
 };
+
+// ================= UPDATE STOCK PRICING =================
 export const updateStockPricing = async (req, res) => {
   try {
     const { item_id, selling_price, making_charge } = req.body;
 
-    // ================= VALIDATION =================
     if (!item_id) {
       return res.status(400).json({
         success: false,
@@ -322,7 +699,6 @@ export const updateStockPricing = async (req, res) => {
       });
     }
 
-    // ================= CHECK ITEM EXISTS =================
     const itemExists = await sequelize.query(
       `
       SELECT id, item_name, sale_rate, making_charge
@@ -342,34 +718,32 @@ export const updateStockPricing = async (req, res) => {
       });
     }
 
-    // ================= UPDATE QUERY =================
-   await sequelize.query(
-  `
-  UPDATE items
-  SET
-    sale_rate = COALESCE(:selling_price, sale_rate),
-    making_charge = COALESCE(:making_charge, making_charge),
-    "updatedAt" = NOW()
+    await sequelize.query(
+      `
+      UPDATE items
+      SET
+        sale_rate = COALESCE(:selling_price, sale_rate),
+        making_charge = COALESCE(:making_charge, making_charge),
+        "updatedAt" = NOW()
+      WHERE id = :item_id
+      `,
+      {
+        replacements: {
+          item_id,
+          selling_price: selling_price ?? null,
+          making_charge: making_charge ?? null,
+        },
+        type: QueryTypes.UPDATE,
+      }
+    );
 
-  WHERE id = :item_id
-  `,
-  {
-    replacements: {
-      item_id,
-      selling_price: selling_price ?? null,
-      making_charge: making_charge ?? null,
-    },
-    type: QueryTypes.UPDATE,
-  }
-);
-    // ================= UPDATED DATA =================
     const updatedItem = await sequelize.query(
       `
       SELECT
         id,
         item_name,
         sku_code,
-        sale_rate as selling_price,
+        sale_rate AS selling_price,
         making_charge
       FROM items
       WHERE id = :item_id
@@ -385,7 +759,6 @@ export const updateStockPricing = async (req, res) => {
       message: "Stock pricing updated successfully",
       data: updatedItem[0],
     });
-
   } catch (error) {
     console.error("Update Stock Pricing Error:", error);
 
