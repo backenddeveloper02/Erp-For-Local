@@ -63,6 +63,7 @@ const corsOptions = {
     "http://localhost:3000",
     "http://localhost:5173",
     "https://erp-dash-board.vercel.app",
+    "https://erp-dash-board-stagging-iep5.vercel.app"
   ],
 
   methods: [
