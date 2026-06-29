@@ -454,10 +454,11 @@ export const addEmployee = async (req, res) => {
     }
 
     const allowedRoles = [
-      "ADMIN",
-      "INVENTORY_MANAGER",
-      "SALES_MANAGER",
-      "SUPER_ADMIN",
+      "Super-Admin",
+      "Retail-TL",
+      "Retail-Manager",
+      "District-TL",
+      "District-Manager",
     ];
 
     if (!allowedRoles.includes(role)) {
