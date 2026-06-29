@@ -421,19 +421,21 @@ const buildStockFilter = (query) => {
   const replacements = {};
 
   if (organization_id) {
-    replacements.organization_id = organization_id;
+    replacements.organization_id = Number(organization_id);
+
     return {
-      where: `WHERE s.organization_id = :organization_id`,
-      and: `AND s.organization_id = :organization_id`,
+      where: `WHERE (s.organization_id = :organization_id OR i.organization_id = :organization_id)`,
+      and: `AND (s.organization_id = :organization_id OR i.organization_id = :organization_id)`,
       replacements,
     };
   }
 
   if (store_code) {
-    replacements.store_code = store_code;
+    replacements.store_code = String(store_code).trim().toUpperCase();
+
     return {
-      where: `WHERE s.store_code = :store_code`,
-      and: `AND s.store_code = :store_code`,
+      where: `WHERE (UPPER(s.store_code) = :store_code OR UPPER(i."storeCode") = :store_code)`,
+      and: `AND (UPPER(s.store_code) = :store_code OR UPPER(i."storeCode") = :store_code)`,
       replacements,
     };
   }
@@ -444,7 +446,6 @@ const buildStockFilter = (query) => {
     replacements,
   };
 };
-
 // ================= GET DISTRICT / RETAIL LIST =================
 export const getInventoryOrganizations = async (req, res) => {
   try {
@@ -494,7 +495,37 @@ export const getInventoryOrganizations = async (req, res) => {
 // ================= OVERALL INVENTORY DASHBOARD =================
 export const getOverallInventoryDashboard = async (req, res) => {
   try {
-    const filter = buildStockFilter(req.query);
+    const user = req.user;
+
+    const { organization_id, store_code } = req.query;
+
+    const role = String(user?.role || "").toLowerCase();
+
+    const cleanStoreCode = String(
+      store_code || user?.store_code || user?.storeCode || ""
+    )
+      .trim()
+      .toUpperCase();
+
+    if (!cleanStoreCode && role !== "super_admin") {
+      return res.status(400).json({
+        success: false,
+        message: "Store code missing",
+      });
+    }
+
+    let whereClause = `WHERE 1=1`;
+    const replacements = {};
+
+    if (organization_id) {
+      whereClause += ` AND s.organization_id = :organization_id`;
+      replacements.organization_id = Number(organization_id);
+    }
+
+    if (cleanStoreCode) {
+      whereClause += ` AND s.store_code = :store_code`;
+      replacements.store_code = cleanStoreCode;
+    }
 
     const [cards] = await sequelize.query(
       `
@@ -518,20 +549,21 @@ export const getOverallInventoryDashboard = async (req, res) => {
 
         COUNT(
           DISTINCT CASE
-            WHEN s.available_qty < 5
-            AND s.available_qty > 0
+            WHEN s.available_qty > 0
+            AND s.available_qty <= 5
             THEN i.id
           END
         ) AS low_stock,
 
         COALESCE(SUM(s.transit_qty), 0) AS transit_goods
 
-      FROM items i
-      LEFT JOIN stocks s ON s.item_id = i.id
-      ${filter.where}
+      FROM stocks s
+      INNER JOIN items i ON i.id = s.item_id
+
+      ${whereClause}
       `,
       {
-        replacements: filter.replacements,
+        replacements,
         type: QueryTypes.SELECT,
       }
     );
@@ -564,8 +596,8 @@ export const getOverallInventoryDashboard = async (req, res) => {
         ROUND(SUM(i.gross_weight)::numeric, 3) AS gross_weight,
 
         CASE
-          WHEN COALESCE(SUM(s.available_qty), 0) < 5
-          AND COALESCE(SUM(s.available_qty), 0) > 0
+          WHEN COALESCE(SUM(s.available_qty), 0) > 0
+          AND COALESCE(SUM(s.available_qty), 0) <= 5
           THEN 'LOW STOCK'
 
           WHEN COALESCE(SUM(s.available_qty), 0) = 0
@@ -574,16 +606,17 @@ export const getOverallInventoryDashboard = async (req, res) => {
           ELSE 'IN STOCK'
         END AS stock_status
 
-      FROM items i
-      LEFT JOIN stocks s ON s.item_id = i.id
-      ${filter.where}
+      FROM stocks s
+      INNER JOIN items i ON i.id = s.item_id
+
+      ${whereClause}
 
       GROUP BY i.category
 
       ORDER BY MAX(i."createdAt") DESC
       `,
       {
-        replacements: filter.replacements,
+        replacements,
         type: QueryTypes.SELECT,
       }
     );
@@ -592,10 +625,10 @@ export const getOverallInventoryDashboard = async (req, res) => {
       success: true,
       data: {
         cards: {
-          totalStocksItems: Number(cards.total_stock_items),
-          deadStockItems: Number(cards.dead_stock_items),
-          lowStock: Number(cards.low_stock),
-          transitGoods: Number(cards.transit_goods),
+          totalStocksItems: Number(cards?.total_stock_items || 0),
+          deadStockItems: Number(cards?.dead_stock_items || 0),
+          lowStock: Number(cards?.low_stock || 0),
+          transitGoods: Number(cards?.transit_goods || 0),
         },
         table: tableData,
       },
