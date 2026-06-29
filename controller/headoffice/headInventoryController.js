@@ -1,7 +1,6 @@
-// // controllers/headOfficeController.js
-
-// import sequelize from "../config/db.js";
-// import { QueryTypes } from "sequelize";
+import { Op } from "sequelize";
+import Item from "../../model/item.js";
+import Stock from "../../model/stockrecord.js";
 export const getHeadOfficeStock = async (req, res) => {
   try {
     const user = req.user || {};
@@ -765,6 +764,237 @@ export const updateStockPricing = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: error.message,
+    });
+  }
+};
+export const getHeadStockItemsByCategory = async (req, res) => {
+  try {
+    const user = req.user;
+
+    const { category } = req.params;
+    const { search, metal_type } = req.query;
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized access",
+      });
+    }
+
+    const organizationId = Number(user.organization_id);
+    const storeCode = String(user.store_code || user.storeCode || "")
+      .trim()
+      .toUpperCase();
+
+    if (!organizationId || !storeCode) {
+      return res.status(400).json({
+        success: false,
+        message: "Head organization id or store code not found",
+      });
+    }
+
+    if (!category) {
+      return res.status(400).json({
+        success: false,
+        message: "Category is required",
+      });
+    }
+
+    const itemWhere = {
+      organization_id: organizationId,
+      storeCode,
+      category,
+    };
+
+    const stockWhere = {
+      organization_id: organizationId,
+      store_code: storeCode,
+    };
+
+    if (metal_type) {
+      itemWhere.metal_type = metal_type;
+    }
+
+    if (search) {
+      itemWhere[Op.or] = [
+        { item_name: { [Op.iLike]: `%${search}%` } },
+        { article_code: { [Op.iLike]: `%${search}%` } },
+        { sku_code: { [Op.iLike]: `%${search}%` } },
+        { purity: { [Op.iLike]: `%${search}%` } },
+        { category: { [Op.iLike]: `%${search}%` } },
+      ];
+    }
+
+    const items = await Item.findAll({
+      attributes: [
+        "id",
+        "article_code",
+        "sku_code",
+        "item_name",
+        "metal_type",
+        "category",
+        "details",
+        "purity",
+        "gross_weight",
+        "net_weight",
+        "stone_weight",
+        "stone_amount",
+        "making_charge",
+        "purchase_rate",
+        "sale_rate",
+        "hsn_code",
+        "unit",
+        "current_status",
+        "store_id",
+        "storeCode",
+        "storeName",
+        "organization_id",
+        "createdAt",
+        "updatedAt",
+        "image_url",
+      ],
+
+      where: itemWhere,
+
+      include: [
+        {
+          model: Stock,
+          as: "stocks",
+          required: false,
+          attributes: [
+            "id",
+            "organization_id",
+            "item_id",
+            "store_code",
+            "available_qty",
+            "available_weight",
+            "reserved_qty",
+            "reserved_weight",
+            "transit_qty",
+            "transit_weight",
+            "damaged_qty",
+            "damaged_weight",
+            "dead_qty",
+            "dead_weight",
+          ],
+          where: stockWhere,
+        },
+      ],
+
+      order: [["id", "DESC"]],
+    });
+
+    const data = items.map((item, index) => {
+      const stock =
+        Array.isArray(item.stocks) && item.stocks.length > 0
+          ? item.stocks[0]
+          : null;
+
+      return {
+        idx: index + 1,
+
+        id: Number(item.id || 0),
+
+        article_code: item.article_code || "",
+
+        sku_code: item.sku_code || "",
+
+        item_name: item.item_name || "",
+
+        metal_type: item.metal_type || "",
+
+        category: item.category || "",
+
+        image_url: item.image_url || null,
+
+        details: item.details || "",
+
+        purity: item.purity || "",
+
+        gross_weight: Number(item.gross_weight || 0),
+
+        net_weight: Number(item.net_weight || 0),
+
+        stone_weight: Number(item.stone_weight || 0),
+
+        stone_amount: Number(item.stone_amount || 0),
+
+        making_charge: Number(item.making_charge || 0),
+
+        purchase_rate: Number(item.purchase_rate || 0),
+
+        sale_rate: Number(item.sale_rate || 0),
+
+        hsn_code: item.hsn_code || "",
+
+        unit: item.unit || "",
+
+        current_status: item.current_status || "",
+
+        stock_id: stock ? Number(stock.id || 0) : null,
+
+        quantity: Number(stock?.available_qty || 0),
+
+        available_qty: Number(stock?.available_qty || 0),
+
+        available_weight: Number(stock?.available_weight || 0),
+
+        reserved_qty: Number(stock?.reserved_qty || 0),
+
+        reserved_weight: Number(stock?.reserved_weight || 0),
+
+        transit_qty: Number(stock?.transit_qty || 0),
+
+        transit_weight: Number(stock?.transit_weight || 0),
+
+        damaged_qty: Number(stock?.damaged_qty || 0),
+
+        damaged_weight: Number(stock?.damaged_weight || 0),
+
+        dead_qty: Number(stock?.dead_qty || 0),
+
+        dead_weight: Number(stock?.dead_weight || 0),
+
+        store_id: Number(item.store_id || 0),
+
+        storeCode: item.storeCode || storeCode,
+
+        storeName: item.storeName || null,
+
+        organization_id: Number(item.organization_id || 0),
+
+        createdAt: item.createdAt || null,
+
+        updatedAt: item.updatedAt || null,
+
+        action: "View",
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+
+      message: `Head ${category} items fetched successfully`,
+
+      organization_id: organizationId,
+
+      store_code: storeCode,
+
+      category,
+
+      count: data.length,
+
+      data,
+    });
+  } catch (error) {
+    console.error("getHeadStockItemsByCategory error:", error);
+
+    return res.status(500).json({
+      success: false,
+
+      message: "Failed to fetch head category items",
+
+      error: error.message,
     });
   }
 };
