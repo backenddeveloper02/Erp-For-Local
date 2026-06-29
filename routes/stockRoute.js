@@ -20,6 +20,7 @@ import {
   getOverallCategoryItems,
   updateStockPricing,
   getHeadOfficeStock,
+  getHeadStockItemsByCategory,
 } from "../controller/headoffice/headInventoryController.js";
 
 import { uploadInventoryFile } from "../middlewares/uploadchallan.js";
@@ -91,7 +92,11 @@ router.get(
   "/inventory/overall/category",
   getOverallCategoryItems
 );
-
+router.get(
+  "/head/category/:category",
+  auth,
+  getHeadStockItemsByCategory
+);
 /**
  * ==========================================
  * ITEM QR
