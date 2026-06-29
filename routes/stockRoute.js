@@ -19,6 +19,7 @@ import {
   getOverallInventoryDashboard,
   getOverallCategoryItems,
   updateStockPricing,
+  getHeadOfficeStock,
 } from "../controller/headoffice/headInventoryController.js";
 
 import { uploadInventoryFile } from "../middlewares/uploadchallan.js";
@@ -83,6 +84,7 @@ router.get(
  * HEAD OFFICE
  * ==========================================
  */
+router.get("/headoffice", auth, getHeadOfficeStock);
 router.get("/inventory/dashboard", getOverallInventoryDashboard);
 
 router.get(
