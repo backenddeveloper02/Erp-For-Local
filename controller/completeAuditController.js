@@ -996,16 +996,20 @@ export const getHeadRetailAudits = async (req, res) => {
   try {
     const scope = await getUserScope(req.user);
 
-    if (
-      scope.organization_level !== "head" &&
-      scope.organization_level !== "head_office" &&
-      req.user?.role !== "super_admin"
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "Only head user can view retail audits",
-      });
-    }
+   if (
+  scope.organization_level !== "head" &&
+  scope.organization_level !== "head_office" &&
+  scope.organization_level !== "district" &&
+  req.user?.role !== "super_admin" &&
+  req.user?.role !== "District-Manager" &&
+  req.user?.role !== "District-Tl"
+) {
+  return res.status(403).json({
+    success: false,
+    message: "Only Head or District users can view retail audits",
+  });
+}
+
 
     const {
       retail_store_code,
