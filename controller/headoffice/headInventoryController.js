@@ -501,30 +501,37 @@ export const getOverallInventoryDashboard = async (req, res) => {
 
     const role = String(user?.role || "").toLowerCase();
 
-    const cleanStoreCode = String(
-      store_code || user?.store_code || user?.storeCode || ""
-    )
+    const cleanStoreCode = String(store_code || "")
       .trim()
       .toUpperCase();
-
-    if (!cleanStoreCode && role !== "super_admin") {
-      return res.status(400).json({
-        success: false,
-        message: "Store code missing",
-      });
-    }
 
     let whereClause = `WHERE 1=1`;
     const replacements = {};
 
+    // ✅ Agar organization_id diya hai to specific organization inventory
     if (organization_id) {
       whereClause += ` AND s.organization_id = :organization_id`;
       replacements.organization_id = Number(organization_id);
     }
 
+    // ✅ Agar store_code diya hai to specific store inventory
     if (cleanStoreCode) {
       whereClause += ` AND s.store_code = :store_code`;
       replacements.store_code = cleanStoreCode;
+    }
+
+    // ✅ Agar store_code nahi diya aur organization_id bhi nahi diya,
+    // to District + Retail stores ki combined inventory dikhao
+    if (!organization_id && !cleanStoreCode) {
+      whereClause += `
+        AND EXISTS (
+          SELECT 1
+          FROM stores st
+          WHERE st.store_code = s.store_code
+          AND st.organization_level::text IN ('District', 'Retail', 'district', 'retail')
+          AND st.is_active = true
+        )
+      `;
     }
 
     const [cards] = await sequelize.query(
@@ -646,7 +653,7 @@ export const getOverallInventoryDashboard = async (req, res) => {
 // ================= OVERALL CATEGORY ITEMS =================
 export const getOverallCategoryItems = async (req, res) => {
   try {
-    const { category } = req.query;
+    const { category, organization_id, store_code } = req.query;
 
     if (!category) {
       return res.status(400).json({
@@ -655,7 +662,37 @@ export const getOverallCategoryItems = async (req, res) => {
       });
     }
 
-    const filter = buildStockFilter(req.query);
+    const cleanStoreCode = String(store_code || "")
+      .trim()
+      .toUpperCase();
+
+    let extraWhere = "";
+    const replacements = {
+      category,
+    };
+
+    if (organization_id) {
+      extraWhere += ` AND s.organization_id = :organization_id`;
+      replacements.organization_id = Number(organization_id);
+    }
+
+    if (cleanStoreCode) {
+      extraWhere += ` AND s.store_code = :store_code`;
+      replacements.store_code = cleanStoreCode;
+    }
+
+    // ✅ store_code aur organization_id nahi diya to District + Retail combined
+    if (!organization_id && !cleanStoreCode) {
+      extraWhere += `
+        AND EXISTS (
+          SELECT 1
+          FROM stores st
+          WHERE st.store_code = s.store_code
+          AND st.organization_level::text IN ('District', 'Retail', 'district', 'retail')
+          AND st.is_active = true
+        )
+      `;
+    }
 
     const data = await sequelize.query(
       `
@@ -685,7 +722,7 @@ export const getOverallCategoryItems = async (req, res) => {
         ON s.item_id = i.id
 
       WHERE i.category = :category
-      ${filter.and}
+      ${extraWhere}
 
       GROUP BY 
         i.id,
@@ -697,10 +734,7 @@ export const getOverallCategoryItems = async (req, res) => {
       ORDER BY i.item_name ASC
       `,
       {
-        replacements: {
-          category,
-          ...filter.replacements,
-        },
+        replacements,
         type: QueryTypes.SELECT,
       }
     );
