@@ -27,6 +27,7 @@ import {
   // Agar ye controller stockRequest.controller.js me export nahi hai,
   // to pehle us controller ko add/export karna padega.
   transferDistrictRequestToRetail,
+  dispatchDistrictToRetailDirectTransfer,
 } from "../controller/stockRequest.controller.js";
 
 import {
@@ -144,7 +145,17 @@ router.get(
   auth,
   getRetailStoresUnderDistrict
 );
-
+router.post(
+  "/district-to-retail/direct-transfer",
+  auth,
+  upload.fields([
+    { name: "driver_photo", maxCount: 1 },
+    { name: "dispatch_images", maxCount: 10 },
+    { name: "dispatch_video", maxCount: 1 },
+    { name: "e_way_bill", maxCount: 1 },
+  ]),
+  dispatchDistrictToRetailDirectTransfer
+);
 /**
  * ✅ DISTRICT -> RETAIL TRANSFER / FORWARD FLOW
  *
