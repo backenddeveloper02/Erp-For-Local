@@ -6583,3 +6583,532 @@ export const dispatchNewItemTransfer = async (req, res) => {
     }
   }
 };
+export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
+  const transaction = await sequelize.transaction();
+  const uploadedLocalPaths = [];
+
+  const safeRollback = async () => {
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+  };
+
+  const addLocalPath = (file) => {
+    if (file?.path) uploadedLocalPaths.push(file.path);
+  };
+
+  const isValidPhone = (phone) => /^[6-9]\d{9}$/.test(String(phone).trim());
+
+  const isPositiveNumber = (value) =>
+    !isNaN(Number(value)) && Number(value) > 0;
+
+  const isValidNonNegativeNumber = (value) => {
+    return value === undefined || value === null || value === ""
+      ? true
+      : !isNaN(Number(value)) && Number(value) >= 0;
+  };
+
+  const isPastDate = (date) => {
+    if (!date) return false;
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const inputDate = new Date(date);
+    inputDate.setHours(0, 0, 0, 0);
+
+    return inputDate < today;
+  };
+
+  const uploadFileSafely = async (file, folder, type, errorMessage) => {
+    try {
+      const uploaded = await uploadToCloudinary(file.path, folder, type);
+      return uploaded.secure_url;
+    } catch (err) {
+      throw new Error(errorMessage || "File upload failed");
+    }
+  };
+
+  try {
+    const {
+      remarks,
+      driver_name,
+      driver_phone,
+      vehicle_number,
+      pickup_address,
+      delivery_address,
+      expected_delivery_date,
+      expected_delivery_time,
+      additional_notes,
+      items,
+      to_organization_id,
+    } = req.body;
+
+    const user = req.user;
+
+    if (!user?.id || !user?.organization_id) {
+      await safeRollback();
+      return res.status(401).json({
+        success: false,
+        message: "Invalid user token",
+      });
+    }
+
+    const userLevel = String(user.organization_level || "").toLowerCase();
+
+    if (userLevel !== "district") {
+      await safeRollback();
+      return res.status(403).json({
+        success: false,
+        message: "Only district user can dispatch directly to retail",
+      });
+    }
+
+    if (!to_organization_id) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Retail organization is required",
+      });
+    }
+
+    const retailStore = await Store.findOne({
+      where: {
+        id: to_organization_id,
+        organization_level: "Retail",
+        is_active: true,
+      },
+      transaction,
+    });
+
+    if (!retailStore) {
+      await safeRollback();
+      return res.status(404).json({
+        success: false,
+        message: "Retail store not found",
+      });
+    }
+
+    if (
+      retailStore.district_id &&
+      Number(retailStore.district_id) !== Number(user.organization_id)
+    ) {
+      await safeRollback();
+      return res.status(403).json({
+        success: false,
+        message: "This retail store does not belong to your district",
+      });
+    }
+
+    let parsedItems = [];
+
+    try {
+      if (Array.isArray(items)) {
+        parsedItems = items;
+      } else if (typeof items === "string") {
+        parsedItems = JSON.parse(items);
+      } else {
+        parsedItems = parseItemsFromBody(req.body) || [];
+      }
+    } catch (err) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Invalid items JSON format",
+      });
+    }
+
+    if (!Array.isArray(parsedItems) || !parsedItems.length) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Items required",
+      });
+    }
+
+    if (!driver_name || !String(driver_name).trim()) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Driver name is required",
+      });
+    }
+
+    if (!driver_phone || !String(driver_phone).trim()) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Driver phone is required",
+      });
+    }
+
+    if (!isValidPhone(driver_phone)) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Driver phone must be a valid 10 digit Indian mobile number",
+      });
+    }
+
+    if (!vehicle_number || !String(vehicle_number).trim()) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Vehicle number is required",
+      });
+    }
+
+    if (!pickup_address || !String(pickup_address).trim()) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Pickup address is required",
+      });
+    }
+
+    if (!delivery_address || !String(delivery_address).trim()) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Delivery address is required",
+      });
+    }
+
+    if (expected_delivery_date && isPastDate(expected_delivery_date)) {
+      await safeRollback();
+      return res.status(400).json({
+        success: false,
+        message: "Expected delivery date cannot be in the past",
+      });
+    }
+
+    // ================= FILES =================
+    const driverPhotoFile = req.files?.driver_photo?.[0] || null;
+    const dispatchImageFiles = req.files?.dispatch_images || [];
+    const dispatchVideoFile = req.files?.dispatch_video?.[0] || null;
+    const eWayBillFile = req.files?.e_way_bill?.[0] || null;
+
+    addLocalPath(driverPhotoFile);
+    dispatchImageFiles.forEach(addLocalPath);
+    addLocalPath(dispatchVideoFile);
+    addLocalPath(eWayBillFile);
+
+    let driver_photo_url = null;
+    let dispatch_image_urls = [];
+    let dispatch_video_url = null;
+    let e_way_bill_url = null;
+
+    if (driverPhotoFile?.path) {
+      driver_photo_url = await uploadFileSafely(
+        driverPhotoFile,
+        "district-retail/driver-photo",
+        "image",
+        "Failed to upload driver photo"
+      );
+    }
+
+    for (const file of dispatchImageFiles) {
+      const imageUrl = await uploadFileSafely(
+        file,
+        "district-retail/dispatch-images",
+        "image",
+        "Failed to upload dispatch image"
+      );
+
+      dispatch_image_urls.push(imageUrl);
+    }
+
+    if (dispatchVideoFile?.path) {
+      dispatch_video_url = await uploadFileSafely(
+        dispatchVideoFile,
+        "district-retail/dispatch-video",
+        "video",
+        "Failed to upload dispatch video"
+      );
+    }
+
+    if (eWayBillFile?.path) {
+      const isPdf =
+        eWayBillFile.mimetype === "application/pdf" ||
+        eWayBillFile.originalname?.toLowerCase().endsWith(".pdf");
+
+      e_way_bill_url = await uploadFileSafely(
+        eWayBillFile,
+        "district-retail/e-way-bill",
+        isPdf ? "raw" : "image",
+        "Failed to upload e-way bill"
+      );
+    }
+
+    // ================= CREATE TRANSFER =================
+    const transfer = await StockTransfer.create(
+      {
+        transfer_no: generateTransferNo(),
+        from_organization_id: user.organization_id,
+        to_organization_id,
+        status: "in_transit",
+
+        driver_name: String(driver_name).trim(),
+        driver_phone: String(driver_phone).trim(),
+        vehicle_number: String(vehicle_number).trim(),
+        pickup_address: String(pickup_address).trim(),
+        delivery_address: String(delivery_address).trim(),
+        expected_delivery_date,
+        expected_delivery_time,
+        additional_notes,
+        remarks: remarks || null,
+
+        driver_photo_url,
+        dispatch_image_url: dispatch_image_urls.length
+          ? JSON.stringify(dispatch_image_urls)
+          : null,
+        dispatch_video_url,
+        e_way_bill_url,
+
+        created_by: user.id,
+        dispatched_by: user.id,
+      },
+      { transaction }
+    );
+
+    // ================= ITEMS =================
+    for (const row of parsedItems) {
+      const {
+        item_name,
+        article_code,
+        sku_code,
+        qty,
+        weight,
+        rate,
+        purity,
+        hsn_code,
+      } = row;
+
+      if (!item_name || !String(item_name).trim()) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: "item_name is required",
+        });
+      }
+
+      if (!isPositiveNumber(qty)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Valid qty is required for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(weight)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Weight cannot be negative for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(rate)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Rate cannot be negative for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(row.gross_weight)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Gross weight cannot be negative for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(row.net_weight)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Net weight cannot be negative for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(row.stone_weight)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Stone weight cannot be negative for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(row.stone_amount)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Stone amount cannot be negative for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(row.making_charge)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Making charge cannot be negative for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(row.purchase_rate)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Purchase rate cannot be negative for item ${item_name}`,
+        });
+      }
+
+      if (!isValidNonNegativeNumber(row.sale_rate)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Sale rate cannot be negative for item ${item_name}`,
+        });
+      }
+
+      // ================= ITEM MASTER HANDLING =================
+      let item = null;
+
+      if (row.item_id) {
+        item = await Item.findByPk(row.item_id, { transaction });
+      }
+
+      if (!item) {
+        if (!row.metal_type || !String(row.metal_type).trim()) {
+          await safeRollback();
+          return res.status(400).json({
+            success: false,
+            message: `metal_type is required for item ${item_name}`,
+          });
+        }
+
+        if (!row.category || !String(row.category).trim()) {
+          await safeRollback();
+          return res.status(400).json({
+            success: false,
+            message: `category is required for item ${item_name}`,
+          });
+        }
+
+        item = await Item.create(
+          {
+            article_code:
+              article_code ||
+              `ART-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+
+            sku_code: sku_code || null,
+
+            item_name: String(item_name).trim(),
+
+            metal_type: row.metal_type,
+            category: row.category,
+            subcategory: row.subcategory || "",
+
+            details: row.details || null,
+
+            purity: purity || "NA",
+
+            gross_weight: Number(row.gross_weight || weight || 0),
+
+            net_weight: Number(row.net_weight || weight || 0),
+
+            stone_weight: Number(row.stone_weight || 0),
+
+            stone_amount: Number(row.stone_amount || 0),
+
+            making_charge: Number(row.making_charge || rate || 0),
+
+            purchase_rate: Number(row.purchase_rate || 0),
+
+            sale_rate: Number(row.sale_rate || 0),
+
+            hsn_code: hsn_code || null,
+
+            unit: row.unit || "PCS",
+
+            organization_id: user.organization_id,
+
+            is_active: true,
+          },
+          { transaction }
+        );
+      }
+
+      await StockTransferItem.create(
+        {
+          transfer_id: transfer.id,
+
+          item_id: item.id,
+
+          qty: Number(qty),
+
+          weight: Number(weight || item.gross_weight || 0),
+
+          rate: Number(rate || item.sale_rate || 0),
+
+          remarks: remarks || null,
+
+          external_item_data: {
+            item_id: item.id,
+            item_name: item.item_name,
+            article_code: item.article_code,
+            sku_code: item.sku_code,
+            metal_type: item.metal_type,
+            category: item.category,
+            subcategory: item.subcategory,
+            details: item.details,
+            purity: item.purity,
+            gross_weight: item.gross_weight,
+            net_weight: item.net_weight,
+            stone_weight: item.stone_weight,
+            stone_amount: item.stone_amount,
+            making_charge: item.making_charge,
+            purchase_rate: item.purchase_rate,
+            sale_rate: item.sale_rate,
+            hsn_code: item.hsn_code,
+            unit: item.unit,
+            organization_id: item.organization_id,
+          },
+        },
+        { transaction }
+      );
+    }
+
+    await transaction.commit();
+
+    return res.status(200).json({
+      success: true,
+      message: "District to retail item dispatched successfully",
+      data: {
+        transfer_id: transfer.id,
+        transfer_no: transfer.transfer_no,
+        status: "in_transit",
+      },
+    });
+  } catch (error) {
+    await safeRollback();
+
+    console.error("dispatchDistrictToRetailDirectTransfer error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Server error",
+    });
+  } finally {
+    for (const filePath of uploadedLocalPaths) {
+      try {
+        if (filePath && fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      } catch (err) {
+        console.error("Local file cleanup error:", err.message);
+      }
+    }
+  }
+};
