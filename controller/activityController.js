@@ -353,11 +353,11 @@ export const getDistrictOwnRecentActivities = async (req, res) => {
         return {
           ...formatted,
 
-          // ✅ DB se direct fetched created_at
+          //  DB se direct fetched created_at
           created_at: row.created_at || null,
           updated_at: row.updated_at || null,
 
-          // ✅ sorting ke liye
+          //  sorting ke liye
           activity_at: row.created_at || formatted.activity_at || null,
         };
       }),
@@ -368,10 +368,11 @@ export const getDistrictOwnRecentActivities = async (req, res) => {
         return {
           ...formatted,
 
-          // ✅ DB se direct fetched created_at
+          //  DB se direct fetched created_at
           created_at: row.created_at || null,
 
-          // ✅ sorting ke liye
+          // 
+          //  sorting ke liye
           activity_at: row.created_at || formatted.activity_at || null,
         };
       }),
@@ -602,9 +603,18 @@ export const getRetailOwnRecentActivities = async (req, res) => {
 
 export const getHeadOwnRecentActivities = async (req, res) => {
   try {
-    const { limit = 10 } = req.query;
-    const parsedLimit = Math.max(1, Number(limit) || 10);
+    const {
+      limit = 10,
+      source,
+      action,
+      module_name,
+      activity_type,
+      date_from,
+      date_to,
+      search,
+    } = req.query;
 
+    const parsedLimit = Math.max(1, Number(limit) || 10);
     const user = req.user;
 
     if (!user?.organization_id) {
@@ -615,46 +625,123 @@ export const getHeadOwnRecentActivities = async (req, res) => {
     }
 
     const orgId = user.organization_id;
-    const storeCode = user.store_code;
+    const storeCode = user.store_code || user.storeCode;
 
+    // ================= DATE FILTER =================
+    const activityDateWhere = {};
+    const systemDateWhere = {};
+
+    if (date_from || date_to) {
+      activityDateWhere.created_at = {};
+      systemDateWhere.created_at = {};
+
+      if (date_from) {
+        activityDateWhere.created_at[Op.gte] = new Date(date_from);
+        systemDateWhere.created_at[Op.gte] = new Date(date_from);
+      }
+
+      if (date_to) {
+        const endDate = new Date(date_to);
+        endDate.setHours(23, 59, 59, 999);
+
+        activityDateWhere.created_at[Op.lte] = endDate;
+        systemDateWhere.created_at[Op.lte] = endDate;
+      }
+    }
+
+    // ================= ACTIVITY LOG FILTER =================
     const activityLogWhere = {
-      [Op.or]: [
-        { organization_id: orgId },
-        Sequelize.where(
-          Sequelize.cast(Sequelize.json("meta.organization_id"), "TEXT"),
-          String(orgId)
-        ),
-        ...(storeCode
+      ...activityDateWhere,
+
+      [Op.and]: [
+        {
+          [Op.or]: [
+            { organization_id: orgId },
+
+            Sequelize.where(
+              Sequelize.cast(Sequelize.json("meta.organization_id"), "TEXT"),
+              String(orgId)
+            ),
+
+            ...(storeCode
+              ? [
+                  Sequelize.where(
+                    Sequelize.cast(Sequelize.json("meta.store_code"), "TEXT"),
+                    storeCode
+                  ),
+                ]
+              : []),
+          ],
+        },
+
+        ...(action ? [{ action }] : []),
+
+        ...(module_name ? [{ module_name }] : []),
+
+        ...(search
           ? [
-              Sequelize.where(
-                Sequelize.cast(Sequelize.json("meta.store_code"), "TEXT"),
-                storeCode
-              ),
+              {
+                [Op.or]: [
+                  { title: { [Op.iLike]: `%${search}%` } },
+                  { description: { [Op.iLike]: `%${search}%` } },
+                  { reference_no: { [Op.iLike]: `%${search}%` } },
+                ],
+              },
             ]
           : []),
       ],
     };
 
-    const systemActivityWhere = storeCode
-      ? {
-          [Op.or]: [{ store_code: storeCode }, { created_by: user.id }],
-        }
-      : { created_by: user.id };
+    // ================= SYSTEM ACTIVITY FILTER =================
+    const systemActivityWhere = {
+      ...systemDateWhere,
 
+      [Op.and]: [
+        storeCode
+          ? {
+              [Op.or]: [{ store_code: storeCode }, { created_by: user.id }],
+            }
+          : { created_by: user.id },
+
+        ...(activity_type ? [{ activity_type }] : []),
+
+        ...(module_name ? [{ module_name }] : []),
+
+        ...(search
+          ? [
+              {
+                [Op.or]: [
+                  { title: { [Op.iLike]: `%${search}%` } },
+                  { description: { [Op.iLike]: `%${search}%` } },
+                  { reference_no: { [Op.iLike]: `%${search}%` } },
+                  { store_code: { [Op.iLike]: `%${search}%` } },
+                  { store_name: { [Op.iLike]: `%${search}%` } },
+                ],
+              },
+            ]
+          : []),
+      ],
+    };
+
+    // ================= FETCH DATA =================
     const [activityLogs, systemActivities] = await Promise.all([
-      ActivityLog.findAll({
-        where: activityLogWhere,
-        order: [["created_at", "DESC"]],
-        limit: parsedLimit * 3,
-        raw: true,
-      }),
+      source === "system_activity"
+        ? []
+        : ActivityLog.findAll({
+            where: activityLogWhere,
+            order: [["created_at", "DESC"]],
+            limit: parsedLimit * 3,
+            raw: true,
+          }),
 
-      SystemActivity.findAll({
-        where: systemActivityWhere,
-        order: [["created_at", "DESC"]],
-        limit: parsedLimit * 3,
-        raw: true,
-      }),
+      source === "activity_log"
+        ? []
+        : SystemActivity.findAll({
+            where: systemActivityWhere,
+            order: [["created_at", "DESC"]],
+            limit: parsedLimit * 3,
+            raw: true,
+          }),
     ]);
 
     const handledByMap = await buildHandledByMap([
@@ -665,17 +752,23 @@ export const getHeadOwnRecentActivities = async (req, res) => {
     const merged = [
       ...activityLogs.map((row) => {
         const formatted = formatActivityLogRow(row, handledByMap, {});
+
         return {
           ...formatted,
+          source: "activity_log",
           created_at: row.created_at || row.createdAt || null,
+          activity_at: row.created_at || row.createdAt || null,
         };
       }),
 
       ...systemActivities.map((row) => {
         const formatted = formatSystemActivityRow(row, handledByMap);
+
         return {
           ...formatted,
+          source: "system_activity",
           created_at: row.created_at || row.createdAt || null,
+          activity_at: row.created_at || row.createdAt || null,
         };
       }),
     ]
@@ -686,6 +779,16 @@ export const getHeadOwnRecentActivities = async (req, res) => {
       success: true,
       message: "Head own recent activities fetched successfully",
       count: merged.length,
+      filters: {
+        limit: parsedLimit,
+        source: source || "all",
+        action: action || null,
+        module_name: module_name || null,
+        activity_type: activity_type || null,
+        date_from: date_from || null,
+        date_to: date_to || null,
+        search: search || null,
+      },
       data: merged,
     });
   } catch (error) {
@@ -694,6 +797,227 @@ export const getHeadOwnRecentActivities = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to fetch head own recent activities",
+      error: error.message,
+    });
+  }
+};
+/* =========================================================
+   STORE WISE RECENT ACTIVITIES
+   GET /api/activities/store?store_code=STR503&limit=10
+========================================================= */
+export const getStoreWiseRecentActivities = async (req, res) => {
+  try {
+    const {
+      store_code,
+      limit = 10,
+      source,
+      action,
+      module_name,
+      activity_type,
+      date_from,
+      date_to,
+      search,
+    } = req.query;
+
+    if (!store_code) {
+      return res.status(400).json({
+        success: false,
+        message: "store_code is required",
+      });
+    }
+
+    const parsedLimit = Math.max(1, Number(limit) || 10);
+
+    const { idField, storeCodeField } = getStoreFieldMap();
+
+    let store = null;
+
+    if (storeCodeField) {
+      store = await Store.findOne({
+        where: { [storeCodeField]: store_code },
+        raw: true,
+      });
+    }
+
+    if (!store) {
+      return res.status(404).json({
+        success: false,
+        message: "Store not found",
+      });
+    }
+
+    const storeId = idField ? Number(store[idField]) : null;
+    const storeMap = buildStoreMap([store]);
+
+    // ================= DATE FILTER =================
+    const activityDateWhere = {};
+    const systemDateWhere = {};
+
+    if (date_from || date_to) {
+      activityDateWhere.created_at = {};
+      systemDateWhere.created_at = {};
+
+      if (date_from) {
+        activityDateWhere.created_at[Op.gte] = new Date(date_from);
+        systemDateWhere.created_at[Op.gte] = new Date(date_from);
+      }
+
+      if (date_to) {
+        const endDate = new Date(date_to);
+        endDate.setHours(23, 59, 59, 999);
+
+        activityDateWhere.created_at[Op.lte] = endDate;
+        systemDateWhere.created_at[Op.lte] = endDate;
+      }
+    }
+
+    // ================= ACTIVITY LOG FILTER =================
+    const activityLogWhere = {
+      ...activityDateWhere,
+
+      [Op.and]: [
+        {
+          [Op.or]: [
+            ...(storeId ? [{ organization_id: storeId }] : []),
+
+            Sequelize.where(
+              Sequelize.cast(Sequelize.json("meta.store_code"), "TEXT"),
+              store_code
+            ),
+
+            ...(storeId
+              ? [
+                  Sequelize.where(
+                    Sequelize.cast(
+                      Sequelize.json("meta.organization_id"),
+                      "TEXT"
+                    ),
+                    String(storeId)
+                  ),
+                ]
+              : []),
+          ],
+        },
+
+        ...(action ? [{ action }] : []),
+        ...(module_name ? [{ module_name }] : []),
+
+        ...(search
+          ? [
+              {
+                [Op.or]: [
+                  { title: { [Op.iLike]: `%${search}%` } },
+                  { description: { [Op.iLike]: `%${search}%` } },
+                  { reference_no: { [Op.iLike]: `%${search}%` } },
+                ],
+              },
+            ]
+          : []),
+      ],
+    };
+
+    // ================= SYSTEM ACTIVITY FILTER =================
+    const systemActivityWhere = {
+      ...systemDateWhere,
+
+      [Op.and]: [
+        { store_code },
+
+        ...(activity_type ? [{ activity_type }] : []),
+        ...(module_name ? [{ module_name }] : []),
+
+        ...(search
+          ? [
+              {
+                [Op.or]: [
+                  { title: { [Op.iLike]: `%${search}%` } },
+                  { description: { [Op.iLike]: `%${search}%` } },
+                  { reference_no: { [Op.iLike]: `%${search}%` } },
+                  { store_code: { [Op.iLike]: `%${search}%` } },
+                  { store_name: { [Op.iLike]: `%${search}%` } },
+                ],
+              },
+            ]
+          : []),
+      ],
+    };
+
+    // ================= FETCH DATA =================
+    const [activityLogs, systemActivities] = await Promise.all([
+      source === "system_activity"
+        ? []
+        : ActivityLog.findAll({
+            where: activityLogWhere,
+            order: [["created_at", "DESC"]],
+            limit: parsedLimit * 3,
+            raw: true,
+          }),
+
+      source === "activity_log"
+        ? []
+        : SystemActivity.findAll({
+            where: systemActivityWhere,
+            order: [["created_at", "DESC"]],
+            limit: parsedLimit * 3,
+            raw: true,
+          }),
+    ]);
+
+    const handledByMap = await buildHandledByMap([
+      ...activityLogs.map((x) => x.user_id).filter(Boolean),
+      ...systemActivities.map((x) => x.created_by).filter(Boolean),
+    ]);
+
+    const merged = [
+      ...activityLogs.map((row) => {
+        const formatted = formatActivityLogRow(row, handledByMap, storeMap);
+
+        return {
+          ...formatted,
+          source: "activity_log",
+          created_at: row.created_at || row.createdAt || null,
+          updated_at: row.updated_at || row.updatedAt || null,
+          activity_at: row.created_at || row.createdAt || null,
+        };
+      }),
+
+      ...systemActivities.map((row) => {
+        const formatted = formatSystemActivityRow(row, handledByMap);
+
+        return {
+          ...formatted,
+          source: "system_activity",
+          created_at: row.created_at || row.createdAt || null,
+          activity_at: row.created_at || row.createdAt || null,
+        };
+      }),
+    ]
+      .sort((a, b) => new Date(b.activity_at) - new Date(a.activity_at))
+      .slice(0, parsedLimit);
+
+    return res.status(200).json({
+      success: true,
+      message: "Store wise recent activities fetched successfully",
+      count: merged.length,
+      filters: {
+        store_code,
+        limit: parsedLimit,
+        source: source || "all",
+        action: action || null,
+        module_name: module_name || null,
+        activity_type: activity_type || null,
+        date_from: date_from || null,
+        date_to: date_to || null,
+        search: search || null,
+      },
+      data: merged,
+    });
+  } catch (error) {
+    console.error("getStoreWiseRecentActivities error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch store wise recent activities",
       error: error.message,
     });
   }
