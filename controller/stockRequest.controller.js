@@ -6892,6 +6892,14 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
         });
       }
 
+      if (!sku_code || !String(sku_code).trim()) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `sku_code is required for item ${item_name}`,
+        });
+      }
+
       if (!isPositiveNumber(qty)) {
         await safeRollback();
         return res.status(400).json({
@@ -6972,79 +6980,149 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
         });
       }
 
-      // ================= ITEM MASTER HANDLING =================
-      let item = null;
-
-      if (row.item_id) {
-        item = await Item.findByPk(row.item_id, { transaction });
-      }
+      // ================= ITEM MASTER HANDLING BY SKU =================
+      const item = await Item.findOne({
+        where: {
+          sku_code: String(sku_code).trim(),
+          organization_id: user.organization_id,
+          is_active: true,
+        },
+        transaction,
+      });
 
       if (!item) {
-        if (!row.metal_type || !String(row.metal_type).trim()) {
-          await safeRollback();
-          return res.status(400).json({
-            success: false,
-            message: `metal_type is required for item ${item_name}`,
-          });
-        }
-
-        if (!row.category || !String(row.category).trim()) {
-          await safeRollback();
-          return res.status(400).json({
-            success: false,
-            message: `category is required for item ${item_name}`,
-          });
-        }
-
-        item = await Item.create(
-          {
-            article_code:
-              article_code ||
-              `ART-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-
-            sku_code: sku_code || null,
-
-            item_name: String(item_name).trim(),
-
-            metal_type: row.metal_type,
-            category: row.category,
-            subcategory: row.subcategory || "",
-
-            details: row.details || null,
-
-            purity: purity || "NA",
-
-            gross_weight: Number(row.gross_weight || weight || 0),
-
-            net_weight: Number(row.net_weight || weight || 0),
-
-            stone_weight: Number(row.stone_weight || 0),
-
-            stone_amount: Number(row.stone_amount || 0),
-
-            making_charge: Number(row.making_charge || rate || 0),
-
-            purchase_rate: Number(row.purchase_rate || 0),
-
-            sale_rate: Number(row.sale_rate || 0),
-
-            hsn_code: hsn_code || null,
-
-            unit: row.unit || "PCS",
-
-            organization_id: user.organization_id,
-
-            is_active: true,
-          },
-          { transaction }
-        );
+        await safeRollback();
+        return res.status(404).json({
+          success: false,
+          message: `Item with SKU ${sku_code} not found in your inventory`,
+        });
       }
+
+      // ================= CHECK OWN INVENTORY STOCK =================
+      const [stock] = await sequelize.query(
+        `
+        SELECT *
+        FROM stocks
+        WHERE item_id = :item_id
+        AND organization_id = :organization_id
+        FOR UPDATE
+        `,
+        {
+          replacements: {
+            item_id: item.id,
+            organization_id: user.organization_id,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+      if (!stock) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Stock not found for SKU ${sku_code}`,
+        });
+      }
+
+      if (Number(stock.available_qty || 0) < Number(qty)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock for SKU ${sku_code}. Available qty: ${stock.available_qty}`,
+        });
+      }
+
+      // ================= FIND AVAILABLE PARENT BATCH =================
+      const [parentBatch] = await sequelize.query(
+        `
+        SELECT 
+          id,
+          batch_no,
+          root_batch_id,
+          parent_batch_id,
+          item_id,
+          current_organization_id,
+          total_qty,
+          available_qty,
+          total_weight,
+          available_weight,
+          split_level,
+          status
+        FROM inventory_batches
+        WHERE item_id = :item_id
+        AND current_organization_id = :organization_id
+        AND COALESCE(available_qty, 0) >= :qty
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        FOR UPDATE
+        `,
+        {
+          replacements: {
+            item_id: item.id,
+            organization_id: user.organization_id,
+            qty: Number(qty),
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+      if (!parentBatch) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Available batch not found for SKU ${sku_code}`,
+        });
+      }
+
+      // ================= CREATE CHILD BATCH + BATCH SPLIT TRACKING =================
+      const childBatch = await InventoryTrackingService.distributeBatch(
+        {
+          parent_batch_id: parentBatch.id,
+          to_organization_id,
+          quantity: Number(qty),
+          weight: Number(weight || item.gross_weight || 0),
+          reference_type: "DISTRICT_TO_RETAIL_DIRECT_TRANSFER",
+          reference_id: transfer.id,
+          remarks: remarks || "District to retail direct transfer",
+          handled_by: user.id,
+        },
+        { transaction }
+      );
+
+      // ================= REDUCE STOCK INVENTORY AFTER TRANSFER =================
+      await sequelize.query(
+        `
+        UPDATE stocks
+        SET 
+          available_qty = available_qty - :qty,
+          transit_qty = COALESCE(transit_qty, 0) + :qty,
+          updated_at = NOW()
+        WHERE id = :stock_id
+        `,
+        {
+          replacements: {
+            qty: Number(qty),
+            stock_id: stock.id,
+          },
+          type: QueryTypes.UPDATE,
+          transaction,
+        }
+      );
 
       await StockTransferItem.create(
         {
           transfer_id: transfer.id,
 
           item_id: item.id,
+
+          batch_id: childBatch?.id || childBatch?.batch_id || null,
+          root_batch_id:
+            childBatch?.root_batch_id ||
+            parentBatch.root_batch_id ||
+            parentBatch.id,
+          parent_batch_id: parentBatch.id,
 
           qty: Number(qty),
 
@@ -7056,6 +7134,18 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
 
           external_item_data: {
             item_id: item.id,
+
+            parent_batch_id: parentBatch.id,
+            parent_batch_no: parentBatch.batch_no,
+
+            batch_id: childBatch?.id || childBatch?.batch_id || null,
+            batch_no: childBatch?.batch_no || null,
+
+            root_batch_id:
+              childBatch?.root_batch_id ||
+              parentBatch.root_batch_id ||
+              parentBatch.id,
+
             item_name: item.item_name,
             article_code: item.article_code,
             sku_code: item.sku_code,
