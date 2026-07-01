@@ -2,7 +2,9 @@ import express from "express";
 import {auth} from "../middlewares/authMiddleware.js";
 import {
   getDistrictOwnRecentActivities,
-  getHeadOwnRecentActivities,getRetailOwnRecentActivities
+  getHeadOwnRecentActivities,getRetailOwnRecentActivities,
+ getStoreWiseRecentActivities,
+
 } from "../controller/activityController.js";
 
 const router = express.Router();
@@ -23,5 +25,9 @@ router.get(
   auth,
   getRetailOwnRecentActivities
 );
-
+router.get(
+  "/store-wise",
+  auth,
+  getStoreWiseRecentActivities
+);
 export default router;
