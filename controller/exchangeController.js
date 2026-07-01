@@ -22,7 +22,7 @@ import StockMovement from "../model/stockmovement.js"
 import Item from "../model/item.js";
 import sequelize from "../config/db.js";
 import { emitBillingScan } from "../socket/billingSocket.js";
-import exchangeLogs from "../model/exchangemodel.js";
+import ExchangeLog from "../model/exchangemodel.js";
 // ==============================
 //  GET INVOICE FOR EXCHANGE
 // ==============================
