@@ -522,17 +522,17 @@ export const getOverallInventoryDashboard = async (req, res) => {
 
     // ✅ Agar store_code nahi diya aur organization_id bhi nahi diya,
     // to District + Retail stores ki combined inventory dikhao
-    if (!organization_id && !cleanStoreCode) {
-      whereClause += `
-        AND EXISTS (
-          SELECT 1
-          FROM stores st
-          WHERE st.store_code = s.store_code
-          AND st.organization_level::text IN ('District', 'Retail', 'district', 'retail')
-          AND st.is_active = true
-        )
-      `;
-    }
+    // if (!organization_id && !cleanStoreCode) {
+    //   whereClause += `
+    //     AND EXISTS (
+    //       SELECT 1
+    //       FROM stores st
+    //       WHERE st.store_code = s.store_code
+    //       AND st.organization_level::text IN ('District', 'Retail', 'district', 'retail')
+    //       AND st.is_active = true
+    //     )
+    //   `;
+    // }
 
     const [cards] = await sequelize.query(
       `
