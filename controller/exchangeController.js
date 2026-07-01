@@ -745,7 +745,6 @@ export const scanBillingItem = async (req, res) => {
       });
     }
 
-    // Verify QR / Barcode
     const qr = verifyQRPayload(rawCode);
 
     if (qr.isSecure && qr.valid === false) {
@@ -755,7 +754,6 @@ export const scanBillingItem = async (req, res) => {
       });
     }
 
-    // Organization validation
     if (
       qr.isSecure &&
       qr.organization_id &&
@@ -767,7 +765,6 @@ export const scanBillingItem = async (req, res) => {
       });
     }
 
-    // Item search condition
     const whereCondition = {
       organization_id: organizationId,
       current_status: "in_stock",
@@ -783,7 +780,6 @@ export const scanBillingItem = async (req, res) => {
       ];
     }
 
-    // Find Item
     const item = await Item.findOne({
       where: whereCondition,
     });
@@ -795,7 +791,6 @@ export const scanBillingItem = async (req, res) => {
       });
     }
 
-    // Find Stock
     const stock = await Stock.findOne({
       where: {
         item_id: item.id,
@@ -817,16 +812,37 @@ export const scanBillingItem = async (req, res) => {
       });
     }
 
-    // Price Calculation
+    // ================= PRICE CALCULATION =================
     const netWeight = toNumber(item.net_weight);
-    const rate = toNumber(item.sale_rate);
-    const makingPercent = toNumber(item.making_charge);
+    const saleRate = toNumber(item.sale_rate);
 
-    const metalValue = netWeight * rate;
-    const makingValue = (metalValue * makingPercent) / 100;
-    const totalAmount = metalValue + makingValue;
+    const sellingPrice = toNumber(
+      item.selling_price ||
+        item.total_value ||
+        item.sale_price ||
+        item.sale_rate ||
+        0
+    );
 
-    // Response Object
+    const oldMakingCharge = toNumber(
+      item.making_charge_value ||
+        item.making_charges ||
+        item.making_charge ||
+        0
+    );
+
+    const makingChargeValue = oldMakingCharge;
+    const makingChargeDeduction = 0;
+    const otherDiscount = 0;
+
+    const taxableAmount = sellingPrice + makingChargeValue;
+    const netTaxableAmount = taxableAmount - otherDiscount;
+
+    const gstPercent = 3;
+    const gstAmount = (netTaxableAmount * gstPercent) / 100;
+
+    const totalAmount = netTaxableAmount + gstAmount;
+
     const scannedItem = {
       item_id: item.id,
 
@@ -846,12 +862,25 @@ export const scanBillingItem = async (req, res) => {
       stone_weight: toNumber(item.stone_weight),
       stone_amount: toNumber(item.stone_amount),
 
-      rate,
+      rate: Number(saleRate.toFixed(2)),
       purchase_rate: toNumber(item.purchase_rate),
-      sale_rate: toNumber(item.sale_rate),
+      sale_rate: Number(saleRate.toFixed(2)),
 
-      making_charge_percent: makingPercent,
-      making_charge_value: Number(makingValue.toFixed(2)),
+      selling_price: Number(sellingPrice.toFixed(2)),
+
+      old_making_charge: Number(oldMakingCharge.toFixed(2)),
+      making_charge_value: Number(makingChargeValue.toFixed(2)),
+      making_charge_after_deduction: Number(makingChargeValue.toFixed(2)),
+      making_charge_deduction: Number(makingChargeDeduction.toFixed(2)),
+
+      other_discount: Number(otherDiscount.toFixed(2)),
+
+      taxable_amount: Number(taxableAmount.toFixed(2)),
+      net_taxable_amount: Number(netTaxableAmount.toFixed(2)),
+
+      gst_percent: Number(gstPercent.toFixed(2)),
+      gst_amount: Number(gstAmount.toFixed(2)),
+
       total_amount: Number(totalAmount.toFixed(2)),
 
       hsn_code: item.hsn_code,
