@@ -63,25 +63,27 @@ const corsOptions = {
     "http://localhost:3000",
     "http://localhost:5173",
     "https://erp-dash-board.vercel.app",
-    "https://erp-dash-board-stagging-iep5.vercel.app"
+    "https://erp-for-local.onrender.com"
   ],
 
-  methods: [
+   methods: [
     "GET",
     "POST",
     "PUT",
     "DELETE",
     "PATCH",
+    "OPTIONS",
   ],
 
   allowedHeaders: [
-    "Content-Type",
-    "Authorization",
-    "store_code",
-    "x-store-code",
-    "organization_id",
-    "x-organization-id",
-  ],
+  "Content-Type",
+  "Authorization",
+  "store_code",
+  "x-store-code",
+  "organization_id",
+  "x-organization-id",
+  "x-billing-session-id",
+],
 
   credentials: true,
 };
