@@ -26,7 +26,7 @@ import profile from "./routes/profileRoute.js";
 import ledger from "./routes/headladger.js";
 import itemTracker from "./routes/itemtracker.js";
 // import { getGoldRate } from "./service/goldService.js";
-
+import newAudit from "./routes/auditRoutes.js";
 import {
   getDashboardSummary,
 } from "./controller/dashboardController.js";
@@ -38,7 +38,7 @@ import {
 import {
   registerBillingSocket,
 } from "./socket/billingSocket.js";
-
+import { registerAuditSocket } from "./socket/auditSocket.js";
 dotenv.config();
 
 Sentry.init({
@@ -131,7 +131,7 @@ app.use("/stock", stock);
 
 app.use("/profile", Profile);
 
-app.use("/audit", Audit);
+app.use("/audit", newAudit);
 
 app.use("/District", District);
 
@@ -284,6 +284,7 @@ async function startServer() {
         );
 
         registerBillingSocket(socket);
+        registerAuditSocket(socket);
 
         socket.on(
           "join-transfer-tracking",
