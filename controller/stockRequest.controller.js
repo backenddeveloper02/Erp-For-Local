@@ -157,7 +157,7 @@ const uploadToCloudinary = async (
     folder,
     resource_type: resourceType,
 
-    // ✅ Important fix
+    //  Important fix
     type: "upload",
     access_mode: "public",
 
@@ -6096,9 +6096,7 @@ export const dispatchNewItemTransfer = async (req, res) => {
   const uploadedLocalPaths = [];
 
   const safeRollback = async () => {
-    if (!transaction.finished) {
-      await transaction.rollback();
-    }
+    if (!transaction.finished) await transaction.rollback();
   };
 
   const addLocalPath = (file) => {
@@ -6442,15 +6440,42 @@ export const dispatchNewItemTransfer = async (req, res) => {
         });
       }
 
-      // ================= FIX: ITEM MASTER HANDLING =================
       let item = null;
+      let isNewItem = false;
 
+      // =====================================================
+      // CASE 1: EXISTING HEAD INVENTORY ITEM
+      // item_id ya sku_code mila to Head inventory se item uthayega
+      // =====================================================
       if (row.item_id) {
-        item = await Item.findByPk(row.item_id, { transaction });
+        item = await Item.findOne({
+          where: {
+            id: row.item_id,
+            organization_id: user.organization_id,
+            is_active: true,
+          },
+          transaction,
+        });
       }
 
-      // If item doesn't exist → create new item
+      if (!item && sku_code) {
+        item = await Item.findOne({
+          where: {
+            sku_code: String(sku_code).trim(),
+            organization_id: user.organization_id,
+            is_active: true,
+          },
+          transaction,
+        });
+      }
+
+      // =====================================================
+      // CASE 2: BRAND NEW ITEM
+      // Agar Head inventory me item nahi mila to new item create hoga
+      // =====================================================
       if (!item) {
+        isNewItem = true;
+
         if (!row.metal_type || !String(row.metal_type).trim()) {
           await safeRollback();
           return res.status(400).json({
@@ -6473,7 +6498,9 @@ export const dispatchNewItemTransfer = async (req, res) => {
               article_code ||
               `ART-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
 
-            sku_code: sku_code || null,
+            sku_code:
+              sku_code ||
+              `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
 
             item_name: String(item_name).trim(),
 
@@ -6482,34 +6509,271 @@ export const dispatchNewItemTransfer = async (req, res) => {
             subcategory: row.subcategory || "",
 
             details: row.details || null,
-
             purity: purity || "NA",
 
             gross_weight: Number(row.gross_weight || weight || 0),
-
             net_weight: Number(row.net_weight || weight || 0),
-
             stone_weight: Number(row.stone_weight || 0),
-
             stone_amount: Number(row.stone_amount || 0),
 
             making_charge: Number(row.making_charge || rate || 0),
-
             purchase_rate: Number(row.purchase_rate || 0),
-
             sale_rate: Number(row.sale_rate || 0),
 
             hsn_code: hsn_code || null,
-
             unit: row.unit || "PCS",
 
             organization_id: user.organization_id,
+            storeCode: user.store_code || user.storeCode || null,
 
+            current_status: "in_stock",
             is_active: true,
           },
           { transaction }
         );
+
+        // ================= INSERT INTO HEAD STOCK =================
+        await sequelize.query(
+          `
+          INSERT INTO stocks (
+            item_id,
+            organization_id,
+            store_code,
+            available_qty,
+            available_weight,
+            reserved_qty,
+            reserved_weight,
+            transit_qty,
+            transit_weight,
+            damaged_qty,
+            damaged_weight,
+            dead_qty,
+            dead_weight,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            :item_id,
+            :organization_id,
+            :store_code,
+            :available_qty,
+            :available_weight,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            NOW(),
+            NOW()
+          )
+          `,
+          {
+            replacements: {
+              item_id: item.id,
+              organization_id: user.organization_id,
+              store_code: user.store_code || user.storeCode || null,
+              available_qty: Number(qty),
+              available_weight: Number(weight || item.gross_weight || 0),
+            },
+            type: QueryTypes.INSERT,
+            transaction,
+          }
+        );
+
+        // ================= CREATE ROOT BATCH FOR NEW ITEM =================
+        const batchNo = `BATCH-${Date.now()}-${Math.floor(
+          Math.random() * 1000
+        )}`;
+
+        const [createdBatch] = await sequelize.query(
+          `
+          INSERT INTO inventory_batches (
+            batch_no,
+            item_id,
+            root_batch_id,
+            parent_batch_id,
+            current_organization_id,
+            total_qty,
+            available_qty,
+            total_weight,
+            available_weight,
+            split_level,
+            status,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            :batch_no,
+            :item_id,
+            NULL,
+            NULL,
+            :current_organization_id,
+            :total_qty,
+            :available_qty,
+            :total_weight,
+            :available_weight,
+            0,
+            'available',
+            NOW(),
+            NOW()
+          )
+          RETURNING *
+          `,
+          {
+            replacements: {
+              batch_no: batchNo,
+              item_id: item.id,
+              current_organization_id: user.organization_id,
+              total_qty: Number(qty),
+              available_qty: Number(qty),
+              total_weight: Number(weight || item.gross_weight || 0),
+              available_weight: Number(weight || item.gross_weight || 0),
+            },
+            type: QueryTypes.SELECT,
+            transaction,
+          }
+        );
+
+        // root_batch_id same batch id update
+        await sequelize.query(
+          `
+          UPDATE inventory_batches
+          SET root_batch_id = :root_batch_id,
+              updated_at = NOW()
+          WHERE id = :batch_id
+          `,
+          {
+            replacements: {
+              root_batch_id: createdBatch.id,
+              batch_id: createdBatch.id,
+            },
+            type: QueryTypes.UPDATE,
+            transaction,
+          }
+        );
       }
+
+      // =====================================================
+      // AB EXISTING YA NEW DONO CASE ME HEAD STOCK SE DISPATCH
+      // Stock minus + batch split
+      // =====================================================
+
+      const [stock] = await sequelize.query(
+        `
+        SELECT *
+        FROM stocks
+        WHERE item_id = :item_id
+        AND organization_id = :organization_id
+        FOR UPDATE
+        `,
+        {
+          replacements: {
+            item_id: item.id,
+            organization_id: user.organization_id,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+      if (!stock) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Stock not found for item ${item.item_name}`,
+        });
+      }
+
+      if (Number(stock.available_qty || 0) < Number(qty)) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock for ${item.item_name}. Available qty: ${stock.available_qty}`,
+        });
+      }
+
+      const [parentBatch] = await sequelize.query(
+        `
+        SELECT 
+          id,
+          batch_no,
+          root_batch_id,
+          parent_batch_id,
+          item_id,
+          current_organization_id,
+          total_qty,
+          available_qty,
+          total_weight,
+          available_weight,
+          split_level,
+          status
+        FROM inventory_batches
+        WHERE item_id = :item_id
+        AND current_organization_id = :organization_id
+        AND COALESCE(available_qty, 0) >= :qty
+        ORDER BY created_at ASC, id ASC
+        LIMIT 1
+        FOR UPDATE
+        `,
+        {
+          replacements: {
+            item_id: item.id,
+            organization_id: user.organization_id,
+            qty: Number(qty),
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+      if (!parentBatch) {
+        await safeRollback();
+        return res.status(400).json({
+          success: false,
+          message: `Available batch not found for item ${item.item_name}`,
+        });
+      }
+
+      const childBatch = await InventoryTrackingService.distributeBatch(
+        {
+          parent_batch_id: parentBatch.id,
+          to_organization_id,
+          quantity: Number(qty),
+          weight: Number(weight || item.gross_weight || 0),
+          reference_type: isNewItem
+            ? "HEAD_NEW_ITEM_DIRECT_TRANSFER"
+            : "HEAD_EXISTING_ITEM_DIRECT_TRANSFER",
+          reference_id: transfer.id,
+          remarks: remarks || "Head inventory direct transfer",
+          handled_by: user.id,
+        },
+        { transaction }
+      );
+
+      await sequelize.query(
+        `
+        UPDATE stocks
+        SET 
+          available_qty = available_qty - :qty,
+          transit_qty = COALESCE(transit_qty, 0) + :qty,
+          available_weight = COALESCE(available_weight, 0) - :weight,
+          transit_weight = COALESCE(transit_weight, 0) + :weight,
+          updated_at = NOW()
+        WHERE id = :stock_id
+        `,
+        {
+          replacements: {
+            qty: Number(qty),
+            weight: Number(weight || item.gross_weight || 0),
+            stock_id: stock.id,
+          },
+          type: QueryTypes.UPDATE,
+          transaction,
+        }
+      );
 
       await StockTransferItem.create(
         {
@@ -6517,16 +6781,37 @@ export const dispatchNewItemTransfer = async (req, res) => {
 
           item_id: item.id,
 
+          batch_id: childBatch?.id || childBatch?.batch_id || null,
+          root_batch_id:
+            childBatch?.root_batch_id ||
+            parentBatch.root_batch_id ||
+            parentBatch.id,
+          parent_batch_id: parentBatch.id,
+
           qty: Number(qty),
-
           weight: Number(weight || item.gross_weight || 0),
-
           rate: Number(rate || item.sale_rate || 0),
 
           remarks: remarks || null,
 
           external_item_data: {
+            source_type: isNewItem
+              ? "brand_new_item"
+              : "existing_head_inventory",
+
             item_id: item.id,
+
+            parent_batch_id: parentBatch.id,
+            parent_batch_no: parentBatch.batch_no,
+
+            batch_id: childBatch?.id || childBatch?.batch_id || null,
+            batch_no: childBatch?.batch_no || null,
+
+            root_batch_id:
+              childBatch?.root_batch_id ||
+              parentBatch.root_batch_id ||
+              parentBatch.id,
+
             item_name: item.item_name,
             article_code: item.article_code,
             sku_code: item.sku_code,
@@ -6555,7 +6840,7 @@ export const dispatchNewItemTransfer = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "New item dispatched successfully",
+      message: "Head item dispatched successfully",
       data: {
         transfer_id: transfer.id,
         transfer_no: transfer.transfer_no,
