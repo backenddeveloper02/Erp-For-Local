@@ -4642,7 +4642,7 @@ export const createDistrictStockRequest = async (req, res) => {
         [Op.and]: [orgLevelTextLike("head")],
       };
     } else {
-      // ✅ retail ka existing flow same rakha hai
+      //  retail ka existing flow same rakha hai
       receiverWhere = {
         store_code: String(to_store_code).trim(),
         organization_level: "Retail",
@@ -6591,41 +6591,44 @@ export const dispatchNewItemTransfer = async (req, res) => {
         const [createdBatch] = await sequelize.query(
           `
           INSERT INTO inventory_batches (
-            batch_no,
-            item_id,
-            root_batch_id,
-            parent_batch_id,
-            current_organization_id,
-            total_qty,
-            available_qty,
-            total_weight,
-            available_weight,
-            split_level,
-            status,
-            created_at,
-            updated_at
-          )
-          VALUES (
-            :batch_no,
-            :item_id,
-            NULL,
-            NULL,
-            :current_organization_id,
-            :total_qty,
-            :available_qty,
-            :total_weight,
-            :available_weight,
-            0,
-            'available',
-            NOW(),
-            NOW()
-          )
-          RETURNING *
+  batch_no,
+  item_id,
+  root_batch_id,
+  parent_batch_id,
+  organization_id,
+  current_organization_id,
+  total_qty,
+  available_qty,
+  total_weight,
+  available_weight,
+  split_level,
+  status,
+  created_at,
+  updated_at
+)
+VALUES (
+  :batch_no,
+  :item_id,
+  NULL,
+  NULL,
+  :organization_id,
+  :current_organization_id,
+  :total_qty,
+  :available_qty,
+  :total_weight,
+  :available_weight,
+  0,
+  'created',
+  NOW(),
+  NOW()
+)
+RETURNING *
           `,
           {
             replacements: {
               batch_no: batchNo,
               item_id: item.id,
+               organization_id: user.organization_id,
               current_organization_id: user.organization_id,
               total_qty: Number(qty),
               available_qty: Number(qty),
