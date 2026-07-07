@@ -305,6 +305,39 @@ export const auditController = async (req, res) => {
         });
       }
 
+      // =====================================================
+      // 24 HOURS DUPLICATE AUDIT CHECK
+      // Same item audited within 24 hours => block
+      // After 24 hours => allow audit again
+      // =====================================================
+      const lastCompletedAuditItem = await InventoryAuditItem.findOne({
+        where: {
+          item_id: item.id,
+          audit_result: "present",
+        },
+        order: [["updated_at", "DESC"]],
+        transaction: t,
+      });
+
+      if (lastCompletedAuditItem) {
+        const lastAuditTime = new Date(
+          lastCompletedAuditItem.updated_at ||
+            lastCompletedAuditItem.created_at
+        );
+
+        const now = new Date();
+        const diffHours = (now - lastAuditTime) / (1000 * 60 * 60);
+
+        if (diffHours < 24) {
+          await t.rollback();
+
+          return res.status(400).json({
+            success: false,
+            message: "Item audit is already completed",
+          });
+        }
+      }
+
       const stock = Array.isArray(item.stocks) ? item.stocks[0] : null;
 
       const systemQty = safeNum(stock?.available_qty);
