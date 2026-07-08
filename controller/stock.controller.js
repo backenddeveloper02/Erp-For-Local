@@ -19,6 +19,7 @@ import { createActivityLog } from "../service/activity.service.js";
 import XLSX from "xlsx";
 import uploadToCloudinary from "../utils/uploadToCloudinary.js";
 import { InventoryTrackingService } from "../service/inventoryTracking.service.js";
+import CodeSequence from "../model/codeSequenceModel.js";
 /* =========================================================
    HELPERS
 ========================================================= */
@@ -1568,7 +1569,7 @@ export const stockSummary = async (req, res) => {
 
 /* =========================================================
    ADD STOCK IN
-========================================================= */
+====================================================== */
 /* =========================================================
    ADD STOCK IN
 ========================================================= */
@@ -1684,6 +1685,178 @@ const createStockInRootBatch = async (
   return rootBatchRows[0];
 };
 
+const normalizeCategory = (value) => {
+  if (!value) return value;
+
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .split(" ")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+};
+
+const cleanCodePart = (value, fallback = "GEN") => {
+  if (!value) return fallback;
+
+  return String(value)
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+};
+
+const getMonthYear = () => {
+  const now = new Date();
+
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const year = String(now.getFullYear());
+
+  return `${month}${year}`;
+};
+
+const getOrganizationPrefix = (user) => {
+  const level = String(
+    user?.organization_level || user?.role || ""
+  ).toLowerCase();
+
+  if (
+    level.includes("head") ||
+    level.includes("super_admin") ||
+    level.includes("super-admin")
+  ) {
+    return "HO";
+  }
+
+  if (level.includes("district")) {
+    return "HO-DIS";
+  }
+
+  if (level.includes("retail") || level.includes("store")) {
+    return "HO-DIS-RE";
+  }
+
+  return "HO";
+};
+
+const getNextSequenceNumber = async ({
+  organization_id,
+  organization_level,
+  store_code,
+  code_type,
+  category_code,
+  sub_category_code = "NA",
+  month_year = "NA",
+  transaction,
+}) => {
+  const where = {
+    organization_id,
+    code_type,
+    category_code,
+    sub_category_code,
+    month_year,
+  };
+
+  let sequence = await CodeSequence.findOne({
+    where,
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  if (!sequence) {
+    try {
+      sequence = await CodeSequence.create(
+        {
+          organization_id,
+          organization_level,
+          store_code,
+          code_type,
+          category_code,
+          sub_category_code,
+          month_year,
+          last_number: 0,
+        },
+        { transaction }
+      );
+    } catch (error) {
+      if (error?.name !== "SequelizeUniqueConstraintError") {
+        throw error;
+      }
+
+      sequence = await CodeSequence.findOne({
+        where,
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      if (!sequence) {
+        throw error;
+      }
+    }
+  }
+
+  const nextNumber = Number(sequence.last_number || 0) + 1;
+
+  await sequence.update(
+    {
+      last_number: nextNumber,
+    },
+    { transaction }
+  );
+
+  return nextNumber;
+};
+
+const generateArticleCode = async ({
+  user,
+  category,
+  transaction,
+}) => {
+  const prefix = getOrganizationPrefix(user);
+  const categoryCode = cleanCodePart(category, "GEN");
+
+  const serial = await getNextSequenceNumber({
+    organization_id: user.organization_id,
+    organization_level: user.organization_level,
+    store_code: user.store_code || user.storeCode || null,
+    code_type: "ARTICLE",
+    category_code: categoryCode,
+    sub_category_code: "NA",
+    month_year: "NA",
+    transaction,
+  });
+
+  return `${prefix}-${categoryCode}-${String(serial).padStart(4, "0")}`;
+};
+
+const generateSkuCode = async ({
+  user,
+  category,
+  sub_category,
+  transaction,
+}) => {
+  const prefix = getOrganizationPrefix(user);
+  const categoryCode = cleanCodePart(category, "GEN");
+  const subCategoryCode = cleanCodePart(sub_category, "SUB");
+  const monthYear = getMonthYear();
+
+  const serial = await getNextSequenceNumber({
+    organization_id: user.organization_id,
+    organization_level: user.organization_level,
+    store_code: user.store_code || user.storeCode || null,
+    code_type: "SKU",
+    category_code: categoryCode,
+    sub_category_code: subCategoryCode,
+    month_year: monthYear,
+    transaction,
+  });
+
+  return `${prefix}-${categoryCode}-${subCategoryCode}-${monthYear}-${String(
+    serial
+  ).padStart(3, "0")}`;
+};
+
 export const addStockIn = async (req, res) => {
   const t = await sequelize.transaction();
 
@@ -1693,18 +1866,6 @@ export const addStockIn = async (req, res) => {
       : JSON.parse(req.body.items || "[]");
 
     const user = req.user;
-
-    const normalizeCategory = (value) => {
-      if (!value) return value;
-
-      return String(value)
-        .trim()
-        .toLowerCase()
-        .split(" ")
-        .filter(Boolean)
-        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-        .join(" ");
-    };
 
     if (!user?.organization_id) {
       await t.rollback();
@@ -1734,9 +1895,9 @@ export const addStockIn = async (req, res) => {
       const {
         item_id,
         item_name,
-        item_code,
         metal_type,
         category,
+        sub_category,
         qty = 1,
         purchase_price = 0,
         selling_price = 0,
@@ -1748,6 +1909,13 @@ export const addStockIn = async (req, res) => {
       } = body;
 
       const normalizedCategory = normalizeCategory(category);
+
+      const finalSubCategory =
+        sub_category ||
+        body.subCategory ||
+        body.sub_category_name ||
+        metal_type ||
+        normalizedCategory;
 
       const incomingQty = Number(qty);
       const incomingWeight = Number(net_weight);
@@ -1814,17 +1982,23 @@ export const addStockIn = async (req, res) => {
           });
         }
 
-        const articleCode =
-          item_code ||
-          `ART-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const articleCode = await generateArticleCode({
+          user,
+          category: normalizedCategory,
+          transaction: t,
+        });
 
-        const skuCode =
-          item_code ||
-          `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const skuCode = await generateSkuCode({
+          user,
+          category: normalizedCategory,
+          sub_category: finalSubCategory,
+          transaction: t,
+        });
 
         item = await Item.create(
           {
             item_name: String(item_name).trim(),
+
             article_code: articleCode,
             sku_code: skuCode,
 
@@ -2011,6 +2185,8 @@ export const addStockIn = async (req, res) => {
         description: `${item.item_name} stock inward completed`,
         metadata: {
           item_id: item.id,
+          article_code: item.article_code,
+          sku_code: item.sku_code,
           stock_id: stock.id,
           movement_id: movement.id,
           batch_id: batch.id,
@@ -2030,6 +2206,8 @@ export const addStockIn = async (req, res) => {
           description: `${item.item_name} inward stock added`,
           metadata: {
             item_id: item.id,
+            article_code: item.article_code,
+            sku_code: item.sku_code,
             stock_id: stock.id,
             movement_id: movement.id,
             batch_id: batch.id,
