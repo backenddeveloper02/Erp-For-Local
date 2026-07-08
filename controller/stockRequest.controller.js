@@ -2822,6 +2822,7 @@ export const approveAndDispatchRequest = async (req, res) => {
 // ==========================================
 // STORE -> RECEIVE TRANSFER
 // ==========================================
+
 export const receiveTransfer = async (req, res) => {
   const transaction = await sequelize.transaction();
 
@@ -2829,6 +2830,10 @@ export const receiveTransfer = async (req, res) => {
     const { transferId } = req.params;
     const { remarks } = req.body;
     const user = req.user;
+
+    const receiverStoreCode = String(user.store_code || user.storeCode || "")
+      .trim()
+      .toUpperCase();
 
     const transfer = await StockTransfer.findByPk(transferId, {
       transaction,
@@ -2870,6 +2875,7 @@ export const receiveTransfer = async (req, res) => {
       const qty = toNumber(trItem.qty);
       const weight = toNumber(trItem.weight);
 
+      // ================= SOURCE STOCK =================
       const sourceStock = await getOrCreateStock(
         transfer.from_organization_id,
         item_id,
@@ -2924,10 +2930,12 @@ export const receiveTransfer = async (req, res) => {
         transaction,
       });
 
+      // ================= DESTINATION STOCK =================
       const destinationStock = await getOrCreateStock(
         transfer.to_organization_id,
         item_id,
-        transaction
+        transaction,
+        receiverStoreCode
       );
 
       const destinationBefore = {
@@ -2944,9 +2952,40 @@ export const receiveTransfer = async (req, res) => {
       await destinationStock.update(
         {
           available_qty: toNumber(destinationStock.available_qty) + qty,
-          available_weight: toNumber(destinationStock.available_weight) + weight,
+          available_weight:
+            toNumber(destinationStock.available_weight) + weight,
+          store_code: receiverStoreCode || destinationStock.store_code || null,
         },
         { transaction }
+      );
+
+      // ================= IMPORTANT FIX =================
+      // item ko receiver organization/store me visible karne ke liye
+      await Item.update(
+        {
+          organization_id: transfer.to_organization_id,
+          storeCode: receiverStoreCode || null,
+          current_status: "in_stock",
+        },
+        {
+          where: { id: item_id },
+          transaction,
+        }
+      );
+
+      // ================= BATCH UPDATE =================
+      // agar batches use ho rahe hain to received item ka batch bhi receiver org me shift hoga
+      await InventoryBatch.update(
+        {
+          current_organization_id: transfer.to_organization_id,
+          status: "delivered",
+        },
+        {
+          where: {
+            item_id,
+          },
+          transaction,
+        }
       );
 
       const destinationAfter = {
@@ -3002,7 +3041,6 @@ export const receiveTransfer = async (req, res) => {
       }
     }
 
-    // ================= SYSTEM ACTIVITY =================
     await SystemActivity.create(
       {
         title: "Stock transfer received",
@@ -3012,7 +3050,7 @@ export const receiveTransfer = async (req, res) => {
         reference_id: transfer.id,
         reference_no: transfer.transfer_no,
         district_code: user.district_code || null,
-        store_code: user.store_code || null,
+        store_code: receiverStoreCode || null,
         store_name: user.store_name || null,
         created_by: user.id,
         created_at: new Date(),
@@ -3020,7 +3058,6 @@ export const receiveTransfer = async (req, res) => {
       { transaction }
     );
 
-    // ================= ACTIVITY LOG =================
     await ActivityLog.create(
       {
         organization_id: user.organization_id || null,
@@ -3036,6 +3073,7 @@ export const receiveTransfer = async (req, res) => {
           transfer_no: transfer.transfer_no,
           from_organization_id: transfer.from_organization_id,
           to_organization_id: transfer.to_organization_id,
+          store_code: receiverStoreCode || null,
           status: "received",
           remarks: remarks || null,
         },
@@ -3054,6 +3092,9 @@ export const receiveTransfer = async (req, res) => {
     });
   } catch (error) {
     await transaction.rollback();
+
+    console.error("receiveTransfer error:", error);
+
     return res.status(500).json({
       success: false,
       message: "Failed to receive transfer",
@@ -3061,7 +3102,6 @@ export const receiveTransfer = async (req, res) => {
     });
   }
 };
-
 
 
 const pickStoreName = (store) => {
