@@ -17,6 +17,7 @@ import cloudinary from "../utils/cloudinary.js";
 import User from "../model/user.js";
 import { generateDeliveryChallanPdf } from "../service/deliveryChallan.helper.js";
 import { InventoryTrackingService } from "../service/inventoryTracking.service.js";
+import InventoryBatch from "../model/inventoryBatch.js";
 
 // import Store from "../model/Store.js";
 // import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
@@ -3278,17 +3279,19 @@ const buildTransferResponse = (
           plain.driver_photo_url || null,
       },
 
-      media: {
-        dispatch_image_url:
-          plain.dispatch_image_url ||
-          null,
-        dispatch_video_url:
-          plain.dispatch_video_url ||
-          null,
-        receive_image_url:
-          plain.receive_image_url ||
-          null,
-      },
+    media: {
+  dispatch_image_url:
+    plain.dispatch_image_url || null,
+
+  dispatch_video_url:
+    plain.dispatch_video_url || null,
+
+  receive_image_url:
+    plain.receive_image_url || null,
+
+  e_way_bill_url:
+    plain.e_way_bill_url || null,
+},
 
       created_at: plain.created_at,
       updated_at: plain.updated_at,
