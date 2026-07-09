@@ -770,7 +770,7 @@ export const getAllReports = async (req, res) => {
     // =====================================================
     // METAL RATES - ONLY ADDED FOR DISTRICT REPORT DASHBOARD
     // =====================================================
-    // ✅ ONLY MODIFIED: DB metal_rates ki jagah live Head Dashboard wali value
+    //  ONLY MODIFIED: DB metal_rates ki jagah live Head Dashboard wali value
     const { goldPrice, silverPrice } = await getLiveGoldSilverPrice();
 
     const s = salesSummary[0] || {};
@@ -783,56 +783,83 @@ export const getAllReports = async (req, res) => {
       totalCashReceived: num(p.total_cash_received),
       accountTransfer: num(p.account_transfer),
 
-      // ✅ ONLY MODIFIED
+      //  ONLY MODIFIED
       gold_price: goldPrice,
       silver_price: silverPrice,
     };
 
     // =====================================================
-    // LAST 7 DAYS CASH FLOW
-    // =====================================================
-    const labels = getLast7DaysLabelsIndia();
-    const startDate = labels[0].fullDate;
-    const endDate = labels[labels.length - 1].fullDate;
+// LAST 7 DAYS CASH FLOW
+// =====================================================
+const labels = getLast7DaysLabelsIndia();
+const startDate = labels[0].fullDate;
+const endDate = labels[labels.length - 1].fullDate;
 
-    // replace only cashRaw + cashVsAccount block
-    const cashRaw = await sequelize.query(
-      `
-      SELECT
-        DATE(inv.invoice_date AT TIME ZONE 'Asia/Kolkata') AS date,
-        COALESCE(SUM(inv.received_amount),0) AS cash,
-        COALESCE(SUM(inv.pending_amount),0) AS pending,
-        COALESCE(SUM(inv.total_amount),0) AS total
-      FROM invoices inv
-      WHERE DATE(inv.invoice_date AT TIME ZONE 'Asia/Kolkata')
+const cashRaw = await sequelize.query(
+  `
+  SELECT
+      DATE(inv.invoice_date AT TIME ZONE 'Asia/Kolkata') AS date,
+
+      COALESCE(
+          SUM(
+              CASE
+                  WHEN UPPER(pay.payment_method) = 'CASH'
+                  THEN pay.amount
+                  ELSE 0
+              END
+          ),
+      0) AS cash,
+
+      COALESCE(
+          SUM(
+              CASE
+                  WHEN pay.payment_method IS NOT NULL
+                       AND UPPER(pay.payment_method) <> 'CASH'
+                  THEN pay.amount
+                  ELSE 0
+              END
+          ),
+      0) AS account_transfer,
+
+      COALESCE(SUM(inv.pending_amount),0) AS pending,
+      COALESCE(SUM(inv.total_amount),0) AS total
+
+  FROM invoices inv
+
+  LEFT JOIN payments pay
+      ON pay.invoice_id = inv.id
+
+  WHERE DATE(inv.invoice_date AT TIME ZONE 'Asia/Kolkata')
         BETWEEN :startDate AND :endDate
-      ${invoiceWhere}
-      GROUP BY DATE(inv.invoice_date AT TIME ZONE 'Asia/Kolkata')
-      ORDER BY DATE(inv.invoice_date AT TIME ZONE 'Asia/Kolkata')
-      `,
-      {
-        replacements: {
-          ...replacements,
-          startDate,
-          endDate,
-        },
-        type: QueryTypes.SELECT,
-      }
-    );
+        ${invoiceWhere}
 
-    const cashMap = new Map(cashRaw.map((r) => [String(r.date), r]));
+  GROUP BY DATE(inv.invoice_date AT TIME ZONE 'Asia/Kolkata')
+  ORDER BY DATE(inv.invoice_date AT TIME ZONE 'Asia/Kolkata')
+  `,
+  {
+    replacements: {
+      ...replacements,
+      startDate,
+      endDate,
+    },
+    type: QueryTypes.SELECT,
+  }
+);
 
-    const cashVsAccount = labels.map((d) => {
-      const row = cashMap.get(d.fullDate) || {};
+const cashMap = new Map(cashRaw.map((r) => [String(r.date), r]));
 
-      return {
-        date: d.fullDate,
-        day: d.label,
-        cash: num(row.cash),
-        pending: num(row.pending),
-        total: num(row.total),
-      };
-    });
+const cashVsAccount = labels.map((d) => {
+  const row = cashMap.get(d.fullDate) || {};
+
+  return {
+    date: d.fullDate,
+    day: d.label,
+    cash: num(row.cash),
+    accountTransfer: num(row.account_transfer),
+    pending: num(row.pending),
+    total: num(row.total),
+  };
+});
 
     // =====================================================
     // CATEGORY SALES FROM STOCK_MOVEMENTS
