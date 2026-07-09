@@ -604,6 +604,7 @@ export const getRetailOwnRecentActivities = async (req, res) => {
 export const getHeadOwnRecentActivities = async (req, res) => {
   try {
     const {
+      page = 1,
       limit = 10,
       source,
       action,
@@ -614,7 +615,9 @@ export const getHeadOwnRecentActivities = async (req, res) => {
       search,
     } = req.query;
 
+    const parsedPage = Math.max(1, Number(page) || 1);
     const parsedLimit = Math.max(1, Number(limit) || 10);
+
     const user = req.user;
 
     if (!user?.organization_id) {
@@ -627,7 +630,6 @@ export const getHeadOwnRecentActivities = async (req, res) => {
     const orgId = user.organization_id;
     const storeCode = user.store_code || user.storeCode;
 
-    // ================= DATE FILTER =================
     const activityDateWhere = {};
     const systemDateWhere = {};
 
@@ -649,7 +651,6 @@ export const getHeadOwnRecentActivities = async (req, res) => {
       }
     }
 
-    // ================= ACTIVITY LOG FILTER =================
     const activityLogWhere = {
       ...activityDateWhere,
 
@@ -692,7 +693,6 @@ export const getHeadOwnRecentActivities = async (req, res) => {
       ],
     };
 
-    // ================= SYSTEM ACTIVITY FILTER =================
     const systemActivityWhere = {
       ...systemDateWhere,
 
@@ -723,14 +723,12 @@ export const getHeadOwnRecentActivities = async (req, res) => {
       ],
     };
 
-    // ================= FETCH DATA =================
     const [activityLogs, systemActivities] = await Promise.all([
       source === "system_activity"
         ? []
         : ActivityLog.findAll({
             where: activityLogWhere,
             order: [["created_at", "DESC"]],
-            limit: parsedLimit * 3,
             raw: true,
           }),
 
@@ -739,7 +737,6 @@ export const getHeadOwnRecentActivities = async (req, res) => {
         : SystemActivity.findAll({
             where: systemActivityWhere,
             order: [["created_at", "DESC"]],
-            limit: parsedLimit * 3,
             raw: true,
           }),
     ]);
@@ -749,7 +746,7 @@ export const getHeadOwnRecentActivities = async (req, res) => {
       ...systemActivities.map((x) => x.created_by).filter(Boolean),
     ]);
 
-    const merged = [
+    const allMerged = [
       ...activityLogs.map((row) => {
         const formatted = formatActivityLogRow(row, handledByMap, {});
 
@@ -771,15 +768,32 @@ export const getHeadOwnRecentActivities = async (req, res) => {
           activity_at: row.created_at || row.createdAt || null,
         };
       }),
-    ]
-      .sort((a, b) => new Date(b.activity_at) - new Date(a.activity_at))
-      .slice(0, parsedLimit);
+    ].sort((a, b) => new Date(b.activity_at) - new Date(a.activity_at));
+
+    const totalRecords = allMerged.length;
+    const totalPages = Math.ceil(totalRecords / parsedLimit) || 0;
+
+    const offset = (parsedPage - 1) * parsedLimit;
+
+    const paginatedData = allMerged.slice(offset, offset + parsedLimit);
 
     return res.status(200).json({
       success: true,
       message: "Head own recent activities fetched successfully",
-      count: merged.length,
+
+      count: paginatedData.length,
+
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total_records: totalRecords,
+        total_pages: totalPages,
+        has_next_page: parsedPage < totalPages,
+        has_previous_page: parsedPage > 1,
+      },
+
       filters: {
+        page: parsedPage,
         limit: parsedLimit,
         source: source || "all",
         action: action || null,
@@ -789,7 +803,8 @@ export const getHeadOwnRecentActivities = async (req, res) => {
         date_to: date_to || null,
         search: search || null,
       },
-      data: merged,
+
+      data: paginatedData,
     });
   } catch (error) {
     console.error("getHeadOwnRecentActivities error:", error);
@@ -809,6 +824,7 @@ export const getStoreWiseRecentActivities = async (req, res) => {
   try {
     const {
       store_code,
+      page = 1,
       limit = 10,
       source,
       action,
@@ -826,7 +842,9 @@ export const getStoreWiseRecentActivities = async (req, res) => {
       });
     }
 
+    const parsedPage = Math.max(1, Number(page) || 1);
     const parsedLimit = Math.max(1, Number(limit) || 10);
+    const offset = (parsedPage - 1) * parsedLimit;
 
     const { idField, storeCodeField } = getStoreFieldMap();
 
@@ -849,7 +867,6 @@ export const getStoreWiseRecentActivities = async (req, res) => {
     const storeId = idField ? Number(store[idField]) : null;
     const storeMap = buildStoreMap([store]);
 
-    // ================= DATE FILTER =================
     const activityDateWhere = {};
     const systemDateWhere = {};
 
@@ -871,7 +888,6 @@ export const getStoreWiseRecentActivities = async (req, res) => {
       }
     }
 
-    // ================= ACTIVITY LOG FILTER =================
     const activityLogWhere = {
       ...activityDateWhere,
 
@@ -916,7 +932,6 @@ export const getStoreWiseRecentActivities = async (req, res) => {
       ],
     };
 
-    // ================= SYSTEM ACTIVITY FILTER =================
     const systemActivityWhere = {
       ...systemDateWhere,
 
@@ -942,14 +957,12 @@ export const getStoreWiseRecentActivities = async (req, res) => {
       ],
     };
 
-    // ================= FETCH DATA =================
     const [activityLogs, systemActivities] = await Promise.all([
       source === "system_activity"
         ? []
         : ActivityLog.findAll({
             where: activityLogWhere,
             order: [["created_at", "DESC"]],
-            limit: parsedLimit * 3,
             raw: true,
           }),
 
@@ -958,7 +971,6 @@ export const getStoreWiseRecentActivities = async (req, res) => {
         : SystemActivity.findAll({
             where: systemActivityWhere,
             order: [["created_at", "DESC"]],
-            limit: parsedLimit * 3,
             raw: true,
           }),
     ]);
@@ -968,7 +980,7 @@ export const getStoreWiseRecentActivities = async (req, res) => {
       ...systemActivities.map((x) => x.created_by).filter(Boolean),
     ]);
 
-    const merged = [
+    const allMerged = [
       ...activityLogs.map((row) => {
         const formatted = formatActivityLogRow(row, handledByMap, storeMap);
 
@@ -991,16 +1003,31 @@ export const getStoreWiseRecentActivities = async (req, res) => {
           activity_at: row.created_at || row.createdAt || null,
         };
       }),
-    ]
-      .sort((a, b) => new Date(b.activity_at) - new Date(a.activity_at))
-      .slice(0, parsedLimit);
+    ].sort((a, b) => new Date(b.activity_at) - new Date(a.activity_at));
+
+    const totalRecords = allMerged.length;
+    const totalPages = Math.ceil(totalRecords / parsedLimit) || 0;
+
+    const paginatedData = allMerged.slice(offset, offset + parsedLimit);
 
     return res.status(200).json({
       success: true,
       message: "Store wise recent activities fetched successfully",
-      count: merged.length,
+
+      count: paginatedData.length,
+
+      pagination: {
+        page: parsedPage,
+        limit: parsedLimit,
+        total_records: totalRecords,
+        total_pages: totalPages,
+        has_next_page: parsedPage < totalPages,
+        has_previous_page: parsedPage > 1,
+      },
+
       filters: {
         store_code,
+        page: parsedPage,
         limit: parsedLimit,
         source: source || "all",
         action: action || null,
@@ -1010,7 +1037,8 @@ export const getStoreWiseRecentActivities = async (req, res) => {
         date_to: date_to || null,
         search: search || null,
       },
-      data: merged,
+
+      data: paginatedData,
     });
   } catch (error) {
     console.error("getStoreWiseRecentActivities error:", error);
