@@ -85,6 +85,10 @@ export const getRetailInventory = async (req, res) => {
       limit = 1000,
     } = req.query;
 
+    // =====================================================
+    // AUTHENTICATION
+    // =====================================================
+
     if (!user?.role) {
       return res.status(401).json({
         success: false,
@@ -92,16 +96,13 @@ export const getRetailInventory = async (req, res) => {
       });
     }
 
-    const itemWhere = {};
-    const stockWhere = {};
+    const role = String(user.role || "")
+      .trim()
+      .toLowerCase();
 
-    const role = String(user.role || "").toLowerCase();
-
-    // =================================================
-    // ACCESS FILTER - LOGIN USER KE HISAAB SE
-    // =================================================
-
-    const cleanStoreCode = String(user.store_code || user.storeCode || "")
+    const cleanStoreCode = String(
+      user.store_code || user.storeCode || ""
+    )
       .trim()
       .toUpperCase();
 
@@ -112,64 +113,84 @@ export const getRetailInventory = async (req, res) => {
       });
     }
 
+    // =====================================================
+    // PAGINATION
+    // Pagination final category cards par lagegi
+    // =====================================================
+
+    const pageNumber = Math.max(Number(page) || 1, 1);
+    const pageLimit = Math.max(Number(limit) || 1000, 1);
+    const offset = (pageNumber - 1) * pageLimit;
+
+    // =====================================================
+    // ITEM AND STOCK FILTERS
+    // =====================================================
+
+    const itemWhere = {};
+    const stockWhere = {};
+
     if (role !== "super_admin") {
       itemWhere.storeCode = cleanStoreCode;
       stockWhere.store_code = cleanStoreCode;
     }
 
-    // =================================================
-    // FILTERS
-    // =================================================
-
     if (category) {
-      itemWhere.category = category;
+      itemWhere.category = {
+        [Op.iLike]: String(category).trim(),
+      };
     }
 
     if (metal_type) {
-      itemWhere.metal_type = metal_type;
+      itemWhere.metal_type = {
+        [Op.iLike]: String(metal_type).trim(),
+      };
     }
 
     if (search) {
+      const cleanSearch = String(search).trim();
+
       itemWhere[Op.or] = [
         {
           item_name: {
-            [Op.iLike]: `%${search}%`,
+            [Op.iLike]: `%${cleanSearch}%`,
           },
         },
-
         {
           article_code: {
-            [Op.iLike]: `%${search}%`,
+            [Op.iLike]: `%${cleanSearch}%`,
           },
         },
-
         {
           sku_code: {
-            [Op.iLike]: `%${search}%`,
+            [Op.iLike]: `%${cleanSearch}%`,
           },
         },
-
+        {
+          category: {
+            [Op.iLike]: `%${cleanSearch}%`,
+          },
+        },
+        {
+          metal_type: {
+            [Op.iLike]: `%${cleanSearch}%`,
+          },
+        },
         {
           purity: {
-            [Op.iLike]: `%${search}%`,
+            [Op.iLike]: `%${cleanSearch}%`,
           },
         },
       ];
     }
 
-    // =================================================
-    // PAGINATION
-    // =================================================
-
-    const pageNumber = Number(page) || 1;
-
-    const pageLimit = Number(limit) || 1000;
-
-    const offset = (pageNumber - 1) * pageLimit;
-
-    // =================================================
-    // FETCH ITEMS
-    // =================================================
+    // =====================================================
+    // FETCH ALL MATCHING ITEMS
+    //
+    // Yahan limit aur offset nahi lagaya gaya hai.
+    // Pehle saare matching items fetch honge.
+    // Uske baad category-wise grouping hogi.
+    // Finally grouped category cards par pagination lagegi.
+    // =====================================================
 
     const items = await Item.findAll({
       where: itemWhere,
@@ -197,14 +218,15 @@ export const getRetailInventory = async (req, res) => {
       include: [
         {
           model: Stock,
-
           as: "stocks",
 
-          // IMPORTANT FIX
-          // quantity 0 / empty stock items bhi aayenge
+          // Zero quantity aur without-stock items bhi response me aa sakte hain
           required: false,
 
-          where: Object.keys(stockWhere).length ? stockWhere : undefined,
+          where:
+            Object.keys(stockWhere).length > 0
+              ? stockWhere
+              : undefined,
 
           attributes: [
             "id",
@@ -224,150 +246,321 @@ export const getRetailInventory = async (req, res) => {
 
       order: [["id", "DESC"]],
 
-      limit: pageLimit,
-
-      offset,
-
+      // Important:
+      // Individual items par pagination nahi lagegi
       subQuery: false,
+
+      distinct: true,
     });
 
-    // =================================================
-    // SUMMARY
-    // =================================================
+    // =====================================================
+    // BATCH INFORMATION
+    // =====================================================
 
-    let transitGoods = 0;
-    let lowStock = 0;
-
-    //  IMPORTANT FIX
-    // all category items count honge
-    const categoryCounts = {};
-
-    //  IMPORTANT FIX
-    // category ke andar jitne bhi same category items hain
-    // unki total available quantity yaha sum hogi
-    const categoryQuantityMap = {};
-
-    items.forEach((item) => {
-      const key = item.category || "Others";
-
-      const categoryKey = String(item.category || "Others")
-        .trim()
-        .toLowerCase();
-
-      const stocks = Array.isArray(item.stocks) ? item.stocks : [];
-
-      const available_qty = stocks.reduce(
-        (sum, s) => sum + Number(s.available_qty || 0),
-        0
-      );
-
-      categoryCounts[key] = (categoryCounts[key] || 0) + 1;
-
-      categoryQuantityMap[categoryKey] =
-        (categoryQuantityMap[categoryKey] || 0) + available_qty;
-    });
-
-    // =================================================
-    // SUMMARY COUNTS ORIGINAL ITEMS SE CALCULATE HONGE
-    // =================================================
-
-    items.forEach((item) => {
-      const stocks = Array.isArray(item.stocks) ? item.stocks : [];
-
-      const available_qty = stocks.reduce(
-        (sum, s) => sum + Number(s.available_qty || 0),
-        0
-      );
-
-      const transit_qty = stocks.reduce(
-        (sum, s) => sum + Number(s.transit_qty || 0),
-        0
-      );
-
-      transitGoods += transit_qty;
-
-      if (available_qty > 0 && available_qty <= 5) {
-        lowStock++;
-      }
-    });
-
-    // =================================================
-    //  CATEGORY DUPLICACY REMOVE ONLY FOR RESPONSE DATA
-    // =================================================
-
-    const seenCategories = new Set();
-
-    const filteredItems = items.filter((item) => {
-      const categoryKey = String(item.category || "Others")
-        .trim()
-        .toLowerCase();
-
-      if (seenCategories.has(categoryKey)) {
-        return false;
-      }
-
-      seenCategories.add(categoryKey);
-      return true;
-    });
+    const itemIds = items.map((item) => Number(item.id));
 
     const batchMap = {};
 
-    const batches = await sequelize.query(
-      `
-      SELECT
-        item_id,
-        id AS parent_batch_id,
-        root_batch_id,
-        batch_no
-      FROM inventory_batches
-      WHERE
-        parent_batch_id IS NULL
-        OR parent_batch_id = root_batch_id
-      `,
-      {
-        type: sequelize.QueryTypes.SELECT,
-      }
-    );
+    if (itemIds.length > 0) {
+      const batches = await sequelize.query(
+        `
+          SELECT DISTINCT ON (ib.item_id)
+            ib.item_id,
+            ib.id AS batch_id,
+            ib.parent_batch_id,
+            ib.root_batch_id,
+            ib.batch_no
+          FROM inventory_batches ib
+          WHERE ib.item_id IN (:item_ids)
+          ORDER BY
+            ib.item_id,
+            CASE
+              WHEN ib.parent_batch_id IS NULL THEN 0
+              ELSE 1
+            END,
+            ib.id DESC
+        `,
+        {
+          replacements: {
+            item_ids: itemIds,
+          },
+          type: sequelize.QueryTypes.SELECT,
+        }
+      );
 
-    for (const batch of batches) {
-      if (!batchMap[batch.item_id]) {
-        batchMap[batch.item_id] = batch;
+      for (const batch of batches) {
+        batchMap[Number(batch.item_id)] = {
+          batch_id: batch.batch_id
+            ? Number(batch.batch_id)
+            : null,
+
+          parent_batch_id: batch.parent_batch_id
+            ? Number(batch.parent_batch_id)
+            : null,
+
+          root_batch_id: batch.root_batch_id
+            ? Number(batch.root_batch_id)
+            : null,
+
+          batch_no: batch.batch_no || null,
+        };
       }
     }
 
-    const data = filteredItems.map((item) => {
-      const stocks = Array.isArray(item.stocks) ? item.stocks : [];
+    // =====================================================
+    // CATEGORY-WISE AGGREGATION
+    //
+    // Ek category ke jitne items aur stock rows hain,
+    // unki quantity ek hi category card me add hogi.
+    // =====================================================
 
-      const available_qty = stocks.reduce(
-        (sum, s) => sum + Number(s.available_qty || 0),
+    const categoryMap = new Map();
+
+    let lowStockItems = 0;
+    let transitGoods = 0;
+
+    for (const item of items) {
+      const stocks = Array.isArray(item.stocks)
+        ? item.stocks
+        : [];
+
+      // -----------------------------------------------------
+      // Current individual item stock totals
+      // -----------------------------------------------------
+
+      const itemAvailableQty = stocks.reduce(
+        (sum, stock) =>
+          sum + Number(stock.available_qty || 0),
         0
       );
 
-      const available_weight = stocks.reduce(
-        (sum, s) => sum + Number(s.available_weight || 0),
+      const itemAvailableWeight = stocks.reduce(
+        (sum, stock) =>
+          sum + Number(stock.available_weight || 0),
         0
       );
 
-      const reserved_qty = stocks.reduce(
-        (sum, s) => sum + Number(s.reserved_qty || 0),
+      const itemReservedQty = stocks.reduce(
+        (sum, stock) =>
+          sum + Number(stock.reserved_qty || 0),
         0
       );
 
-      const transit_qty = stocks.reduce(
-        (sum, s) => sum + Number(s.transit_qty || 0),
+      const itemReservedWeight = stocks.reduce(
+        (sum, stock) =>
+          sum + Number(stock.reserved_weight || 0),
         0
       );
 
-      const dead_qty = stocks.reduce(
-        (sum, s) => sum + Number(s.dead_qty || 0),
+      const itemTransitQty = stocks.reduce(
+        (sum, stock) =>
+          sum + Number(stock.transit_qty || 0),
         0
       );
 
-      const categoryKey = String(item.category || "Others")
-        .trim()
-        .toLowerCase();
+      const itemTransitWeight = stocks.reduce(
+        (sum, stock) =>
+          sum + Number(stock.transit_weight || 0),
+        0
+      );
 
-      return {
+      const itemDeadQty = stocks.reduce(
+        (sum, stock) =>
+          sum + Number(stock.dead_qty || 0),
+        0
+      );
+
+      const itemDeadWeight = stocks.reduce(
+        (sum, stock) =>
+          sum + Number(stock.dead_weight || 0),
+        0
+      );
+
+      transitGoods += itemTransitQty;
+
+      // Low stock individual SKU/item ke basis par count hoga
+      if (
+        itemAvailableQty > 0 &&
+        itemAvailableQty <= 5
+      ) {
+        lowStockItems += 1;
+      }
+
+      const categoryName =
+        String(item.category || "").trim() || "Others";
+
+      const categoryKey = categoryName.toLowerCase();
+
+      // -----------------------------------------------------
+      // Category first time create
+      // Latest item representative item rahega
+      // because items id DESC order me fetch hue hain
+      // -----------------------------------------------------
+
+      if (!categoryMap.has(categoryKey)) {
+        const batch = batchMap[Number(item.id)] || {};
+
+        categoryMap.set(categoryKey, {
+          id: item.id,
+
+          item_name: item.item_name,
+
+          article_code: item.article_code,
+
+          sku_code: item.sku_code,
+
+          parent_batch_id:
+            batch.parent_batch_id || null,
+
+          root_batch_id:
+            batch.root_batch_id || null,
+
+          batch_id:
+            batch.batch_id || null,
+
+          batch_no:
+            batch.batch_no || null,
+
+          category: categoryName,
+
+          image_url: item.image_url || null,
+
+          total_category_items: 0,
+
+          metal_type: item.metal_type,
+
+          purity: item.purity,
+
+          quantity: 0,
+
+          available_qty: 0,
+
+          available_weight: 0,
+
+          reserved_qty: 0,
+
+          reserved_weight: 0,
+
+          transit_qty: 0,
+
+          transit_weight: 0,
+
+          dead_qty: 0,
+
+          dead_weight: 0,
+
+          net_weight: Number(item.net_weight || 0),
+
+          gross_weight: Number(item.gross_weight || 0),
+
+          stone_weight: Number(item.stone_weight || 0),
+
+          selling_price: Number(item.sale_rate || 0),
+
+          making_charge: Number(
+            item.making_charge || 0
+          ),
+
+          current_status: item.current_status,
+
+          storeCode:
+            item.storeCode ||
+            cleanStoreCode ||
+            null,
+
+          organization_id:
+            item.organization_id || null,
+
+          // Category ke sabhi stock rows
+          stocks: [],
+
+          // Category ke individual items ka detail
+          items: [],
+        });
+      }
+
+      const categoryData =
+        categoryMap.get(categoryKey);
+
+      // -----------------------------------------------------
+      // Category totals
+      // -----------------------------------------------------
+
+      categoryData.total_category_items += 1;
+
+      categoryData.quantity += itemAvailableQty;
+
+      categoryData.available_qty +=
+        itemAvailableQty;
+
+      categoryData.available_weight +=
+        itemAvailableWeight;
+
+      categoryData.reserved_qty +=
+        itemReservedQty;
+
+      categoryData.reserved_weight +=
+        itemReservedWeight;
+
+      categoryData.transit_qty +=
+        itemTransitQty;
+
+      categoryData.transit_weight +=
+        itemTransitWeight;
+
+      categoryData.dead_qty +=
+        itemDeadQty;
+
+      categoryData.dead_weight +=
+        itemDeadWeight;
+
+      // Category ke saare stocks add karna
+      for (const stock of stocks) {
+        categoryData.stocks.push({
+          id: stock.id,
+
+          item_id: stock.item_id,
+
+          store_code: stock.store_code,
+
+          available_qty: Number(
+            stock.available_qty || 0
+          ),
+
+          available_weight: Number(
+            stock.available_weight || 0
+          ),
+
+          reserved_qty: Number(
+            stock.reserved_qty || 0
+          ),
+
+          reserved_weight: Number(
+            stock.reserved_weight || 0
+          ),
+
+          transit_qty: Number(
+            stock.transit_qty || 0
+          ),
+
+          transit_weight: Number(
+            stock.transit_weight || 0
+          ),
+
+          dead_qty: Number(
+            stock.dead_qty || 0
+          ),
+
+          dead_weight: Number(
+            stock.dead_weight || 0
+          ),
+        });
+      }
+
+      const itemBatch =
+        batchMap[Number(item.id)] || {};
+
+      categoryData.items.push({
         id: item.id,
 
         item_name: item.item_name,
@@ -376,182 +569,279 @@ export const getRetailInventory = async (req, res) => {
 
         sku_code: item.sku_code,
 
-        parent_batch_id: batchMap[item.id]?.parent_batch_id || null,
-
-        root_batch_id: batchMap[item.id]?.root_batch_id || null,
-
-        batch_id: batchMap[item.id]?.parent_batch_id || null,
-
-        batch_no: batchMap[item.id]?.batch_no || null,
-
-        category: item.category,
-
-        image_url: item.image_url,
-
-        //  FIXED
-        total_category_items: categoryCounts[item.category || "Others"] || 0,
+        category: categoryName,
 
         metal_type: item.metal_type,
 
         purity: item.purity,
 
-        quantity: categoryQuantityMap[categoryKey] || 0,
+        image_url: item.image_url || null,
 
-        available_qty: categoryQuantityMap[categoryKey] || 0,
+        available_qty: itemAvailableQty,
 
-        available_weight,
+        available_weight: itemAvailableWeight,
 
-        reserved_qty,
+        reserved_qty: itemReservedQty,
 
-        transit_qty,
+        reserved_weight: itemReservedWeight,
 
-        dead_qty,
+        transit_qty: itemTransitQty,
 
-        net_weight: Number(item.net_weight || 0),
+        transit_weight: itemTransitWeight,
 
-        gross_weight: Number(item.gross_weight || 0),
+        dead_qty: itemDeadQty,
 
-        stone_weight: Number(item.stone_weight || 0),
+        dead_weight: itemDeadWeight,
 
-        selling_price: Number(item.sale_rate || 0),
+        current_status:
+          item.current_status,
 
-        making_charge: Number(item.making_charge || 0),
+        storeCode:
+          item.storeCode ||
+          cleanStoreCode ||
+          null,
 
-        current_status: item.current_status,
+        organization_id:
+          item.organization_id || null,
 
-        storeCode: item.storeCode || null,
+        batch_id:
+          itemBatch.batch_id || null,
 
-        organization_id: item.organization_id,
+        parent_batch_id:
+          itemBatch.parent_batch_id || null,
 
-        stocks,
-      };
-    });
+        root_batch_id:
+          itemBatch.root_batch_id || null,
 
-    // =================================================
-    // TOTAL STOCK - SAME AS DASHBOARD
-    // =================================================
+        batch_no:
+          itemBatch.batch_no || null,
+      });
+    }
 
-    const totalStockResult = await sequelize.query(
-      `
-      SELECT
-        COALESCE(
-          SUM(s.available_qty),
-          0
-        ) AS total
+    // =====================================================
+    // FINAL CATEGORY DATA
+    // =====================================================
 
-      FROM stocks s
+    const allCategoryData = Array.from(
+      categoryMap.values()
+    ).map((categoryItem) => ({
+      ...categoryItem,
 
-      INNER JOIN items i
-      ON i.id = s.item_id
+      quantity: Number(
+        categoryItem.quantity || 0
+      ),
 
-      WHERE 1=1
+      available_qty: Number(
+        categoryItem.available_qty || 0
+      ),
 
-      ${
-        itemWhere.storeCode
-          ? `AND s.store_code = :store_code`
-          : ""
-      }
-      `,
-      {
-        replacements: {
-          store_code: itemWhere.storeCode,
-        },
+      available_weight: Number(
+        Number(
+          categoryItem.available_weight || 0
+        ).toFixed(3)
+      ),
 
-        type: sequelize.QueryTypes.SELECT,
-      }
-    );
+      reserved_qty: Number(
+        categoryItem.reserved_qty || 0
+      ),
 
-    const totalStock = Number(totalStockResult?.[0]?.total || 0);
+      reserved_weight: Number(
+        Number(
+          categoryItem.reserved_weight || 0
+        ).toFixed(3)
+      ),
 
-    // =================================================
-    // DEAD STOCK - SAME AS DASHBOARD
-    // =================================================
+      transit_qty: Number(
+        categoryItem.transit_qty || 0
+      ),
 
-    const deadStockResult = await sequelize.query(
-      `
-      SELECT
-        COUNT(
-          DISTINCT CASE
-            WHEN
-              s.available_qty > 0
+      transit_weight: Number(
+        Number(
+          categoryItem.transit_weight || 0
+        ).toFixed(3)
+      ),
+
+      dead_qty: Number(
+        categoryItem.dead_qty || 0
+      ),
+
+      dead_weight: Number(
+        Number(
+          categoryItem.dead_weight || 0
+        ).toFixed(3)
+      ),
+
+      current_status:
+        Number(categoryItem.available_qty || 0) > 0
+          ? "in_stock"
+          : "out_of_stock",
+    }));
+
+    // =====================================================
+    // TOTAL STOCK
+    //
+    // Important:
+    // Isi allCategoryData ki quantity ka sum card me jayega.
+    // Isliye card aur response quantity kabhi mismatch nahi hogi.
+    // =====================================================
+
+    const totalStockItems =
+      allCategoryData.reduce(
+        (sum, categoryItem) =>
+          sum +
+          Number(categoryItem.quantity || 0),
+        0
+      );
+
+    // =====================================================
+    // DEAD STOCK
+    //
+    // 30 days se purana item jiska available stock > 0 hai
+    // aur last 30 days me sale nahi hua.
+    // =====================================================
+
+    let deadStockItems = 0;
+
+    if (itemIds.length > 0) {
+      const deadStockResult =
+        await sequelize.query(
+          `
+            SELECT
+              COUNT(DISTINCT i.id)::int
+                AS dead_stock_items
+
+            FROM items i
+
+            INNER JOIN stocks s
+              ON s.item_id = i.id
+
+            WHERE i.id IN (:item_ids)
+
+              AND s.available_qty > 0
 
               AND i."createdAt"
-              < NOW() - INTERVAL '30 days'
+                < NOW() - INTERVAL '30 days'
 
               AND NOT EXISTS (
-
                 SELECT 1
 
                 FROM invoice_items ii
 
-                JOIN invoices inv
-                ON inv.id = ii.invoice_id
+                INNER JOIN invoices inv
+                  ON inv.id = ii.invoice_id
 
                 WHERE ii.item_id = i.id
 
-                AND inv."createdAt"
-                > NOW() - INTERVAL '30 days'
+                  AND inv."createdAt"
+                    > NOW() - INTERVAL '30 days'
               )
+          `,
+          {
+            replacements: {
+              item_ids: itemIds,
+            },
 
-            THEN i.id
-          END
-        )::int AS dead_stock_items
+            type: sequelize.QueryTypes.SELECT,
+          }
+        );
 
-      FROM stocks s
+      deadStockItems = Number(
+        deadStockResult?.[0]
+          ?.dead_stock_items || 0
+      );
+    }
 
-      INNER JOIN items i
-      ON i.id = s.item_id
+    // =====================================================
+    // CATEGORY-WISE PAGINATION
+    // =====================================================
 
-      WHERE 1=1
+    const totalCategories =
+      allCategoryData.length;
 
-      ${
-        itemWhere.storeCode
-          ? `AND s.store_code = :store_code`
-          : ""
-      }
-      `,
-      {
-        replacements: {
-          store_code: itemWhere.storeCode,
-        },
+    const totalPages =
+      totalCategories > 0
+        ? Math.ceil(
+            totalCategories / pageLimit
+          )
+        : 0;
 
-        type: sequelize.QueryTypes.SELECT,
-      }
-    );
+    const paginatedData =
+      allCategoryData.slice(
+        offset,
+        offset + pageLimit
+      );
 
-    const deadStock = Number(deadStockResult?.[0]?.dead_stock_items || 0);
+    // Visible page quantity total
+    const currentPageStockItems =
+      paginatedData.reduce(
+        (sum, categoryItem) =>
+          sum +
+          Number(categoryItem.quantity || 0),
+        0
+      );
+
+    // =====================================================
+    // RESPONSE
+    // =====================================================
 
     return res.status(200).json({
       success: true,
 
-      message: "Retail inventory fetched successfully",
+      message:
+        "Retail inventory fetched successfully",
 
       summary: {
-        total_stock_items: totalStock,
+        // Saari matching categories ka quantity total
+        total_stock_items:
+          totalStockItems,
 
-        dead_stock_items: deadStock,
+        dead_stock_items:
+          deadStockItems,
 
-        low_stock_items: lowStock,
+        low_stock_items:
+          lowStockItems,
 
-        transit_goods: transitGoods,
+        transit_goods:
+          transitGoods,
+
+        // Current page ki quantities ka sum
+        current_page_stock_items:
+          currentPageStockItems,
       },
 
       pagination: {
         page: pageNumber,
+
         limit: pageLimit,
+
+        total_categories:
+          totalCategories,
+
+        total_pages:
+          totalPages,
+
+        has_next_page:
+          pageNumber < totalPages,
+
+        has_previous_page:
+          pageNumber > 1,
       },
 
-      count: data.length,
+      count: paginatedData.length,
 
-      data,
+      data: paginatedData,
     });
   } catch (error) {
-    console.error("getRetailInventory error:", error);
+    console.error(
+      "getRetailInventory error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
 
-      message: "Failed to fetch retail inventory",
+      message:
+        "Failed to fetch retail inventory",
 
       error: error.message,
     });
@@ -1815,6 +2105,23 @@ const generateArticleCode = async ({
 }) => {
   const prefix = getOrganizationPrefix(user);
   const categoryCode = cleanCodePart(category, "GEN");
+
+  const existingItem = await Item.findOne({
+    where: {
+      organization_id: user.organization_id,
+      category,
+      article_code: {
+        [Op.like]: `${prefix}-${categoryCode}-%`,
+      },
+    },
+    order: [["id", "ASC"]],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  if (existingItem?.article_code) {
+    return existingItem.article_code;
+  }
 
   const serial = await getNextSequenceNumber({
     organization_id: user.organization_id,
