@@ -101,26 +101,41 @@ export const getRetailInventory = async (req, res) => {
       .toLowerCase();
 
     const cleanStoreCode = String(
-      user.store_code || user.storeCode || ""
+      user.store_code ||
+      user.storeCode ||
+      ""
     )
       .trim()
       .toUpperCase();
 
-    if (!cleanStoreCode && role !== "super_admin") {
+    if (
+      !cleanStoreCode &&
+      role !== "super_admin"
+    ) {
       return res.status(400).json({
         success: false,
-        message: "Store code missing in login user",
+        message:
+          "Store code missing in login user",
       });
     }
 
     // =====================================================
     // PAGINATION
-    // Pagination final category cards par lagegi
+    // Category cards par pagination lagegi
     // =====================================================
 
-    const pageNumber = Math.max(Number(page) || 1, 1);
-    const pageLimit = Math.max(Number(limit) || 1000, 1);
-    const offset = (pageNumber - 1) * pageLimit;
+    const pageNumber = Math.max(
+      Number(page) || 1,
+      1
+    );
+
+    const pageLimit = Math.max(
+      Number(limit) || 1000,
+      1
+    );
+
+    const offset =
+      (pageNumber - 1) * pageLimit;
 
     // =====================================================
     // ITEM AND STOCK FILTERS
@@ -129,67 +144,98 @@ export const getRetailInventory = async (req, res) => {
     const itemWhere = {};
     const stockWhere = {};
 
+    /*
+     * IMPORTANT:
+     *
+     * items.storeCode par filter nahi lagayenge.
+     *
+     * Item originally Head Office, Retail Store ya kisi
+     * dusre store ka ho sakta hai.
+     *
+     * Current inventory location stocks.store_code se
+     * decide hogi.
+     *
+     * Example:
+     * items.storeCode = STR503
+     * stocks.store_code = DST500
+     *
+     * Iska matlab item abhi DST500 ke stock me hai.
+     */
+
     if (role !== "super_admin") {
-      itemWhere.storeCode = cleanStoreCode;
-      stockWhere.store_code = cleanStoreCode;
+      stockWhere.store_code =
+        cleanStoreCode;
     }
 
     if (category) {
       itemWhere.category = {
-        [Op.iLike]: String(category).trim(),
+        [Op.iLike]:
+          String(category).trim(),
       };
     }
 
     if (metal_type) {
       itemWhere.metal_type = {
-        [Op.iLike]: String(metal_type).trim(),
+        [Op.iLike]:
+          String(metal_type).trim(),
       };
     }
 
     if (search) {
-      const cleanSearch = String(search).trim();
+      const cleanSearch =
+        String(search).trim();
 
       itemWhere[Op.or] = [
         {
           item_name: {
-            [Op.iLike]: `%${cleanSearch}%`,
+            [Op.iLike]:
+              `%${cleanSearch}%`,
           },
         },
         {
           article_code: {
-            [Op.iLike]: `%${cleanSearch}%`,
+            [Op.iLike]:
+              `%${cleanSearch}%`,
           },
         },
         {
           sku_code: {
-            [Op.iLike]: `%${cleanSearch}%`,
+            [Op.iLike]:
+              `%${cleanSearch}%`,
           },
         },
         {
           category: {
-            [Op.iLike]: `%${cleanSearch}%`,
+            [Op.iLike]:
+              `%${cleanSearch}%`,
           },
         },
         {
           metal_type: {
-            [Op.iLike]: `%${cleanSearch}%`,
+            [Op.iLike]:
+              `%${cleanSearch}%`,
           },
         },
         {
           purity: {
-            [Op.iLike]: `%${cleanSearch}%`,
+            [Op.iLike]:
+              `%${cleanSearch}%`,
           },
         },
       ];
     }
 
     // =====================================================
-    // FETCH ALL MATCHING ITEMS
+    // FETCH MATCHING ITEMS
+    // =====================================================
     //
-    // Yahan limit aur offset nahi lagaya gaya hai.
-    // Pehle saare matching items fetch honge.
-    // Uske baad category-wise grouping hogi.
-    // Finally grouped category cards par pagination lagegi.
+    // Non-super-admin ke case me Stock include required true
+    // rahega.
+    //
+    // Isse sirf wahi items aayenge jinki current store ke
+    // stocks table me row available hai.
+    //
+    // items.storeCode match hona zaroori nahi hai.
     // =====================================================
 
     const items = await Item.findAll({
@@ -220,8 +266,12 @@ export const getRetailInventory = async (req, res) => {
           model: Stock,
           as: "stocks",
 
-          // Zero quantity aur without-stock items bhi response me aa sakte hain
-          required: false,
+          /*
+           * Current store ke bina stock wale items
+           * response me include nahi honge.
+           */
+          required:
+            role !== "super_admin",
 
           where:
             Object.keys(stockWhere).length > 0
@@ -231,6 +281,7 @@ export const getRetailInventory = async (req, res) => {
           attributes: [
             "id",
             "item_id",
+            "organization_id",
             "store_code",
             "available_qty",
             "available_weight",
@@ -244,141 +295,216 @@ export const getRetailInventory = async (req, res) => {
         },
       ],
 
-      order: [["id", "DESC"]],
+      order: [
+        ["id", "DESC"],
+      ],
 
-      // Important:
-      // Individual items par pagination nahi lagegi
       subQuery: false,
 
       distinct: true,
     });
 
     // =====================================================
-    // BATCH INFORMATION
+    // ITEM IDS
     // =====================================================
 
-    const itemIds = items.map((item) => Number(item.id));
+    const itemIds = items
+      .map((item) =>
+        Number(item.id)
+      )
+      .filter(Boolean);
+
+    // =====================================================
+    // BATCH INFORMATION
+    // =====================================================
 
     const batchMap = {};
 
     if (itemIds.length > 0) {
-      const batches = await sequelize.query(
-        `
-          SELECT DISTINCT ON (ib.item_id)
-            ib.item_id,
-            ib.id AS batch_id,
-            ib.parent_batch_id,
-            ib.root_batch_id,
-            ib.batch_no
-          FROM inventory_batches ib
-          WHERE ib.item_id IN (:item_ids)
-          ORDER BY
-            ib.item_id,
-            CASE
-              WHEN ib.parent_batch_id IS NULL THEN 0
-              ELSE 1
-            END,
-            ib.id DESC
-        `,
-        {
-          replacements: {
-            item_ids: itemIds,
-          },
-          type: sequelize.QueryTypes.SELECT,
-        }
-      );
+      const batches =
+        await sequelize.query(
+          `
+            SELECT DISTINCT ON (
+              ib.item_id
+            )
+              ib.item_id,
+              ib.id AS batch_id,
+              ib.parent_batch_id,
+              ib.root_batch_id,
+              ib.batch_no
+
+            FROM inventory_batches ib
+
+            WHERE ib.item_id
+              IN (:item_ids)
+
+            ORDER BY
+              ib.item_id,
+
+              CASE
+                WHEN ib.parent_batch_id
+                  IS NULL
+                THEN 0
+                ELSE 1
+              END,
+
+              ib.id DESC
+          `,
+          {
+            replacements: {
+              item_ids: itemIds,
+            },
+
+            type:
+              sequelize.QueryTypes
+                .SELECT,
+          }
+        );
 
       for (const batch of batches) {
-        batchMap[Number(batch.item_id)] = {
-          batch_id: batch.batch_id
-            ? Number(batch.batch_id)
-            : null,
+        batchMap[
+          Number(batch.item_id)
+        ] = {
+          batch_id:
+            batch.batch_id
+              ? Number(
+                  batch.batch_id
+                )
+              : null,
 
-          parent_batch_id: batch.parent_batch_id
-            ? Number(batch.parent_batch_id)
-            : null,
+          parent_batch_id:
+            batch.parent_batch_id
+              ? Number(
+                  batch.parent_batch_id
+                )
+              : null,
 
-          root_batch_id: batch.root_batch_id
-            ? Number(batch.root_batch_id)
-            : null,
+          root_batch_id:
+            batch.root_batch_id
+              ? Number(
+                  batch.root_batch_id
+                )
+              : null,
 
-          batch_no: batch.batch_no || null,
+          batch_no:
+            batch.batch_no ||
+            null,
         };
       }
     }
 
     // =====================================================
     // CATEGORY-WISE AGGREGATION
-    //
-    // Ek category ke jitne items aur stock rows hain,
-    // unki quantity ek hi category card me add hogi.
     // =====================================================
 
-    const categoryMap = new Map();
+    const categoryMap =
+      new Map();
 
     let lowStockItems = 0;
     let transitGoods = 0;
 
     for (const item of items) {
-      const stocks = Array.isArray(item.stocks)
-        ? item.stocks
-        : [];
+      const stocks =
+        Array.isArray(item.stocks)
+          ? item.stocks
+          : [];
 
-      // -----------------------------------------------------
-      // Current individual item stock totals
-      // -----------------------------------------------------
+      // ===================================================
+      // INDIVIDUAL ITEM STOCK TOTALS
+      // ===================================================
 
-      const itemAvailableQty = stocks.reduce(
-        (sum, stock) =>
-          sum + Number(stock.available_qty || 0),
-        0
-      );
+      const itemAvailableQty =
+        stocks.reduce(
+          (sum, stock) =>
+            sum +
+            Number(
+              stock.available_qty ||
+              0
+            ),
+          0
+        );
 
-      const itemAvailableWeight = stocks.reduce(
-        (sum, stock) =>
-          sum + Number(stock.available_weight || 0),
-        0
-      );
+      const itemAvailableWeight =
+        stocks.reduce(
+          (sum, stock) =>
+            sum +
+            Number(
+              stock.available_weight ||
+              0
+            ),
+          0
+        );
 
-      const itemReservedQty = stocks.reduce(
-        (sum, stock) =>
-          sum + Number(stock.reserved_qty || 0),
-        0
-      );
+      const itemReservedQty =
+        stocks.reduce(
+          (sum, stock) =>
+            sum +
+            Number(
+              stock.reserved_qty ||
+              0
+            ),
+          0
+        );
 
-      const itemReservedWeight = stocks.reduce(
-        (sum, stock) =>
-          sum + Number(stock.reserved_weight || 0),
-        0
-      );
+      const itemReservedWeight =
+        stocks.reduce(
+          (sum, stock) =>
+            sum +
+            Number(
+              stock.reserved_weight ||
+              0
+            ),
+          0
+        );
 
-      const itemTransitQty = stocks.reduce(
-        (sum, stock) =>
-          sum + Number(stock.transit_qty || 0),
-        0
-      );
+      const itemTransitQty =
+        stocks.reduce(
+          (sum, stock) =>
+            sum +
+            Number(
+              stock.transit_qty ||
+              0
+            ),
+          0
+        );
 
-      const itemTransitWeight = stocks.reduce(
-        (sum, stock) =>
-          sum + Number(stock.transit_weight || 0),
-        0
-      );
+      const itemTransitWeight =
+        stocks.reduce(
+          (sum, stock) =>
+            sum +
+            Number(
+              stock.transit_weight ||
+              0
+            ),
+          0
+        );
 
-      const itemDeadQty = stocks.reduce(
-        (sum, stock) =>
-          sum + Number(stock.dead_qty || 0),
-        0
-      );
+      const itemDeadQty =
+        stocks.reduce(
+          (sum, stock) =>
+            sum +
+            Number(
+              stock.dead_qty ||
+              0
+            ),
+          0
+        );
 
-      const itemDeadWeight = stocks.reduce(
-        (sum, stock) =>
-          sum + Number(stock.dead_weight || 0),
-        0
-      );
+      const itemDeadWeight =
+        stocks.reduce(
+          (sum, stock) =>
+            sum +
+            Number(
+              stock.dead_weight ||
+              0
+            ),
+          0
+        );
 
-      transitGoods += itemTransitQty;
+      transitGoods +=
+        itemTransitQty;
 
-      // Low stock individual SKU/item ke basis par count hoga
+      // Individual SKU/item basis par low stock count
       if (
         itemAvailableQty > 0 &&
         itemAvailableQty <= 5
@@ -387,108 +513,170 @@ export const getRetailInventory = async (req, res) => {
       }
 
       const categoryName =
-        String(item.category || "").trim() || "Others";
+        String(
+          item.category || ""
+        ).trim() || "Others";
 
-      const categoryKey = categoryName.toLowerCase();
+      const categoryKey =
+        categoryName.toLowerCase();
 
-      // -----------------------------------------------------
-      // Category first time create
-      // Latest item representative item rahega
-      // because items id DESC order me fetch hue hain
-      // -----------------------------------------------------
+      // ===================================================
+      // CREATE CATEGORY
+      // ===================================================
 
-      if (!categoryMap.has(categoryKey)) {
-        const batch = batchMap[Number(item.id)] || {};
+      if (
+        !categoryMap.has(
+          categoryKey
+        )
+      ) {
+        const batch =
+          batchMap[
+            Number(item.id)
+          ] || {};
 
-        categoryMap.set(categoryKey, {
-          id: item.id,
+        categoryMap.set(
+          categoryKey,
+          {
+            id:
+              item.id,
 
-          item_name: item.item_name,
+            item_name:
+              item.item_name,
 
-          article_code: item.article_code,
+            article_code:
+              item.article_code,
 
-          sku_code: item.sku_code,
+            sku_code:
+              item.sku_code,
 
-          parent_batch_id:
-            batch.parent_batch_id || null,
+            parent_batch_id:
+              batch.parent_batch_id ||
+              null,
 
-          root_batch_id:
-            batch.root_batch_id || null,
+            root_batch_id:
+              batch.root_batch_id ||
+              null,
 
-          batch_id:
-            batch.batch_id || null,
+            batch_id:
+              batch.batch_id ||
+              null,
 
-          batch_no:
-            batch.batch_no || null,
+            batch_no:
+              batch.batch_no ||
+              null,
 
-          category: categoryName,
+            category:
+              categoryName,
 
-          image_url: item.image_url || null,
+            image_url:
+              item.image_url ||
+              null,
 
-          total_category_items: 0,
+            total_category_items:
+              0,
 
-          metal_type: item.metal_type,
+            metal_type:
+              item.metal_type,
 
-          purity: item.purity,
+            purity:
+              item.purity,
 
-          quantity: 0,
+            quantity:
+              0,
 
-          available_qty: 0,
+            available_qty:
+              0,
 
-          available_weight: 0,
+            available_weight:
+              0,
 
-          reserved_qty: 0,
+            reserved_qty:
+              0,
 
-          reserved_weight: 0,
+            reserved_weight:
+              0,
 
-          transit_qty: 0,
+            transit_qty:
+              0,
 
-          transit_weight: 0,
+            transit_weight:
+              0,
 
-          dead_qty: 0,
+            dead_qty:
+              0,
 
-          dead_weight: 0,
+            dead_weight:
+              0,
 
-          net_weight: Number(item.net_weight || 0),
+            net_weight:
+              Number(
+                item.net_weight ||
+                0
+              ),
 
-          gross_weight: Number(item.gross_weight || 0),
+            gross_weight:
+              Number(
+                item.gross_weight ||
+                0
+              ),
 
-          stone_weight: Number(item.stone_weight || 0),
+            stone_weight:
+              Number(
+                item.stone_weight ||
+                0
+              ),
 
-          selling_price: Number(item.sale_rate || 0),
+            selling_price:
+              Number(
+                item.sale_rate ||
+                0
+              ),
 
-          making_charge: Number(
-            item.making_charge || 0
-          ),
+            making_charge:
+              Number(
+                item.making_charge ||
+                0
+              ),
 
-          current_status: item.current_status,
+            current_status:
+              item.current_status,
 
-          storeCode:
-            item.storeCode ||
-            cleanStoreCode ||
-            null,
+            /*
+             * Current store code stocks table se
+             * decide ho raha hai.
+             */
+            storeCode:
+              cleanStoreCode ||
+              item.storeCode ||
+              null,
 
-          organization_id:
-            item.organization_id || null,
+            organization_id:
+              stocks?.[0]
+                ?.organization_id ||
+              item.organization_id ||
+              null,
 
-          // Category ke sabhi stock rows
-          stocks: [],
+            stocks: [],
 
-          // Category ke individual items ka detail
-          items: [],
-        });
+            items: [],
+          }
+        );
       }
 
       const categoryData =
-        categoryMap.get(categoryKey);
+        categoryMap.get(
+          categoryKey
+        );
 
-      // -----------------------------------------------------
-      // Category totals
-      // -----------------------------------------------------
+      // ===================================================
+      // CATEGORY TOTALS
+      // ===================================================
 
-      categoryData.total_category_items += 1;
+      categoryData
+        .total_category_items += 1;
 
-      categoryData.quantity += itemAvailableQty;
+      categoryData.quantity +=
+        itemAvailableQty;
 
       categoryData.available_qty +=
         itemAvailableQty;
@@ -514,107 +702,184 @@ export const getRetailInventory = async (req, res) => {
       categoryData.dead_weight +=
         itemDeadWeight;
 
-      // Category ke saare stocks add karna
-      for (const stock of stocks) {
+      // ===================================================
+      // CATEGORY STOCK ROWS
+      // ===================================================
+
+      for (
+        const stock of stocks
+      ) {
         categoryData.stocks.push({
-          id: stock.id,
+          id:
+            stock.id,
 
-          item_id: stock.item_id,
+          item_id:
+            stock.item_id,
 
-          store_code: stock.store_code,
+          organization_id:
+            stock.organization_id ||
+            null,
 
-          available_qty: Number(
-            stock.available_qty || 0
-          ),
+          store_code:
+            stock.store_code ||
+            cleanStoreCode ||
+            null,
 
-          available_weight: Number(
-            stock.available_weight || 0
-          ),
+          available_qty:
+            Number(
+              stock.available_qty ||
+              0
+            ),
 
-          reserved_qty: Number(
-            stock.reserved_qty || 0
-          ),
+          available_weight:
+            Number(
+              stock.available_weight ||
+              0
+            ),
 
-          reserved_weight: Number(
-            stock.reserved_weight || 0
-          ),
+          reserved_qty:
+            Number(
+              stock.reserved_qty ||
+              0
+            ),
 
-          transit_qty: Number(
-            stock.transit_qty || 0
-          ),
+          reserved_weight:
+            Number(
+              stock.reserved_weight ||
+              0
+            ),
 
-          transit_weight: Number(
-            stock.transit_weight || 0
-          ),
+          transit_qty:
+            Number(
+              stock.transit_qty ||
+              0
+            ),
 
-          dead_qty: Number(
-            stock.dead_qty || 0
-          ),
+          transit_weight:
+            Number(
+              stock.transit_weight ||
+              0
+            ),
 
-          dead_weight: Number(
-            stock.dead_weight || 0
-          ),
+          dead_qty:
+            Number(
+              stock.dead_qty ||
+              0
+            ),
+
+          dead_weight:
+            Number(
+              stock.dead_weight ||
+              0
+            ),
         });
       }
 
+      // ===================================================
+      // INDIVIDUAL ITEM DETAILS
+      // ===================================================
+
       const itemBatch =
-        batchMap[Number(item.id)] || {};
+        batchMap[
+          Number(item.id)
+        ] || {};
 
       categoryData.items.push({
-        id: item.id,
+        id:
+          item.id,
 
-        item_name: item.item_name,
+        item_name:
+          item.item_name,
 
-        article_code: item.article_code,
+        article_code:
+          item.article_code,
 
-        sku_code: item.sku_code,
+        sku_code:
+          item.sku_code,
 
-        category: categoryName,
+        category:
+          categoryName,
 
-        metal_type: item.metal_type,
+        metal_type:
+          item.metal_type,
 
-        purity: item.purity,
+        purity:
+          item.purity,
 
-        image_url: item.image_url || null,
+        image_url:
+          item.image_url ||
+          null,
 
-        available_qty: itemAvailableQty,
+        available_qty:
+          itemAvailableQty,
 
-        available_weight: itemAvailableWeight,
+        available_weight:
+          itemAvailableWeight,
 
-        reserved_qty: itemReservedQty,
+        reserved_qty:
+          itemReservedQty,
 
-        reserved_weight: itemReservedWeight,
+        reserved_weight:
+          itemReservedWeight,
 
-        transit_qty: itemTransitQty,
+        transit_qty:
+          itemTransitQty,
 
-        transit_weight: itemTransitWeight,
+        transit_weight:
+          itemTransitWeight,
 
-        dead_qty: itemDeadQty,
+        dead_qty:
+          itemDeadQty,
 
-        dead_weight: itemDeadWeight,
+        dead_weight:
+          itemDeadWeight,
 
         current_status:
-          item.current_status,
+          itemAvailableQty > 0
+            ? "in_stock"
+            : "out_of_stock",
 
-        storeCode:
+        /*
+         * Original item.storeCode response me
+         * reference ke liye diya gaya hai.
+         */
+        original_item_store_code:
           item.storeCode ||
+          null,
+
+        /*
+         * Current inventory store stocks table
+         * se liya gaya hai.
+         */
+        storeCode:
+          stocks?.[0]
+            ?.store_code ||
           cleanStoreCode ||
           null,
 
         organization_id:
-          item.organization_id || null,
+          stocks?.[0]
+            ?.organization_id ||
+          item.organization_id ||
+          null,
 
         batch_id:
-          itemBatch.batch_id || null,
+          itemBatch.batch_id ||
+          null,
 
         parent_batch_id:
-          itemBatch.parent_batch_id || null,
+          itemBatch
+            .parent_batch_id ||
+          null,
 
         root_batch_id:
-          itemBatch.root_batch_id || null,
+          itemBatch
+            .root_batch_id ||
+          null,
 
         batch_no:
-          itemBatch.batch_no || null,
+          itemBatch.batch_no ||
+          null,
       });
     }
 
@@ -622,105 +887,172 @@ export const getRetailInventory = async (req, res) => {
     // FINAL CATEGORY DATA
     // =====================================================
 
-    const allCategoryData = Array.from(
-      categoryMap.values()
-    ).map((categoryItem) => ({
-      ...categoryItem,
+    const allCategoryData =
+      Array.from(
+        categoryMap.values()
+      ).map(
+        (categoryItem) => ({
+          ...categoryItem,
 
-      quantity: Number(
-        categoryItem.quantity || 0
-      ),
+          quantity:
+            Number(
+              categoryItem
+                .quantity || 0
+            ),
 
-      available_qty: Number(
-        categoryItem.available_qty || 0
-      ),
+          available_qty:
+            Number(
+              categoryItem
+                .available_qty || 0
+            ),
 
-      available_weight: Number(
-        Number(
-          categoryItem.available_weight || 0
-        ).toFixed(3)
-      ),
+          available_weight:
+            Number(
+              Number(
+                categoryItem
+                  .available_weight ||
+                  0
+              ).toFixed(3)
+            ),
 
-      reserved_qty: Number(
-        categoryItem.reserved_qty || 0
-      ),
+          reserved_qty:
+            Number(
+              categoryItem
+                .reserved_qty || 0
+            ),
 
-      reserved_weight: Number(
-        Number(
-          categoryItem.reserved_weight || 0
-        ).toFixed(3)
-      ),
+          reserved_weight:
+            Number(
+              Number(
+                categoryItem
+                  .reserved_weight ||
+                  0
+              ).toFixed(3)
+            ),
 
-      transit_qty: Number(
-        categoryItem.transit_qty || 0
-      ),
+          transit_qty:
+            Number(
+              categoryItem
+                .transit_qty || 0
+            ),
 
-      transit_weight: Number(
-        Number(
-          categoryItem.transit_weight || 0
-        ).toFixed(3)
-      ),
+          transit_weight:
+            Number(
+              Number(
+                categoryItem
+                  .transit_weight ||
+                  0
+              ).toFixed(3)
+            ),
 
-      dead_qty: Number(
-        categoryItem.dead_qty || 0
-      ),
+          dead_qty:
+            Number(
+              categoryItem
+                .dead_qty || 0
+            ),
 
-      dead_weight: Number(
-        Number(
-          categoryItem.dead_weight || 0
-        ).toFixed(3)
-      ),
+          dead_weight:
+            Number(
+              Number(
+                categoryItem
+                  .dead_weight ||
+                  0
+              ).toFixed(3)
+            ),
 
-      current_status:
-        Number(categoryItem.available_qty || 0) > 0
-          ? "in_stock"
-          : "out_of_stock",
-    }));
+          current_status:
+            Number(
+              categoryItem
+                .available_qty || 0
+            ) > 0
+              ? "in_stock"
+              : "out_of_stock",
+        })
+      );
 
     // =====================================================
-    // TOTAL STOCK
+    // TOTAL STOCK ITEMS
+    // =====================================================
     //
-    // Important:
-    // Isi allCategoryData ki quantity ka sum card me jayega.
-    // Isliye card aur response quantity kabhi mismatch nahi hogi.
+    // Sirf current logged-in store ki available quantity.
+    //
+    // DST500 ke case me:
+    // SUM(stocks.available_qty)
+    // WHERE stocks.store_code = 'DST500'
     // =====================================================
 
     const totalStockItems =
       allCategoryData.reduce(
-        (sum, categoryItem) =>
+        (
+          sum,
+          categoryItem
+        ) =>
           sum +
-          Number(categoryItem.quantity || 0),
+          Number(
+            categoryItem
+              .quantity || 0
+          ),
         0
       );
 
     // =====================================================
     // DEAD STOCK
-    //
-    // 30 days se purana item jiska available stock > 0 hai
-    // aur last 30 days me sale nahi hua.
     // =====================================================
 
     let deadStockItems = 0;
 
     if (itemIds.length > 0) {
+      let storeCondition = "";
+
+      const replacements = {
+        item_ids:
+          itemIds,
+      };
+
+      if (
+        role !== "super_admin"
+      ) {
+        storeCondition = `
+          AND UPPER(
+            TRIM(
+              COALESCE(
+                s.store_code,
+                ''
+              )
+            )
+          ) = :storeCode
+        `;
+
+        replacements.storeCode =
+          cleanStoreCode;
+      }
+
       const deadStockResult =
         await sequelize.query(
           `
             SELECT
-              COUNT(DISTINCT i.id)::int
-                AS dead_stock_items
+              COUNT(
+                DISTINCT i.id
+              )::int AS dead_stock_items
 
             FROM items i
 
             INNER JOIN stocks s
               ON s.item_id = i.id
 
-            WHERE i.id IN (:item_ids)
+            WHERE i.id
+              IN (:item_ids)
 
-              AND s.available_qty > 0
+              ${storeCondition}
+
+              AND COALESCE(
+                s.available_qty,
+                0
+              ) > 0
 
               AND i."createdAt"
-                < NOW() - INTERVAL '30 days'
+                < NOW()
+                  - INTERVAL '30 days'
 
               AND NOT EXISTS (
                 SELECT 1
@@ -728,27 +1060,32 @@ export const getRetailInventory = async (req, res) => {
                 FROM invoice_items ii
 
                 INNER JOIN invoices inv
-                  ON inv.id = ii.invoice_id
+                  ON inv.id =
+                    ii.invoice_id
 
-                WHERE ii.item_id = i.id
+                WHERE ii.item_id =
+                  i.id
 
                   AND inv."createdAt"
-                    > NOW() - INTERVAL '30 days'
+                    > NOW()
+                      - INTERVAL '30 days'
               )
           `,
           {
-            replacements: {
-              item_ids: itemIds,
-            },
+            replacements,
 
-            type: sequelize.QueryTypes.SELECT,
+            type:
+              sequelize.QueryTypes
+                .SELECT,
           }
         );
 
-      deadStockItems = Number(
-        deadStockResult?.[0]
-          ?.dead_stock_items || 0
-      );
+      deadStockItems =
+        Number(
+          deadStockResult?.[0]
+            ?.dead_stock_items ||
+          0
+        );
     }
 
     // =====================================================
@@ -761,7 +1098,8 @@ export const getRetailInventory = async (req, res) => {
     const totalPages =
       totalCategories > 0
         ? Math.ceil(
-            totalCategories / pageLimit
+            totalCategories /
+            pageLimit
           )
         : 0;
 
@@ -771,12 +1109,17 @@ export const getRetailInventory = async (req, res) => {
         offset + pageLimit
       );
 
-    // Visible page quantity total
     const currentPageStockItems =
       paginatedData.reduce(
-        (sum, categoryItem) =>
+        (
+          sum,
+          categoryItem
+        ) =>
           sum +
-          Number(categoryItem.quantity || 0),
+          Number(
+            categoryItem
+              .quantity || 0
+          ),
         0
       );
 
@@ -784,67 +1127,84 @@ export const getRetailInventory = async (req, res) => {
     // RESPONSE
     // =====================================================
 
-    return res.status(200).json({
-      success: true,
+    return res
+      .status(200)
+      .json({
+        success: true,
 
-      message:
-        "Retail inventory fetched successfully",
+        message:
+          "Retail inventory fetched successfully",
 
-      summary: {
-        // Saari matching categories ka quantity total
-        total_stock_items:
-          totalStockItems,
+        summary: {
+          /*
+           * Current logged-in store ki total
+           * available quantity.
+           */
+          total_stock_items:
+            totalStockItems,
 
-        dead_stock_items:
-          deadStockItems,
+          dead_stock_items:
+            deadStockItems,
 
-        low_stock_items:
-          lowStockItems,
+          low_stock_items:
+            lowStockItems,
 
-        transit_goods:
-          transitGoods,
+          transit_goods:
+            transitGoods,
 
-        // Current page ki quantities ka sum
-        current_page_stock_items:
-          currentPageStockItems,
-      },
+          current_page_stock_items:
+            currentPageStockItems,
 
-      pagination: {
-        page: pageNumber,
+          store_code:
+            role !== "super_admin"
+              ? cleanStoreCode
+              : null,
+        },
 
-        limit: pageLimit,
+        pagination: {
+          page:
+            pageNumber,
 
-        total_categories:
-          totalCategories,
+          limit:
+            pageLimit,
 
-        total_pages:
-          totalPages,
+          total_categories:
+            totalCategories,
 
-        has_next_page:
-          pageNumber < totalPages,
+          total_pages:
+            totalPages,
 
-        has_previous_page:
-          pageNumber > 1,
-      },
+          has_next_page:
+            pageNumber <
+            totalPages,
 
-      count: paginatedData.length,
+          has_previous_page:
+            pageNumber > 1,
+        },
 
-      data: paginatedData,
-    });
+        count:
+          paginatedData.length,
+
+        data:
+          paginatedData,
+      });
   } catch (error) {
     console.error(
       "getRetailInventory error:",
       error
     );
 
-    return res.status(500).json({
-      success: false,
+    return res
+      .status(500)
+      .json({
+        success: false,
 
-      message:
-        "Failed to fetch retail inventory",
+        message:
+          "Failed to fetch retail inventory",
 
-      error: error.message,
-    });
+        error:
+          error.message,
+      });
   }
 };
 export const getDistrictInventory = async (req, res) => {
