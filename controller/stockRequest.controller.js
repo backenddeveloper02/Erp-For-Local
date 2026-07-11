@@ -2832,9 +2832,33 @@ export const receiveTransfer = async (req, res) => {
     const { remarks } = req.body;
     const user = req.user;
 
-    const receiverStoreCode = String(user.store_code || user.storeCode || "")
+    if (!user?.id || !user?.organization_id) {
+      await transaction.rollback();
+
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user",
+      });
+    }
+
+    const receiverStoreCode = String(
+      user.store_code || user.storeCode || ""
+    )
       .trim()
       .toUpperCase();
+
+    if (!receiverStoreCode) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Receiver store code is missing",
+      });
+    }
+
+    // =====================================================
+    // FETCH AND LOCK TRANSFER
+    // =====================================================
 
     const transfer = await StockTransfer.findByPk(transferId, {
       transaction,
@@ -2843,262 +2867,729 @@ export const receiveTransfer = async (req, res) => {
 
     if (!transfer) {
       await transaction.rollback();
+
       return res.status(404).json({
         success: false,
         message: "Transfer not found",
       });
     }
 
-    if (Number(transfer.to_organization_id) !== Number(user.organization_id)) {
+    // =====================================================
+    // RECEIVER VALIDATION
+    // =====================================================
+
+    if (
+      Number(transfer.to_organization_id) !==
+      Number(user.organization_id)
+    ) {
       await transaction.rollback();
+
       return res.status(403).json({
         success: false,
         message: "You are not allowed to receive this transfer",
       });
     }
 
-    if (transfer.status !== "in_transit") {
+    if (
+      String(transfer.status || "").toLowerCase() !==
+      "in_transit"
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
         message: "Only in_transit transfer can be received",
       });
     }
 
+    // =====================================================
+    // FETCH TRANSFER ITEMS
+    // =====================================================
+
     const transferItems = await StockTransferItem.findAll({
-      where: { transfer_id: transfer.id },
+      where: {
+        transfer_id: transfer.id,
+      },
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
 
+    if (!transferItems.length) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "No items found in this transfer",
+      });
+    }
+
+    const receivedItems = [];
+
+    // =====================================================
+    // PROCESS EACH TRANSFER ITEM
+    // =====================================================
+
     for (const trItem of transferItems) {
-      const item_id = Number(trItem.item_id);
+      const itemId = Number(trItem.item_id);
       const qty = toNumber(trItem.qty);
       const weight = toNumber(trItem.weight);
 
-      // ================= SOURCE STOCK =================
+      if (!itemId) {
+        throw new Error(
+          `Invalid item_id found in transfer item ${trItem.id}`
+        );
+      }
+
+      if (qty <= 0 && weight <= 0) {
+        throw new Error(
+          `Invalid transfer quantity for item ${itemId}`
+        );
+      }
+
+      // ===================================================
+      // VERIFY ITEM
+      // ===================================================
+
+      const item = await Item.findByPk(itemId, {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      if (!item) {
+        throw new Error(`Item not found for item_id ${itemId}`);
+      }
+
+      // ===================================================
+      // SOURCE STOCK
+      // Source ki transit quantity clear hogi
+      // ===================================================
+
       const sourceStock = await getOrCreateStock(
         transfer.from_organization_id,
-        item_id,
+        itemId,
         transaction
       );
 
+      const sourceTransitQty = toNumber(
+        sourceStock.transit_qty
+      );
+
+      const sourceTransitWeight = toNumber(
+        sourceStock.transit_weight
+      );
+
+      if (sourceTransitQty < qty) {
+        throw new Error(
+          `Insufficient transit quantity for item ${itemId}. ` +
+            `Transit: ${sourceTransitQty}, Receiving: ${qty}`
+        );
+      }
+
+      if (
+        weight > 0 &&
+        sourceTransitWeight < weight
+      ) {
+        throw new Error(
+          `Insufficient transit weight for item ${itemId}. ` +
+            `Transit weight: ${sourceTransitWeight}, Receiving: ${weight}`
+        );
+      }
+
       const sourceBefore = {
-        available_qty: sourceStock.available_qty,
-        reserved_qty: sourceStock.reserved_qty,
-        transit_qty: sourceStock.transit_qty,
-        damaged_qty: sourceStock.damaged_qty,
-        available_weight: sourceStock.available_weight,
-        reserved_weight: sourceStock.reserved_weight,
-        transit_weight: sourceStock.transit_weight,
-        damaged_weight: sourceStock.damaged_weight,
+        available_qty: toNumber(
+          sourceStock.available_qty
+        ),
+
+        reserved_qty: toNumber(
+          sourceStock.reserved_qty
+        ),
+
+        transit_qty: sourceTransitQty,
+
+        damaged_qty: toNumber(
+          sourceStock.damaged_qty
+        ),
+
+        available_weight: toNumber(
+          sourceStock.available_weight
+        ),
+
+        reserved_weight: toNumber(
+          sourceStock.reserved_weight
+        ),
+
+        transit_weight: sourceTransitWeight,
+
+        damaged_weight: toNumber(
+          sourceStock.damaged_weight
+        ),
       };
 
       await sourceStock.update(
         {
-          transit_qty: Math.max(0, toNumber(sourceStock.transit_qty) - qty),
+          transit_qty: Math.max(
+            0,
+            sourceTransitQty - qty
+          ),
+
           transit_weight: Math.max(
             0,
-            toNumber(sourceStock.transit_weight) - weight
+            sourceTransitWeight - weight
           ),
         },
-        { transaction }
+        {
+          transaction,
+        }
       );
 
-      const sourceAfter = {
-        available_qty: sourceStock.available_qty,
-        reserved_qty: sourceStock.reserved_qty,
-        transit_qty: sourceStock.transit_qty,
-        damaged_qty: sourceStock.damaged_qty,
-        available_weight: sourceStock.available_weight,
-        reserved_weight: sourceStock.reserved_weight,
-        transit_weight: sourceStock.transit_weight,
-        damaged_weight: sourceStock.damaged_weight,
-      };
-
-      await createMovement({
-        organization_id: transfer.from_organization_id,
-        item_id,
-        movement_type: "dispatch",
-        reference_type: "stock_transfer_transit_clear",
-        reference_id: transfer.id,
-        qty: 0,
-        weight: 0,
-        stockBefore: sourceBefore,
-        stockAfter: sourceAfter,
-        remarks: `Transit cleared after receive for ${transfer.transfer_no}`,
-        created_by: user.id,
+      await sourceStock.reload({
         transaction,
       });
 
-      // ================= DESTINATION STOCK =================
-      const destinationStock = await getOrCreateStock(
-        transfer.to_organization_id,
-        item_id,
+      const sourceAfter = {
+        available_qty: toNumber(
+          sourceStock.available_qty
+        ),
+
+        reserved_qty: toNumber(
+          sourceStock.reserved_qty
+        ),
+
+        transit_qty: toNumber(
+          sourceStock.transit_qty
+        ),
+
+        damaged_qty: toNumber(
+          sourceStock.damaged_qty
+        ),
+
+        available_weight: toNumber(
+          sourceStock.available_weight
+        ),
+
+        reserved_weight: toNumber(
+          sourceStock.reserved_weight
+        ),
+
+        transit_weight: toNumber(
+          sourceStock.transit_weight
+        ),
+
+        damaged_weight: toNumber(
+          sourceStock.damaged_weight
+        ),
+      };
+
+      await createMovement({
+        organization_id:
+          transfer.from_organization_id,
+
+        item_id: itemId,
+
+        movement_type: "dispatch",
+
+        reference_type:
+          "stock_transfer_transit_clear",
+
+        reference_id: transfer.id,
+
+        qty: 0,
+
+        weight: 0,
+
+        stockBefore: sourceBefore,
+
+        stockAfter: sourceAfter,
+
+        remarks:
+          `Transit cleared after receive for ` +
+          `${transfer.transfer_no}`,
+
+        created_by: user.id,
+
         transaction,
-        receiverStoreCode
-      );
+      });
+
+      // ===================================================
+      // DESTINATION STOCK
+      //
+      // Important:
+      // Same item_id destination stock me use hoga.
+      // Inventory visibility stocks.store_code se hogi.
+      // ===================================================
+
+      const destinationStock =
+        await getOrCreateStock(
+          transfer.to_organization_id,
+          itemId,
+          transaction,
+          receiverStoreCode
+        );
 
       const destinationBefore = {
-        available_qty: destinationStock.available_qty,
-        reserved_qty: destinationStock.reserved_qty,
-        transit_qty: destinationStock.transit_qty,
-        damaged_qty: destinationStock.damaged_qty,
-        available_weight: destinationStock.available_weight,
-        reserved_weight: destinationStock.reserved_weight,
-        transit_weight: destinationStock.transit_weight,
-        damaged_weight: destinationStock.damaged_weight,
+        available_qty: toNumber(
+          destinationStock.available_qty
+        ),
+
+        reserved_qty: toNumber(
+          destinationStock.reserved_qty
+        ),
+
+        transit_qty: toNumber(
+          destinationStock.transit_qty
+        ),
+
+        damaged_qty: toNumber(
+          destinationStock.damaged_qty
+        ),
+
+        available_weight: toNumber(
+          destinationStock.available_weight
+        ),
+
+        reserved_weight: toNumber(
+          destinationStock.reserved_weight
+        ),
+
+        transit_weight: toNumber(
+          destinationStock.transit_weight
+        ),
+
+        damaged_weight: toNumber(
+          destinationStock.damaged_weight
+        ),
       };
 
       await destinationStock.update(
         {
-          available_qty: toNumber(destinationStock.available_qty) + qty,
+          available_qty:
+            toNumber(
+              destinationStock.available_qty
+            ) + qty,
+
           available_weight:
-            toNumber(destinationStock.available_weight) + weight,
-          store_code: receiverStoreCode || destinationStock.store_code || null,
-        },
-        { transaction }
-      );
+            toNumber(
+              destinationStock.available_weight
+            ) + weight,
 
-      // ================= IMPORTANT FIX =================
-      // item ko receiver organization/store me visible karne ke liye
-      await Item.update(
-        {
-          organization_id: transfer.to_organization_id,
-          storeCode: receiverStoreCode || null,
-          current_status: "in_stock",
+          store_code: receiverStoreCode,
+
+          organization_id:
+            transfer.to_organization_id,
         },
         {
-          where: { id: item_id },
           transaction,
         }
       );
 
-      // ================= BATCH UPDATE =================
-      // agar batches use ho rahe hain to received item ka batch bhi receiver org me shift hoga
-      await InventoryBatch.update(
-        {
-          current_organization_id: transfer.to_organization_id,
-          status: "delivered",
-        },
-        {
-          where: {
-            item_id,
-          },
-          transaction,
-        }
-      );
-
-      const destinationAfter = {
-        available_qty: destinationStock.available_qty,
-        reserved_qty: destinationStock.reserved_qty,
-        transit_qty: destinationStock.transit_qty,
-        damaged_qty: destinationStock.damaged_qty,
-        available_weight: destinationStock.available_weight,
-        reserved_weight: destinationStock.reserved_weight,
-        transit_weight: destinationStock.transit_weight,
-        damaged_weight: destinationStock.damaged_weight,
-      };
-
-      await createMovement({
-        organization_id: transfer.to_organization_id,
-        item_id,
-        movement_type: "receive",
-        reference_type: "stock_transfer",
-        reference_id: transfer.id,
-        qty,
-        weight,
-        stockBefore: destinationBefore,
-        stockAfter: destinationAfter,
-        remarks: `Received via ${transfer.transfer_no}`,
-        created_by: user.id,
+      await destinationStock.reload({
         transaction,
       });
+
+      const destinationAfter = {
+        available_qty: toNumber(
+          destinationStock.available_qty
+        ),
+
+        reserved_qty: toNumber(
+          destinationStock.reserved_qty
+        ),
+
+        transit_qty: toNumber(
+          destinationStock.transit_qty
+        ),
+
+        damaged_qty: toNumber(
+          destinationStock.damaged_qty
+        ),
+
+        available_weight: toNumber(
+          destinationStock.available_weight
+        ),
+
+        reserved_weight: toNumber(
+          destinationStock.reserved_weight
+        ),
+
+        transit_weight: toNumber(
+          destinationStock.transit_weight
+        ),
+
+        damaged_weight: toNumber(
+          destinationStock.damaged_weight
+        ),
+      };
+
+      // ===================================================
+      // IMPORTANT ITEM FIX
+      //
+      // organization_id aur storeCode change nahi karenge.
+      // Ek item multiple stores ke stock me ho sakta hai.
+      // Store ownership stocks table decide karegi.
+      // ===================================================
+
+      const totalItemStockResult =
+        await Stock.findAll({
+          where: {
+            item_id: itemId,
+          },
+
+          attributes: [
+            "available_qty",
+            "reserved_qty",
+            "transit_qty",
+          ],
+
+          transaction,
+        });
+
+      const totalAvailableQty =
+        totalItemStockResult.reduce(
+          (sum, stock) =>
+            sum +
+            toNumber(stock.available_qty),
+          0
+        );
+
+      const totalReservedQty =
+        totalItemStockResult.reduce(
+          (sum, stock) =>
+            sum +
+            toNumber(stock.reserved_qty),
+          0
+        );
+
+      const totalTransitQty =
+        totalItemStockResult.reduce(
+          (sum, stock) =>
+            sum +
+            toNumber(stock.transit_qty),
+          0
+        );
+
+      const totalActiveQty =
+        totalAvailableQty +
+        totalReservedQty +
+        totalTransitQty;
+
+      await item.update(
+        {
+          current_status:
+            totalActiveQty > 0
+              ? "in_stock"
+              : "sold",
+        },
+        {
+          transaction,
+        }
+      );
+
+      // ===================================================
+      // BATCH UPDATE
+      //
+      // Sirf transferred batch update karna best hai.
+      // Agar transfer item me batch_id available hai to wahi use hoga.
+      // ===================================================
+
+      const transferBatchId =
+        trItem.batch_id ||
+        trItem.inventory_batch_id ||
+        null;
+
+      if (transferBatchId) {
+        await InventoryBatch.update(
+          {
+            current_organization_id:
+              transfer.to_organization_id,
+
+            status: "delivered",
+          },
+          {
+            where: {
+              id: transferBatchId,
+              item_id: itemId,
+            },
+            transaction,
+          }
+        );
+      } else {
+        /*
+         * Fallback:
+         * Agar transfer item me batch_id store nahi ho raha,
+         * to active in_transit batch update hoga.
+         *
+         * Sabhi batches ko item_id se update nahi karna,
+         * warna source ke purane batches bhi destination me shift ho jayenge.
+         */
+
+        const inTransitBatch =
+          await InventoryBatch.findOne({
+            where: {
+              item_id: itemId,
+              status: "in_transit",
+            },
+
+            order: [["id", "DESC"]],
+
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          });
+
+        if (inTransitBatch) {
+          await inTransitBatch.update(
+            {
+              current_organization_id:
+                transfer.to_organization_id,
+
+              status: "delivered",
+            },
+            {
+              transaction,
+            }
+          );
+        }
+      }
+
+      // ===================================================
+      // DESTINATION MOVEMENT
+      // ===================================================
+
+      await createMovement({
+        organization_id:
+          transfer.to_organization_id,
+
+        item_id: itemId,
+
+        movement_type: "receive",
+
+        reference_type: "stock_transfer",
+
+        reference_id: transfer.id,
+
+        qty,
+
+        weight,
+
+        stockBefore: destinationBefore,
+
+        stockAfter: destinationAfter,
+
+        remarks:
+          `Received via ${transfer.transfer_no}`,
+
+        created_by: user.id,
+
+        transaction,
+      });
+
+      receivedItems.push({
+        transfer_item_id: trItem.id,
+        item_id: itemId,
+        item_name: item.item_name,
+        article_code: item.article_code,
+        sku_code: item.sku_code,
+        received_qty: qty,
+        received_weight: weight,
+        destination_available_qty:
+          destinationAfter.available_qty,
+        destination_available_weight:
+          destinationAfter.available_weight,
+        store_code: receiverStoreCode,
+      });
     }
+
+    // =====================================================
+    // UPDATE TRANSFER
+    // =====================================================
 
     await transfer.update(
       {
         receive_date: new Date(),
+
         status: "received",
+
         received_by: user.id,
-        remarks: remarks || transfer.remarks,
+
+        remarks:
+          remarks || transfer.remarks,
       },
-      { transaction }
+      {
+        transaction,
+      }
     );
 
+    // =====================================================
+    // UPDATE REQUEST
+    // =====================================================
+
     if (transfer.request_id) {
-      const request = await StockRequest.findByPk(transfer.request_id, {
-        transaction,
-        lock: transaction.LOCK.UPDATE,
-      });
+      const request =
+        await StockRequest.findByPk(
+          transfer.request_id,
+          {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          }
+        );
 
       if (request) {
         await request.update(
           {
             status: "completed",
           },
-          { transaction }
+          {
+            transaction,
+          }
         );
       }
     }
 
+    // =====================================================
+    // SYSTEM ACTIVITY
+    // =====================================================
+
     await SystemActivity.create(
       {
         title: "Stock transfer received",
-        description: `Transfer ${transfer.transfer_no} received successfully`,
-        activity_type: "stock_transfer_received",
+
+        description:
+          `Transfer ${transfer.transfer_no} ` +
+          `received successfully`,
+
+        activity_type:
+          "stock_transfer_received",
+
         module_name: "stock_transfer",
+
         reference_id: transfer.id,
-        reference_no: transfer.transfer_no,
-        district_code: user.district_code || null,
-        store_code: receiverStoreCode || null,
-        store_name: user.store_name || null,
+
+        reference_no:
+          transfer.transfer_no,
+
+        district_code:
+          user.district_code || null,
+
+        store_code:
+          receiverStoreCode,
+
+        store_name:
+          user.store_name || null,
+
         created_by: user.id,
+
         created_at: new Date(),
       },
-      { transaction }
+      {
+        transaction,
+      }
     );
+
+    // =====================================================
+    // ACTIVITY LOG
+    // =====================================================
 
     await ActivityLog.create(
       {
-        organization_id: user.organization_id || null,
+        organization_id:
+          user.organization_id || null,
+
         user_id: user.id,
-        action: "stock_transfer_received",
+
+        action:
+          "stock_transfer_received",
+
         module_name: "stock_transfer",
+
         reference_id: transfer.id,
-        reference_no: transfer.transfer_no,
+
+        reference_no:
+          transfer.transfer_no,
+
         title: "Stock transfer received",
-        description: `Transfer ${transfer.transfer_no} received successfully`,
+
+        description:
+          `Transfer ${transfer.transfer_no} ` +
+          `received successfully`,
+
         meta: {
           transfer_id: transfer.id,
-          transfer_no: transfer.transfer_no,
-          from_organization_id: transfer.from_organization_id,
-          to_organization_id: transfer.to_organization_id,
-          store_code: receiverStoreCode || null,
+
+          transfer_no:
+            transfer.transfer_no,
+
+          from_organization_id:
+            transfer.from_organization_id,
+
+          to_organization_id:
+            transfer.to_organization_id,
+
+          store_code:
+            receiverStoreCode,
+
           status: "received",
+
           remarks: remarks || null,
+
+          received_items:
+            receivedItems,
         },
+
         icon: "activity",
+
         color: "green",
       },
-      { transaction }
+      {
+        transaction,
+      }
     );
 
     await transaction.commit();
 
+    // Updated transfer response
+    const updatedTransfer =
+      await StockTransfer.findByPk(
+        transfer.id,
+        {
+          include: [
+            {
+              model: StockTransferItem,
+              as: "items",
+              required: false,
+            },
+          ],
+        }
+      );
+
     return res.status(200).json({
       success: true,
-      message: "Stock received successfully",
-      data: transfer,
+
+      message:
+        "Stock received successfully",
+
+      data: {
+        transfer: updatedTransfer,
+        received_items: receivedItems,
+      },
     });
   } catch (error) {
-    await transaction.rollback();
+    if (
+      transaction &&
+      !transaction.finished
+    ) {
+      await transaction.rollback();
+    }
 
-    console.error("receiveTransfer error:", error);
+    console.error(
+      "receiveTransfer error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to receive transfer",
+
+      message:
+        "Failed to receive transfer",
+
       error: error.message,
     });
   }
@@ -4197,7 +4688,9 @@ export const getTransferDetails = async (req, res) => {
     const users = userIds.length
       ? await User.findAll({
           where: {
-            id: { [Op.in]: userIds },
+            id: {
+              [Op.in]: userIds,
+            },
           },
           attributes: ["id", "username", "email"],
         })
@@ -4208,7 +4701,8 @@ export const getTransferDetails = async (req, res) => {
     const data = {
       id: plainTransfer.id,
       transfer_no: plainTransfer.transfer_no,
-      tracking_number: plainTransfer.tracking_number || plainTransfer.transfer_no,
+      tracking_number:
+        plainTransfer.tracking_number || plainTransfer.transfer_no,
 
       status: plainTransfer.status,
       remarks: plainTransfer.remarks,
@@ -4227,10 +4721,11 @@ export const getTransferDetails = async (req, res) => {
       dispatch_date: plainTransfer.dispatch_date,
       receive_date: plainTransfer.receive_date,
 
-      expected_delivery_date: plainTransfer.expected_delivery_date || null,
-      expected_delivery_time: plainTransfer.expected_delivery_time || null,
+      expected_delivery_date:
+        plainTransfer.expected_delivery_date || null,
+      expected_delivery_time:
+        plainTransfer.expected_delivery_time || null,
 
-      // ✅ easy direct access for frontend
       e_way_bill_url: plainTransfer.e_way_bill_url || null,
 
       driver_details: {
@@ -4245,8 +4740,6 @@ export const getTransferDetails = async (req, res) => {
         dispatch_image_url: plainTransfer.dispatch_image_url || null,
         dispatch_video_url: plainTransfer.dispatch_video_url || null,
         receive_image_url: plainTransfer.receive_image_url || null,
-
-        // ✅ added e-way bill in media
         e_way_bill_url: plainTransfer.e_way_bill_url || null,
       },
 
@@ -4271,19 +4764,25 @@ export const getTransferDetails = async (req, res) => {
       },
 
       products: (plainTransfer.transfer_items || []).map((row) => ({
-        id: row.id,
-        item_id: row.item_id,
-        qty: Number(row.qty || 0),
-        weight: Number(row.weight || 0),
-        remarks: row.remarks || null,
+  id: row.id,
+  item_id: row.item_id,
 
-        item_name: row.item?.item_name || null,
-        article_code: row.item?.article_code || null,
-        category: row.item?.category || null,
-        rate: Number(row.item?.sale_rate || 0),
-        gross_weight: Number(row.item?.gross_weight || 0),
-        net_weight: Number(row.item?.net_weight || 0),
-      })),
+  // ✅ Requested Quantity (same as qty)
+  requested_qty: Number(row.qty || 0),
+
+  // ✅ Existing Quantity
+  qty: Number(row.qty || 0),
+
+  weight: Number(row.weight || 0),
+  remarks: row.remarks || null,
+
+  item_name: row.item?.item_name || null,
+  article_code: row.item?.article_code || null,
+  category: row.item?.category || null,
+  rate: Number(row.item?.sale_rate || 0),
+  gross_weight: Number(row.item?.gross_weight || 0),
+  net_weight: Number(row.item?.net_weight || 0),
+})),
     };
 
     return res.status(200).json({
@@ -4293,6 +4792,7 @@ export const getTransferDetails = async (req, res) => {
     });
   } catch (error) {
     console.error("getTransferDetails error:", error);
+
     return res.status(500).json({
       success: false,
       message: "Failed to fetch transfer details",
