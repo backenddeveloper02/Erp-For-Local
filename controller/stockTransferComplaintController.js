@@ -5,7 +5,7 @@ import sequelize from "../config/db.js";
 import StockTransfer from "../model/stockTransfer.js";
 import StockTransferItem from "../model/stockTransferItem.js";
 import StockTransferComplaint from "../model/StockTransferComplaint.js";
-import StockRequest from "../model/stockRequest.js";
+import StockRequest from "../model/StockRequest.js";
 import SystemActivity from "../model/systemActivity.js";
 import ActivityLog from "../model/activityLog.js";
 
