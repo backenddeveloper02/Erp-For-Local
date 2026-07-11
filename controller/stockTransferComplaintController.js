@@ -2,12 +2,12 @@ import { Op } from "sequelize";
 
 import sequelize from "../config/db.js";
 
-import StockTransfer from "../model/StockTransfer.js";
-import StockTransferItem from "../model/StockTransferItem.js";
-import StockTransferComplaint from "../model/StockTransferComplaint.js";
-import StockRequest from "../model/StockRequest.js";
-import SystemActivity from "../model/SystemActivity.js";
-import ActivityLog from "../model/ActivityLog.js";
+import StockTransfer from "../model/stockTransfer.js";
+import StockTransferItem from "../model/stockTransferItem.js";
+import StockTransferComplaint from "../model/stockTransferComplaint.js";
+import StockRequest from "../model/stockRequest.js";
+import SystemActivity from "../model/systemActivity.js";
+import ActivityLog from "../model/activityLog.js";
 
 import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
 
