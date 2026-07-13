@@ -11,19 +11,20 @@ import ActivityLog from "../model/activityLog.js";
 
 import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
 
+/**
+ * Safely converts any value into a number.
+ */
 const toNumber = (value) => {
   const number = Number(value);
 
   return Number.isFinite(number) ? number : 0;
 };
 
-const generateComplaintNo = (
-  transferNo,
-  transferId
-) => {
-  const safeTransferNo = String(
-    transferNo || transferId
-  )
+/**
+ * Generates a unique complaint number.
+ */
+const generateComplaintNo = (transferNo, transferId) => {
+  const safeTransferNo = String(transferNo || transferId)
     .trim()
     .replace(/[^a-zA-Z0-9]/g, "-")
     .toUpperCase();
@@ -31,6 +32,13 @@ const generateComplaintNo = (
   return `CMP-${safeTransferNo}-${Date.now()}`;
 };
 
+/**
+ * Parses complaint items from multipart form-data.
+ *
+ * Items may come as:
+ * 1. Direct JavaScript array
+ * 2. JSON string inside form-data
+ */
 const parseComplaintItems = (items) => {
   if (Array.isArray(items)) {
     return items;
@@ -40,9 +48,7 @@ const parseComplaintItems = (items) => {
     try {
       const parsedItems = JSON.parse(items);
 
-      return Array.isArray(parsedItems)
-        ? parsedItems
-        : [];
+      return Array.isArray(parsedItems) ? parsedItems : [];
     } catch {
       return [];
     }
@@ -51,12 +57,17 @@ const parseComplaintItems = (items) => {
   return [];
 };
 
-export const raiseTransferComplaint = async (
-  req,
-  res
-) => {
-  const transaction =
-    await sequelize.transaction();
+/**
+ * Raise complaint against selected transfer items.
+ *
+ * Important:
+ * - Transfer status will remain "in_transit".
+ * - Stock request status will not be changed.
+ * - Remaining transfer items can still be received.
+ * - Complaint items remain tracked separately.
+ */
+export const raiseTransferComplaint = async (req, res) => {
+  const transaction = await sequelize.transaction();
 
   try {
     const { transferId } = req.params;
@@ -97,21 +108,38 @@ export const raiseTransferComplaint = async (
     }
 
     // =====================================================
-    // ITEMS PARSE
-    // Multipart form-data me items JSON string aayega
+    // TRANSFER ID VALIDATION
     // =====================================================
 
-    const requestedItems = parseComplaintItems(
-      req.body.items
-    );
+    const parsedTransferId = Number(transferId);
+
+    if (
+      !parsedTransferId ||
+      !Number.isInteger(parsedTransferId) ||
+      parsedTransferId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Valid transferId is required",
+      });
+    }
+
+    // =====================================================
+    // ITEMS PARSE
+    //
+    // Multipart form-data me items JSON string aayega.
+    // =====================================================
+
+    const requestedItems = parseComplaintItems(req.body.items);
 
     if (!requestedItems.length) {
       await transaction.rollback();
 
       return res.status(400).json({
         success: false,
-        message:
-          "At least one complaint item is required",
+        message: "At least one complaint item is required",
       });
     }
 
@@ -123,15 +151,11 @@ export const raiseTransferComplaint = async (
     // video  = exactly 1 file
     // =====================================================
 
-    const images = Array.isArray(
-      req.files?.images
-    )
+    const images = Array.isArray(req.files?.images)
       ? req.files.images
       : [];
 
-    const videos = Array.isArray(
-      req.files?.video
-    )
+    const videos = Array.isArray(req.files?.video)
       ? req.files.video
       : [];
 
@@ -140,8 +164,7 @@ export const raiseTransferComplaint = async (
 
       return res.status(400).json({
         success: false,
-        message:
-          "Exactly 2 complaint images are required",
+        message: "Exactly 2 complaint images are required",
       });
     }
 
@@ -150,8 +173,7 @@ export const raiseTransferComplaint = async (
 
       return res.status(400).json({
         success: false,
-        message:
-          "Exactly 1 complaint video is required",
+        message: "Exactly 1 complaint video is required",
       });
     }
 
@@ -174,9 +196,7 @@ export const raiseTransferComplaint = async (
     ];
 
     for (const image of images) {
-      if (
-        !validImageTypes.includes(image.mimetype)
-      ) {
+      if (!validImageTypes.includes(image.mimetype)) {
         await transaction.rollback();
 
         return res.status(400).json({
@@ -187,11 +207,7 @@ export const raiseTransferComplaint = async (
       }
     }
 
-    if (
-      !validVideoTypes.includes(
-        videos[0].mimetype
-      )
-    ) {
+    if (!validVideoTypes.includes(videos[0].mimetype)) {
       await transaction.rollback();
 
       return res.status(400).json({
@@ -206,7 +222,7 @@ export const raiseTransferComplaint = async (
     // =====================================================
 
     const transfer = await StockTransfer.findByPk(
-      transferId,
+      parsedTransferId,
       {
         transaction,
         lock: transaction.LOCK.UPDATE,
@@ -239,9 +255,14 @@ export const raiseTransferComplaint = async (
       });
     }
 
-    const transferStatus = String(
-      transfer.status || ""
-    )
+    // =====================================================
+    // TRANSFER STATUS VALIDATION
+    //
+    // Transfer complaint ke baad bhi in_transit hi rahega,
+    // taaki remaining items receive ho sakein.
+    // =====================================================
+
+    const transferStatus = String(transfer.status || "")
       .trim()
       .toLowerCase();
 
@@ -265,10 +286,7 @@ export const raiseTransferComplaint = async (
           transfer_id: transfer.id,
 
           status: {
-            [Op.in]: [
-              "open",
-              "under_review",
-            ],
+            [Op.in]: ["open", "under_review"],
           },
         },
 
@@ -286,14 +304,9 @@ export const raiseTransferComplaint = async (
           "An active complaint already exists for this transfer",
 
         data: {
-          complaint_id:
-            existingComplaint.id,
-
-          complaint_no:
-            existingComplaint.complaint_no,
-
-          status:
-            existingComplaint.status,
+          complaint_id: existingComplaint.id,
+          complaint_no: existingComplaint.complaint_no,
+          status: existingComplaint.status,
         },
       });
     }
@@ -302,23 +315,21 @@ export const raiseTransferComplaint = async (
     // FETCH TRANSFER ITEMS
     // =====================================================
 
-    const transferItems =
-      await StockTransferItem.findAll({
-        where: {
-          transfer_id: transfer.id,
-        },
+    const transferItems = await StockTransferItem.findAll({
+      where: {
+        transfer_id: transfer.id,
+      },
 
-        transaction,
-        lock: transaction.LOCK.UPDATE,
-      });
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
 
     if (!transferItems.length) {
       await transaction.rollback();
 
       return res.status(400).json({
         success: false,
-        message:
-          "No items found in this transfer",
+        message: "No items found in this transfer",
       });
     }
 
@@ -332,7 +343,36 @@ export const raiseTransferComplaint = async (
     }
 
     // =====================================================
-    // VALIDATE AND PREPARE ITEMS JSON
+    // VALIDATE DUPLICATE TRANSFER ITEMS IN PAYLOAD
+    // =====================================================
+
+    const requestedTransferItemIds = new Set();
+
+    for (const requestedItem of requestedItems) {
+      const transferItemId = Number(
+        requestedItem.transfer_item_id
+      );
+
+      if (
+        transferItemId &&
+        requestedTransferItemIds.has(transferItemId)
+      ) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          success: false,
+          message:
+            `Duplicate transfer_item_id ${transferItemId} found in complaint items`,
+        });
+      }
+
+      if (transferItemId) {
+        requestedTransferItemIds.add(transferItemId);
+      }
+    }
+
+    // =====================================================
+    // VALIDATE AND PREPARE COMPLAINT ITEMS JSON
     // =====================================================
 
     const complaintItems = [];
@@ -360,19 +400,13 @@ export const raiseTransferComplaint = async (
 
         return res.status(400).json({
           success: false,
-
           message:
             `Transfer item ${transferItemId} does not belong to this transfer`,
         });
       }
 
-      const sentQty = toNumber(
-        transferItem.qty
-      );
-
-      const sentWeight = toNumber(
-        transferItem.weight
-      );
+      const sentQty = toNumber(transferItem.qty);
+      const sentWeight = toNumber(transferItem.weight);
 
       const receivedQty = toNumber(
         requestedItem.received_qty
@@ -381,6 +415,10 @@ export const raiseTransferComplaint = async (
       const receivedWeight = toNumber(
         requestedItem.received_weight
       );
+
+      // ===================================================
+      // QUANTITY VALIDATION
+      // ===================================================
 
       if (receivedQty < 0) {
         await transaction.rollback();
@@ -392,38 +430,39 @@ export const raiseTransferComplaint = async (
         });
       }
 
-      if (receivedQty >= sentQty) {
-        await transaction.rollback();
-
-        return res.status(400).json({
-          success: false,
-
-          message:
-            `Complaint cannot be raised because no quantity shortage exists for transfer item ${transferItemId}`,
-
-          sent_qty: sentQty,
-
-          received_qty: receivedQty,
-        });
-      }
-
       if (receivedQty > sentQty) {
         await transaction.rollback();
 
         return res.status(400).json({
           success: false,
-
           message:
             `Received quantity cannot exceed sent quantity for transfer item ${transferItemId}`,
+          sent_qty: sentQty,
+          received_qty: receivedQty,
         });
       }
+
+      if (receivedQty >= sentQty) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          success: false,
+          message:
+            `Complaint cannot be raised because no quantity shortage exists for transfer item ${transferItemId}`,
+          sent_qty: sentQty,
+          received_qty: receivedQty,
+        });
+      }
+
+      // ===================================================
+      // WEIGHT VALIDATION
+      // ===================================================
 
       if (receivedWeight < 0) {
         await transaction.rollback();
 
         return res.status(400).json({
           success: false,
-
           message:
             `Received weight cannot be negative for transfer item ${transferItemId}`,
         });
@@ -437,17 +476,15 @@ export const raiseTransferComplaint = async (
 
         return res.status(400).json({
           success: false,
-
           message:
             `Received weight cannot exceed sent weight for transfer item ${transferItemId}`,
+          sent_weight: sentWeight,
+          received_weight: receivedWeight,
         });
       }
 
       const shortageQty = Number(
-        Math.max(
-          0,
-          sentQty - receivedQty
-        ).toFixed(3)
+        Math.max(0, sentQty - receivedQty).toFixed(3)
       );
 
       const shortageWeight = Number(
@@ -459,25 +496,17 @@ export const raiseTransferComplaint = async (
 
       complaintItems.push({
         transfer_item_id: transferItem.id,
-
         item_id: transferItem.item_id,
 
         sent_qty: sentQty,
-
         received_qty: receivedQty,
-
         shortage_qty: shortageQty,
 
         sent_weight: sentWeight,
+        received_weight: receivedWeight,
+        shortage_weight: shortageWeight,
 
-        received_weight:
-          receivedWeight,
-
-        shortage_weight:
-          shortageWeight,
-
-        note:
-          requestedItem.note || null,
+        note: requestedItem.note || null,
       });
     }
 
@@ -485,26 +514,23 @@ export const raiseTransferComplaint = async (
     // UPLOAD 2 IMAGES AND 1 VIDEO
     // =====================================================
 
-    const image1Upload =
-      await uploadToCloudinary(
-        images[0].path,
-        "stock-transfer-complaints/images",
-        "image"
-      );
+    const image1Upload = await uploadToCloudinary(
+      images[0].path,
+      "stock-transfer-complaints/images",
+      "image"
+    );
 
-    const image2Upload =
-      await uploadToCloudinary(
-        images[1].path,
-        "stock-transfer-complaints/images",
-        "image"
-      );
+    const image2Upload = await uploadToCloudinary(
+      images[1].path,
+      "stock-transfer-complaints/images",
+      "image"
+    );
 
-    const videoUpload =
-      await uploadToCloudinary(
-        videos[0].path,
-        "stock-transfer-complaints/videos",
-        "video"
-      );
+    const videoUpload = await uploadToCloudinary(
+      videos[0].path,
+      "stock-transfer-complaints/videos",
+      "video"
+    );
 
     const image1Url =
       image1Upload?.secure_url ||
@@ -521,11 +547,7 @@ export const raiseTransferComplaint = async (
       videoUpload?.url ||
       null;
 
-    if (
-      !image1Url ||
-      !image2Url ||
-      !videoUrl
-    ) {
+    if (!image1Url || !image2Url || !videoUrl) {
       throw new Error(
         "Failed to upload complaint evidence"
       );
@@ -535,11 +557,10 @@ export const raiseTransferComplaint = async (
     // CREATE COMPLAINT
     // =====================================================
 
-    const complaintNo =
-      generateComplaintNo(
-        transfer.transfer_no,
-        transfer.id
-      );
+    const complaintNo = generateComplaintNo(
+      transfer.transfer_no,
+      transfer.id
+    );
 
     const complaint =
       await StockTransferComplaint.create(
@@ -554,34 +575,23 @@ export const raiseTransferComplaint = async (
           to_organization_id:
             transfer.to_organization_id,
 
-          complaint_type:
-            String(
-              complaint_type ||
-                "quantity_shortage"
-            )
-              .trim()
-              .toLowerCase(),
+          complaint_type: String(
+            complaint_type || "quantity_shortage"
+          )
+            .trim()
+            .toLowerCase(),
 
-          description:
-            description || null,
+          description: description || null,
 
-          items:
-            complaintItems,
+          items: complaintItems,
 
-          image_1_url:
-            image1Url,
+          image_1_url: image1Url,
+          image_2_url: image2Url,
+          video_url: videoUrl,
 
-          image_2_url:
-            image2Url,
+          status: "open",
 
-          video_url:
-            videoUrl,
-
-          status:
-            "open",
-
-          raised_by:
-            user.id,
+          raised_by: user.id,
         },
         {
           transaction,
@@ -589,21 +599,37 @@ export const raiseTransferComplaint = async (
       );
 
     // =====================================================
-    // UPDATE TRANSFER STATUS
+    // IMPORTANT CHANGE
     //
-    // Stock receive nahi hoga.
-    // Destination available_qty update nahi hogi.
-    // Source transit_qty clear nahi hogi.
+    // Transfer ka status "complaint_raised" nahi karenge.
+    // Transfer "in_transit" hi rahega.
+    //
+    // Isse:
+    // 1. Transfer card list me visible rahega.
+    // 2. Remaining items receive ho sakenge.
+    // 3. Complaint items separately track honge.
+    //
+    // Sirf remarks me complaint details save kar rahe hain.
     // =====================================================
+
+    const oldRemarks = String(
+      transfer.remarks || ""
+    ).trim();
+
+    const complaintRemark =
+      description ||
+      `Complaint ${complaintNo} raised due to quantity shortage`;
+
+    const updatedRemarks = oldRemarks
+      ? `${oldRemarks}\n${complaintRemark}`
+      : complaintRemark;
 
     await transfer.update(
       {
-        status:
-          "complaint_raised",
+        remarks: updatedRemarks,
 
-        remarks:
-          description ||
-          `Complaint ${complaintNo} raised due to quantity shortage`,
+        // Status intentionally unchanged.
+        // Current status "in_transit" hi rahega.
       },
       {
         transaction,
@@ -611,35 +637,18 @@ export const raiseTransferComplaint = async (
     );
 
     // =====================================================
-    // REQUEST STATUS
+    // IMPORTANT CHANGE
     //
-    // Agar StockRequest status constraint me
-    // complaint_raised available nahi hai,
-    // to is block ko remove kar dena.
+    // StockRequest ka status bhi change nahi hoga.
+    //
+    // Pehle request status complaint_raised ho raha tha,
+    // jiski wajah se request/card frontend list se disappear
+    // ho raha tha.
+    //
+    // Ab StockRequest ko touch nahi karenge.
     // =====================================================
 
-    if (transfer.request_id) {
-      const request =
-        await StockRequest.findByPk(
-          transfer.request_id,
-          {
-            transaction,
-            lock: transaction.LOCK.UPDATE,
-          }
-        );
-
-      if (request) {
-        await request.update(
-          {
-            status:
-              "complaint_raised",
-          },
-          {
-            transaction,
-          }
-        );
-      }
-    }
+    // No StockRequest status update here.
 
     // =====================================================
     // SYSTEM ACTIVITY
@@ -647,11 +656,10 @@ export const raiseTransferComplaint = async (
 
     await SystemActivity.create(
       {
-        title:
-          "Stock transfer complaint raised",
+        title: "Stock transfer complaint raised",
 
         description:
-          `Complaint ${complaintNo} raised against transfer ${transfer.transfer_no}`,
+          `Complaint ${complaintNo} raised against transfer ${transfer.transfer_no}. Transfer remains in transit for remaining items.`,
 
         activity_type:
           "stock_transfer_complaint_raised",
@@ -659,26 +667,17 @@ export const raiseTransferComplaint = async (
         module_name:
           "stock_transfer_complaint",
 
-        reference_id:
-          complaint.id,
-
-        reference_no:
-          complaintNo,
+        reference_id: complaint.id,
+        reference_no: complaintNo,
 
         district_code:
           user.district_code || null,
 
-        store_code:
-          receiverStoreCode,
+        store_code: receiverStoreCode,
+        store_name: user.store_name || null,
 
-        store_name:
-          user.store_name || null,
-
-        created_by:
-          user.id,
-
-        created_at:
-          new Date(),
+        created_by: user.id,
+        created_at: new Date(),
       },
       {
         transaction,
@@ -691,11 +690,9 @@ export const raiseTransferComplaint = async (
 
     await ActivityLog.create(
       {
-        organization_id:
-          user.organization_id,
+        organization_id: user.organization_id,
 
-        user_id:
-          user.id,
+        user_id: user.id,
 
         action:
           "stock_transfer_complaint_raised",
@@ -703,30 +700,21 @@ export const raiseTransferComplaint = async (
         module_name:
           "stock_transfer_complaint",
 
-        reference_id:
-          complaint.id,
-
-        reference_no:
-          complaintNo,
+        reference_id: complaint.id,
+        reference_no: complaintNo,
 
         title:
           "Stock transfer complaint raised",
 
         description:
-          `Complaint ${complaintNo} raised against transfer ${transfer.transfer_no}`,
+          `Complaint ${complaintNo} raised against transfer ${transfer.transfer_no}. Remaining items can still be received.`,
 
         meta: {
-          complaint_id:
-            complaint.id,
+          complaint_id: complaint.id,
+          complaint_no: complaintNo,
 
-          complaint_no:
-            complaintNo,
-
-          transfer_id:
-            transfer.id,
-
-          transfer_no:
-            transfer.transfer_no,
+          transfer_id: transfer.id,
+          transfer_no: transfer.transfer_no,
 
           from_organization_id:
             transfer.from_organization_id,
@@ -734,33 +722,29 @@ export const raiseTransferComplaint = async (
           to_organization_id:
             transfer.to_organization_id,
 
-          store_code:
-            receiverStoreCode,
+          store_code: receiverStoreCode,
 
           complaint_type:
             complaint.complaint_type,
 
-          items:
-            complaintItems,
+          items: complaintItems,
 
-          image_1_url:
-            image1Url,
+          image_1_url: image1Url,
+          image_2_url: image2Url,
+          video_url: videoUrl,
 
-          image_2_url:
-            image2Url,
+          complaint_status: "open",
 
-          video_url:
-            videoUrl,
+          transfer_status:
+            transfer.status,
 
-          status:
-            "open",
+          transfer_status_changed: false,
+
+          remaining_items_receivable: true,
         },
 
-        icon:
-          "complaint",
-
-        color:
-          "red",
+        icon: "complaint",
+        color: "red",
       },
       {
         transaction,
@@ -769,15 +753,18 @@ export const raiseTransferComplaint = async (
 
     await transaction.commit();
 
+    // =====================================================
+    // SUCCESS RESPONSE
+    // =====================================================
+
     return res.status(201).json({
       success: true,
 
       message:
-        "Transfer complaint raised successfully. Stock has not been received.",
+        "Transfer complaint raised successfully. Transfer card will remain visible and remaining items can still be received.",
 
       data: {
-        id:
-          complaint.id,
+        id: complaint.id,
 
         complaint_no:
           complaint.complaint_no,
@@ -788,14 +775,22 @@ export const raiseTransferComplaint = async (
         transfer_no:
           transfer.transfer_no,
 
+        transfer_status:
+          transfer.status,
+
+        transfer_status_changed: false,
+
+        card_should_remain_visible: true,
+
+        remaining_items_receivable: true,
+
         complaint_type:
           complaint.complaint_type,
 
         description:
           complaint.description,
 
-        items:
-          complaint.items,
+        items: complaint.items,
 
         evidence: {
           image_1_url:
@@ -808,8 +803,7 @@ export const raiseTransferComplaint = async (
             complaint.video_url,
         },
 
-        status:
-          complaint.status,
+        status: complaint.status,
 
         raised_by:
           complaint.raised_by,
@@ -833,12 +827,9 @@ export const raiseTransferComplaint = async (
 
     return res.status(500).json({
       success: false,
-
       message:
         "Failed to raise transfer complaint",
-
-      error:
-        error.message,
+      error: error.message,
     });
   }
 };
