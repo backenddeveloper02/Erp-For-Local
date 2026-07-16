@@ -3071,24 +3071,65 @@ const generateSkuCode = async ({
   transaction,
 }) => {
   const prefix = getOrganizationPrefix(user);
-  const categoryCode = cleanCodePart(category, "GEN");
-  const subCategoryCode = cleanCodePart(sub_category, "SUB");
+
+  const storeCode = cleanCodePart(
+    user.store_code || user.storeCode,
+    "STORE"
+  );
+
+  const categoryCode = cleanCodePart(
+    category,
+    "GEN"
+  );
+
+  const subCategoryCode = cleanCodePart(
+    sub_category,
+    "SUB"
+  );
+
   const monthYear = getMonthYear();
 
+  /*
+   * Sequence organization/store-wise chalegi.
+   *
+   * DST500 ki sequence alag.
+   * STR501 ki sequence alag.
+   */
   const serial = await getNextSequenceNumber({
-    organization_id: user.organization_id,
-    organization_level: user.organization_level,
-    store_code: user.store_code || user.storeCode || null,
+    organization_id: Number(
+      user.organization_id
+    ),
+
+    organization_level:
+      user.organization_level,
+
+    store_code:
+      user.store_code ||
+      user.storeCode ||
+      null,
+
     code_type: "SKU",
-    category_code: categoryCode,
-    sub_category_code: subCategoryCode,
-    month_year: monthYear,
+
+    category_code:
+      categoryCode,
+
+    sub_category_code:
+      subCategoryCode,
+
+    month_year:
+      monthYear,
+
     transaction,
   });
 
-  return `${prefix}-${categoryCode}-${subCategoryCode}-${monthYear}-${String(
-    serial
-  ).padStart(3, "0")}`;
+  return [
+    prefix,
+    storeCode,
+    categoryCode,
+    subCategoryCode,
+    monthYear,
+    String(serial).padStart(3, "0"),
+  ].join("-");
 };
 
 export const addStockIn = async (req, res) => {
