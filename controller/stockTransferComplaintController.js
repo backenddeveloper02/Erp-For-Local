@@ -7,7 +7,7 @@ import StockTransferItem from "../model/stockTransferItem.js";
 import StockTransferComplaint from "../model/StockTransferComplaint.js";
 import SystemActivity from "../model/systemActivity.js";
 import ActivityLog from "../model/activityLog.js";
-
+import Store from "../model/Store.js";
 import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
 
 /**
@@ -2191,6 +2191,922 @@ export const updateTransferComplaintStatus = async (
 
       message:
         "Failed to update complaint status",
+
+      error:
+        error.message,
+    });
+  }
+};
+/**
+ * =========================================================
+ * GET ALL STOCK TRANSFER COMPLAINTS FOR HEAD OFFICE
+ * =========================================================
+ *
+ * Head Office saare stores ki complaints dekh sakta hai.
+ *
+ * Route:
+ * GET /api/stock-transfer-complaints/head/all
+ *
+ * Query params:
+ *
+ * page
+ * limit
+ * status
+ * complaint_type
+ * search
+ * from_store_code
+ * to_store_code
+ * date_from
+ * date_to
+ *
+ * Examples:
+ *
+ * GET /api/stock-transfer-complaints/head/all
+ *
+ * GET /api/stock-transfer-complaints/head/all?status=open
+ *
+ * GET /api/stock-transfer-complaints/head/all?search=CMP
+ *
+ * GET /api/stock-transfer-complaints/head/all?from_store_code=DST500
+ *
+ * GET /api/stock-transfer-complaints/head/all?page=1&limit=10
+ */
+export const getHeadAllTransferComplaints = async (
+  req,
+  res
+) => {
+  try {
+    const user = req.user;
+
+    // =====================================================
+    // AUTHENTICATION
+    // =====================================================
+
+    if (!user?.id) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user",
+      });
+    }
+
+    // =====================================================
+    // HEAD OFFICE AUTHORIZATION
+    // =====================================================
+
+    const role = String(user.role || "")
+      .trim()
+      .toLowerCase();
+
+    const organizationLevel = String(
+      user.organization_level || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    const allowedRoles = [
+      "super_admin",
+      "super-admin",
+      "head_admin",
+      "head-admin",
+      "head_manager",
+      "head-manager",
+      "head_office",
+    ];
+
+    const isHeadUser =
+      allowedRoles.includes(role) ||
+      organizationLevel === "head_office" ||
+      organizationLevel === "head office" ||
+      organizationLevel === "head";
+
+    if (!isHeadUser) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "Only Head Office users can access all complaints",
+      });
+    }
+
+    // =====================================================
+    // QUERY PARAMETERS
+    // =====================================================
+
+    const {
+      page = 1,
+      limit = 10,
+      status,
+      complaint_type,
+      search,
+      from_store_code,
+      to_store_code,
+      date_from,
+      date_to,
+    } = req.query;
+
+    const pageNumber = Math.max(
+      Number(page) || 1,
+      1
+    );
+
+    const pageLimit = Math.min(
+      Math.max(Number(limit) || 10, 1),
+      100
+    );
+
+    const offset =
+      (pageNumber - 1) * pageLimit;
+
+    // =====================================================
+    // COMPLAINT WHERE CONDITION
+    // =====================================================
+
+    const complaintWhere = {};
+
+    // =====================================================
+    // STATUS FILTER
+    // =====================================================
+
+    if (
+      status &&
+      String(status).trim().toLowerCase() !== "all"
+    ) {
+      complaintWhere.status = String(status)
+        .trim()
+        .toLowerCase();
+    }
+
+    // =====================================================
+    // COMPLAINT TYPE FILTER
+    // =====================================================
+
+    if (
+      complaint_type &&
+      String(complaint_type)
+        .trim()
+        .toLowerCase() !== "all"
+    ) {
+      complaintWhere.complaint_type = String(
+        complaint_type
+      )
+        .trim()
+        .toLowerCase();
+    }
+
+    // =====================================================
+    // DATE FILTER
+    // =====================================================
+
+    if (date_from || date_to) {
+      complaintWhere.created_at = {};
+
+      if (date_from) {
+        const fromDate = new Date(
+          `${date_from}T00:00:00.000Z`
+        );
+
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid date_from. Use YYYY-MM-DD format",
+          });
+        }
+
+        complaintWhere.created_at[Op.gte] =
+          fromDate;
+      }
+
+      if (date_to) {
+        const toDate = new Date(
+          `${date_to}T23:59:59.999Z`
+        );
+
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid date_to. Use YYYY-MM-DD format",
+          });
+        }
+
+        complaintWhere.created_at[Op.lte] =
+          toDate;
+      }
+    }
+
+    // =====================================================
+    // STORE CODE FILTERS
+    //
+    // Pehle matching stores ke IDs niklenge.
+    // =====================================================
+
+    if (from_store_code) {
+      const cleanFromStoreCode = String(
+        from_store_code
+      )
+        .trim()
+        .toUpperCase();
+
+      const fromStore = await Store.findOne({
+        where: {
+          store_code: {
+            [Op.iLike]: cleanFromStoreCode,
+          },
+        },
+
+        attributes: [
+          "id",
+          "store_code",
+          "store_name",
+        ],
+
+        raw: true,
+      });
+
+      if (!fromStore) {
+        return res.status(200).json({
+          success: true,
+          message:
+            "No complaints found for given from_store_code",
+          summary: {
+            total_complaints: 0,
+            open_complaints: 0,
+            under_review_complaints: 0,
+            resolved_complaints: 0,
+            rejected_complaints: 0,
+            closed_complaints: 0,
+          },
+          pagination: {
+            page: pageNumber,
+            limit: pageLimit,
+            total_records: 0,
+            total_pages: 0,
+            has_next_page: false,
+            has_previous_page: false,
+          },
+          data: [],
+        });
+      }
+
+      complaintWhere.from_organization_id =
+        Number(fromStore.id);
+    }
+
+    if (to_store_code) {
+      const cleanToStoreCode = String(to_store_code)
+        .trim()
+        .toUpperCase();
+
+      const toStore = await Store.findOne({
+        where: {
+          store_code: {
+            [Op.iLike]: cleanToStoreCode,
+          },
+        },
+
+        attributes: [
+          "id",
+          "store_code",
+          "store_name",
+        ],
+
+        raw: true,
+      });
+
+      if (!toStore) {
+        return res.status(200).json({
+          success: true,
+          message:
+            "No complaints found for given to_store_code",
+          summary: {
+            total_complaints: 0,
+            open_complaints: 0,
+            under_review_complaints: 0,
+            resolved_complaints: 0,
+            rejected_complaints: 0,
+            closed_complaints: 0,
+          },
+          pagination: {
+            page: pageNumber,
+            limit: pageLimit,
+            total_records: 0,
+            total_pages: 0,
+            has_next_page: false,
+            has_previous_page: false,
+          },
+          data: [],
+        });
+      }
+
+      complaintWhere.to_organization_id =
+        Number(toStore.id);
+    }
+
+    // =====================================================
+    // SEARCH FILTER
+    //
+    // Search complaint_no, description aur transfer_no.
+    // =====================================================
+
+    const cleanSearch = String(search || "").trim();
+
+    if (cleanSearch) {
+      const matchingTransfers =
+        await StockTransfer.findAll({
+          where: {
+            transfer_no: {
+              [Op.iLike]: `%${cleanSearch}%`,
+            },
+          },
+
+          attributes: ["id"],
+
+          raw: true,
+        });
+
+      const matchingTransferIds =
+        matchingTransfers
+          .map((transfer) => Number(transfer.id))
+          .filter(Boolean);
+
+      const searchConditions = [
+        {
+          complaint_no: {
+            [Op.iLike]: `%${cleanSearch}%`,
+          },
+        },
+        {
+          description: {
+            [Op.iLike]: `%${cleanSearch}%`,
+          },
+        },
+        {
+          complaint_type: {
+            [Op.iLike]: `%${cleanSearch}%`,
+          },
+        },
+      ];
+
+      if (matchingTransferIds.length > 0) {
+        searchConditions.push({
+          transfer_id: {
+            [Op.in]: matchingTransferIds,
+          },
+        });
+      }
+
+      complaintWhere[Op.or] =
+        searchConditions;
+    }
+
+    // =====================================================
+    // FETCH COMPLAINTS
+    // =====================================================
+
+    const {
+      count,
+      rows: complaintModels,
+    } =
+      await StockTransferComplaint.findAndCountAll({
+        where: complaintWhere,
+
+        order: [
+          ["created_at", "DESC"],
+          ["id", "DESC"],
+        ],
+
+        limit: pageLimit,
+        offset,
+
+        distinct: true,
+      });
+
+    // =====================================================
+    // FETCH RELATED TRANSFERS
+    // =====================================================
+
+    const complaints = complaintModels.map(
+      (complaint) => complaint.toJSON()
+    );
+
+    const transferIds = [
+      ...new Set(
+        complaints
+          .map((complaint) =>
+            Number(complaint.transfer_id)
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+    const transfers =
+      transferIds.length > 0
+        ? await StockTransfer.findAll({
+            where: {
+              id: {
+                [Op.in]: transferIds,
+              },
+            },
+
+            raw: true,
+          })
+        : [];
+
+    const transferMap = new Map();
+
+    for (const transfer of transfers) {
+      transferMap.set(
+        Number(transfer.id),
+        transfer
+      );
+    }
+
+    // =====================================================
+    // FETCH RELATED STORES
+    // =====================================================
+
+    const organizationIds = [
+      ...new Set(
+        complaints
+          .flatMap((complaint) => [
+            Number(
+              complaint.from_organization_id
+            ),
+            Number(
+              complaint.to_organization_id
+            ),
+          ])
+          .filter(Boolean)
+      ),
+    ];
+
+    const stores =
+      organizationIds.length > 0
+        ? await Store.findAll({
+            where: {
+              id: {
+                [Op.in]: organizationIds,
+              },
+            },
+
+            attributes: [
+              "id",
+              "store_code",
+              "store_name",
+              "organization_level",
+              "district_id",
+              "address",
+              "is_active",
+            ],
+
+            raw: true,
+          })
+        : [];
+
+    const storeMap = new Map();
+
+    for (const store of stores) {
+      storeMap.set(Number(store.id), store);
+    }
+
+    // =====================================================
+    // FORMAT COMPLAINT RESPONSE
+    // =====================================================
+
+    const formattedComplaints = complaints.map(
+      (complaint) => {
+        const transfer =
+          transferMap.get(
+            Number(complaint.transfer_id)
+          ) || null;
+
+        const fromStore =
+          storeMap.get(
+            Number(
+              complaint.from_organization_id
+            )
+          ) || null;
+
+        const toStore =
+          storeMap.get(
+            Number(
+              complaint.to_organization_id
+            )
+          ) || null;
+
+        const complaintItems =
+          Array.isArray(complaint.items)
+            ? complaint.items
+            : [];
+
+        const totalSentQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.sent_qty || 0),
+            0
+          );
+
+        const totalReceivedQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.received_qty || 0),
+            0
+          );
+
+        const totalShortageQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.shortage_qty || 0),
+            0
+          );
+
+        const totalSentWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.sent_weight || 0),
+            0
+          );
+
+        const totalReceivedWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.received_weight || 0
+              ),
+            0
+          );
+
+        const totalShortageWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.shortage_weight || 0
+              ),
+            0
+          );
+
+        return {
+          complaint_id: complaint.id,
+
+          complaint_no:
+            complaint.complaint_no,
+
+          complaint_type:
+            complaint.complaint_type,
+
+          description:
+            complaint.description,
+
+          /*
+           * Current complaint status.
+           */
+          status:
+            complaint.status,
+
+          complaint_status:
+            complaint.status,
+
+          status_label:
+            String(complaint.status || "")
+              .replace(/_/g, " ")
+              .replace(/\b\w/g, (letter) =>
+                letter.toUpperCase()
+              ),
+
+          items:
+            complaintItems,
+
+          item_summary: {
+            total_complaint_items:
+              complaintItems.length,
+
+            total_sent_qty: Number(
+              totalSentQty.toFixed(3)
+            ),
+
+            total_received_qty: Number(
+              totalReceivedQty.toFixed(3)
+            ),
+
+            total_shortage_qty: Number(
+              totalShortageQty.toFixed(3)
+            ),
+
+            total_sent_weight: Number(
+              totalSentWeight.toFixed(3)
+            ),
+
+            total_received_weight: Number(
+              totalReceivedWeight.toFixed(3)
+            ),
+
+            total_shortage_weight: Number(
+              totalShortageWeight.toFixed(3)
+            ),
+          },
+
+          transfer: transfer
+            ? {
+                transfer_id:
+                  transfer.id,
+
+                transfer_no:
+                  transfer.transfer_no,
+
+                request_id:
+                  transfer.request_id || null,
+
+                status:
+                  transfer.status,
+
+                from_organization_id:
+                  transfer.from_organization_id,
+
+                to_organization_id:
+                  transfer.to_organization_id,
+
+                remarks:
+                  transfer.remarks || null,
+
+                driver_name:
+                  transfer.driver_name || null,
+
+                driver_phone:
+                  transfer.driver_phone || null,
+
+                vehicle_number:
+                  transfer.vehicle_number || null,
+
+                expected_delivery_date:
+                  transfer.expected_delivery_date ||
+                  null,
+
+                expected_delivery_time:
+                  transfer.expected_delivery_time ||
+                  null,
+
+                created_at:
+                  transfer.created_at ||
+                  transfer.createdAt ||
+                  null,
+              }
+            : {
+                transfer_id:
+                  complaint.transfer_id,
+
+                transfer_no: null,
+                status: null,
+              },
+
+          /*
+           * Complaint kis store ke against raise hui.
+           */
+          against_store: {
+            organization_id:
+              complaint.from_organization_id,
+
+            store_code:
+              fromStore?.store_code || null,
+
+            store_name:
+              fromStore?.store_name || null,
+
+            organization_level:
+              fromStore?.organization_level ||
+              null,
+
+            district_id:
+              fromStore?.district_id || null,
+
+            address:
+              fromStore?.address || null,
+          },
+
+          /*
+           * Complaint kis receiving store ne raise ki.
+           */
+          raised_by_store: {
+            organization_id:
+              complaint.to_organization_id,
+
+            store_code:
+              toStore?.store_code || null,
+
+            store_name:
+              toStore?.store_name || null,
+
+            organization_level:
+              toStore?.organization_level ||
+              null,
+
+            district_id:
+              toStore?.district_id || null,
+
+            address:
+              toStore?.address || null,
+          },
+
+          evidence: {
+            image_1_url:
+              complaint.image_1_url || null,
+
+            image_2_url:
+              complaint.image_2_url || null,
+
+            video_url:
+              complaint.video_url || null,
+          },
+
+          raised_by:
+            complaint.raised_by || null,
+
+          resolved_by:
+            complaint.resolved_by || null,
+
+          resolution_note:
+            complaint.resolution_note || null,
+
+          reviewed_by:
+            complaint.reviewed_by || null,
+
+          reviewed_at:
+            complaint.reviewed_at || null,
+
+          resolved_at:
+            complaint.resolved_at || null,
+
+          rejected_at:
+            complaint.rejected_at || null,
+
+          closed_at:
+            complaint.closed_at || null,
+
+          created_at:
+            complaint.created_at ||
+            complaint.createdAt ||
+            null,
+
+          updated_at:
+            complaint.updated_at ||
+            complaint.updatedAt ||
+            null,
+        };
+      }
+    );
+
+    // =====================================================
+    // STATUS-WISE SUMMARY
+    //
+    // Filters apply hone ke baad matching complaints ka
+    // status-wise count return hoga.
+    // =====================================================
+
+    const summaryWhere = {
+      ...complaintWhere,
+    };
+
+    /*
+     * Status filter summary par nahi lagayenge,
+     * taaki cards me saare status counts dikh sakein.
+     */
+    delete summaryWhere.status;
+
+    const summaryRows =
+      await StockTransferComplaint.findAll({
+        where: summaryWhere,
+
+        attributes: ["status"],
+
+        raw: true,
+      });
+
+    const summary = {
+      total_complaints:
+        summaryRows.length,
+
+      open_complaints: 0,
+
+      under_review_complaints: 0,
+
+      resolved_complaints: 0,
+
+      rejected_complaints: 0,
+
+      closed_complaints: 0,
+
+      other_complaints: 0,
+    };
+
+    for (const row of summaryRows) {
+      const currentStatus = String(
+        row.status || ""
+      )
+        .trim()
+        .toLowerCase();
+
+      if (currentStatus === "open") {
+        summary.open_complaints += 1;
+      } else if (
+        currentStatus === "under_review"
+      ) {
+        summary.under_review_complaints += 1;
+      } else if (
+        currentStatus === "resolved"
+      ) {
+        summary.resolved_complaints += 1;
+      } else if (
+        currentStatus === "rejected"
+      ) {
+        summary.rejected_complaints += 1;
+      } else if (
+        currentStatus === "closed"
+      ) {
+        summary.closed_complaints += 1;
+      } else {
+        summary.other_complaints += 1;
+      }
+    }
+
+    const totalPages =
+      count > 0
+        ? Math.ceil(count / pageLimit)
+        : 0;
+
+    // =====================================================
+    // FINAL RESPONSE
+    // =====================================================
+
+    return res.status(200).json({
+      success: true,
+
+      message:
+        "All transfer complaints fetched successfully",
+
+      summary,
+
+      applied_filters: {
+        status:
+          status || "all",
+
+        complaint_type:
+          complaint_type || "all",
+
+        search:
+          search || null,
+
+        from_store_code:
+          from_store_code || null,
+
+        to_store_code:
+          to_store_code || null,
+
+        date_from:
+          date_from || null,
+
+        date_to:
+          date_to || null,
+      },
+
+      pagination: {
+        page: pageNumber,
+        limit: pageLimit,
+
+        total_records:
+          count,
+
+        total_pages:
+          totalPages,
+
+        has_next_page:
+          pageNumber < totalPages,
+
+        has_previous_page:
+          pageNumber > 1,
+      },
+
+      count:
+        formattedComplaints.length,
+
+      data:
+        formattedComplaints,
+    });
+  } catch (error) {
+    console.error(
+      "getHeadAllTransferComplaints error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+
+      message:
+        "Failed to fetch all transfer complaints",
 
       error:
         error.message,
