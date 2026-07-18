@@ -5,7 +5,6 @@ import sequelize from "../config/db.js";
 import StockTransfer from "../model/stockTransfer.js";
 import StockTransferItem from "../model/stockTransferItem.js";
 import StockTransferComplaint from "../model/StockTransferComplaint.js";
-import StockRequest from "../model/StockRequest.js";
 import SystemActivity from "../model/systemActivity.js";
 import ActivityLog from "../model/activityLog.js";
 
@@ -830,6 +829,1371 @@ export const raiseTransferComplaint = async (req, res) => {
       message:
         "Failed to raise transfer complaint",
       error: error.message,
+    });
+  }
+};
+
+
+/**
+ * =========================================================
+ * GET COMPLAINTS RAISED AGAINST LOGGED-IN STORE
+ * =========================================================
+ *
+ * Logged-in store sirf wahi complaints dekh payega jahan:
+ *
+ * complaint.from_organization_id === user.organization_id
+ *
+ * Matlab:
+ * Source/Sender store ke against receiver ne complaint raise ki hai.
+ *
+ * Supported query parameters:
+ *
+ * page
+ * limit
+ * status
+ * complaint_type
+ * search
+ * date_from
+ * date_to
+ *
+ * Example:
+ *
+ * GET /api/stock-transfer-complaints/store
+ *
+ * GET /api/stock-transfer-complaints/store?page=1&limit=10
+ *
+ * GET /api/stock-transfer-complaints/store?status=open
+ *
+ * GET /api/stock-transfer-complaints/store?complaint_type=quantity_shortage
+ *
+ * GET /api/stock-transfer-complaints/store?search=CMP
+ */
+export const getStoreComplaints = async (req, res) => {
+  try {
+    const user = req.user;
+
+    // =====================================================
+    // USER VALIDATION
+    // =====================================================
+
+    if (!user?.id || !user?.organization_id) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user",
+      });
+    }
+
+    const storeOrganizationId = Number(
+      user.organization_id
+    );
+
+    if (
+      !storeOrganizationId ||
+      !Number.isInteger(storeOrganizationId) ||
+      storeOrganizationId <= 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid store organization is required",
+      });
+    }
+
+    // =====================================================
+    // QUERY PARAMETERS
+    // =====================================================
+
+    const {
+      page = 1,
+      limit = 10,
+      status,
+      complaint_type,
+      search,
+      date_from,
+      date_to,
+    } = req.query;
+
+    const pageNo = Math.max(
+      Number(page) || 1,
+      1
+    );
+
+    const limitNo = Math.min(
+      Math.max(Number(limit) || 10, 1),
+      100
+    );
+
+    const offset = (pageNo - 1) * limitNo;
+
+    // =====================================================
+    // COMPLAINT WHERE CONDITION
+    // =====================================================
+
+    const complaintWhere = {
+      /*
+       * Complaint logged-in store ke against
+       * raise hui honi chahiye.
+       */
+      from_organization_id:
+        storeOrganizationId,
+    };
+
+    // =====================================================
+    // STATUS FILTER
+    // =====================================================
+
+    if (
+      status &&
+      String(status).trim().toLowerCase() !==
+        "all"
+    ) {
+      complaintWhere.status = String(status)
+        .trim()
+        .toLowerCase();
+    }
+
+    // =====================================================
+    // COMPLAINT TYPE FILTER
+    // =====================================================
+
+    if (
+      complaint_type &&
+      String(complaint_type)
+        .trim()
+        .toLowerCase() !== "all"
+    ) {
+      complaintWhere.complaint_type = String(
+        complaint_type
+      )
+        .trim()
+        .toLowerCase();
+    }
+
+    // =====================================================
+    // DATE FILTER
+    // =====================================================
+
+    if (date_from || date_to) {
+      complaintWhere.created_at = {};
+
+      if (date_from) {
+        const fromDate = new Date(
+          `${date_from}T00:00:00.000Z`
+        );
+
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid date_from. Use YYYY-MM-DD format",
+          });
+        }
+
+        complaintWhere.created_at[Op.gte] =
+          fromDate;
+      }
+
+      if (date_to) {
+        const toDate = new Date(
+          `${date_to}T23:59:59.999Z`
+        );
+
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid date_to. Use YYYY-MM-DD format",
+          });
+        }
+
+        complaintWhere.created_at[Op.lte] =
+          toDate;
+      }
+    }
+
+    // =====================================================
+    // SEARCH FILTER
+    //
+    // Search complaint number, description and transfer no.
+    // =====================================================
+
+    const normalizedSearch = String(
+      search || ""
+    ).trim();
+
+    if (normalizedSearch) {
+      /*
+       * Transfer number StockTransfer table me hai.
+       * Pehle matching transfer IDs nikalenge.
+       */
+
+      const matchingTransfers =
+        await StockTransfer.findAll({
+          where: {
+            from_organization_id:
+              storeOrganizationId,
+
+            transfer_no: {
+              [Op.iLike]:
+                `%${normalizedSearch}%`,
+            },
+          },
+
+          attributes: ["id"],
+
+          raw: true,
+        });
+
+      const matchingTransferIds =
+        matchingTransfers
+          .map((transfer) =>
+            Number(transfer.id)
+          )
+          .filter(Boolean);
+
+      const searchConditions = [
+        {
+          complaint_no: {
+            [Op.iLike]:
+              `%${normalizedSearch}%`,
+          },
+        },
+        {
+          description: {
+            [Op.iLike]:
+              `%${normalizedSearch}%`,
+          },
+        },
+      ];
+
+      if (matchingTransferIds.length) {
+        searchConditions.push({
+          transfer_id: {
+            [Op.in]:
+              matchingTransferIds,
+          },
+        });
+      }
+
+      complaintWhere[Op.or] =
+        searchConditions;
+    }
+
+    // =====================================================
+    // FETCH COMPLAINTS
+    // =====================================================
+
+    const { count, rows: complaints } =
+      await StockTransferComplaint.findAndCountAll(
+        {
+          where: complaintWhere,
+
+          order: [
+            ["created_at", "DESC"],
+            ["id", "DESC"],
+          ],
+
+          limit: limitNo,
+          offset,
+
+          distinct: true,
+        }
+      );
+
+    // =====================================================
+    // NO COMPLAINTS
+    // =====================================================
+
+    if (!complaints.length) {
+      return res.status(200).json({
+        success: true,
+
+        message:
+          "No complaints found against this store",
+
+        summary: {
+          total_complaints: count,
+          open_complaints: 0,
+          under_review_complaints: 0,
+          resolved_complaints: 0,
+          rejected_complaints: 0,
+        },
+
+        pagination: {
+          current_page: pageNo,
+          per_page: limitNo,
+          total_records: count,
+          total_pages: Math.ceil(
+            count / limitNo
+          ),
+        },
+
+        data: [],
+      });
+    }
+
+    // =====================================================
+    // FETCH RELATED TRANSFERS
+    // =====================================================
+
+    const transferIds = [
+      ...new Set(
+        complaints
+          .map((complaint) =>
+            Number(complaint.transfer_id)
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+    const transfers =
+      transferIds.length > 0
+        ? await StockTransfer.findAll({
+            where: {
+              id: {
+                [Op.in]: transferIds,
+              },
+
+              /*
+               * Additional security:
+               * Related transfer bhi logged-in
+               * store ka hona chahiye.
+               */
+              from_organization_id:
+                storeOrganizationId,
+            },
+
+            raw: true,
+          })
+        : [];
+
+    const transferMap = new Map();
+
+    for (const transfer of transfers) {
+      transferMap.set(
+        Number(transfer.id),
+        transfer
+      );
+    }
+
+    // =====================================================
+    // FORMAT COMPLAINT RESPONSE
+    // =====================================================
+
+    const formattedComplaints =
+      complaints.map((complaintModel) => {
+        const complaint =
+          complaintModel.toJSON();
+
+        const transfer =
+          transferMap.get(
+            Number(complaint.transfer_id)
+          ) || null;
+
+        const complaintItems =
+          Array.isArray(complaint.items)
+            ? complaint.items
+            : [];
+
+        const totalSentQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.sent_qty || 0),
+            0
+          );
+
+        const totalReceivedQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.received_qty || 0
+              ),
+            0
+          );
+
+        const totalShortageQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.shortage_qty || 0
+              ),
+            0
+          );
+
+        const totalSentWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.sent_weight || 0
+              ),
+            0
+          );
+
+        const totalReceivedWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.received_weight || 0
+              ),
+            0
+          );
+
+        const totalShortageWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.shortage_weight || 0
+              ),
+            0
+          );
+
+        return {
+          complaint_id: complaint.id,
+
+          complaint_no:
+            complaint.complaint_no,
+
+          complaint_type:
+            complaint.complaint_type,
+
+          description:
+            complaint.description,
+
+          complaint_status:
+            complaint.status,
+
+          /*
+           * Kis transfer ke against
+           * complaint raise hui hai.
+           */
+          transfer: transfer
+            ? {
+                transfer_id:
+                  transfer.id,
+
+                transfer_no:
+                  transfer.transfer_no,
+
+                request_id:
+                  transfer.request_id ||
+                  null,
+
+                status:
+                  transfer.status,
+
+                from_organization_id:
+                  transfer.from_organization_id,
+
+                to_organization_id:
+                  transfer.to_organization_id,
+
+                dispatch_date:
+                  transfer.dispatch_date ||
+                  transfer.dispatched_at ||
+                  null,
+
+                received_date:
+                  transfer.received_date ||
+                  transfer.received_at ||
+                  null,
+
+                remarks:
+                  transfer.remarks ||
+                  null,
+              }
+            : {
+                transfer_id:
+                  complaint.transfer_id,
+
+                transfer_no: null,
+              },
+
+          from_organization_id:
+            complaint.from_organization_id,
+
+          to_organization_id:
+            complaint.to_organization_id,
+
+          /*
+           * Complaint items.
+           */
+          items: complaintItems,
+
+          item_summary: {
+            total_complaint_items:
+              complaintItems.length,
+
+            total_sent_qty: Number(
+              totalSentQty.toFixed(3)
+            ),
+
+            total_received_qty: Number(
+              totalReceivedQty.toFixed(3)
+            ),
+
+            total_shortage_qty: Number(
+              totalShortageQty.toFixed(3)
+            ),
+
+            total_sent_weight: Number(
+              totalSentWeight.toFixed(3)
+            ),
+
+            total_received_weight:
+              Number(
+                totalReceivedWeight.toFixed(
+                  3
+                )
+              ),
+
+            total_shortage_weight:
+              Number(
+                totalShortageWeight.toFixed(
+                  3
+                )
+              ),
+          },
+
+          evidence: {
+            image_1_url:
+              complaint.image_1_url ||
+              null,
+
+            image_2_url:
+              complaint.image_2_url ||
+              null,
+
+            video_url:
+              complaint.video_url ||
+              null,
+          },
+
+          raised_by:
+            complaint.raised_by,
+
+          resolved_by:
+            complaint.resolved_by ||
+            null,
+
+          resolution_note:
+            complaint.resolution_note ||
+            null,
+
+          created_at:
+            complaint.created_at,
+
+          updated_at:
+            complaint.updated_at,
+        };
+      });
+
+    // =====================================================
+    // COMPLAINT SUMMARY
+    //
+    // Entire store complaints ka count hai,
+    // sirf current page ka nahi.
+    // =====================================================
+
+    const complaintSummaryRows =
+      await StockTransferComplaint.findAll({
+        where: {
+          from_organization_id:
+            storeOrganizationId,
+        },
+
+        attributes: ["status"],
+
+        raw: true,
+      });
+
+    const summary = {
+      total_complaints:
+        complaintSummaryRows.length,
+
+      open_complaints: 0,
+
+      under_review_complaints: 0,
+
+      resolved_complaints: 0,
+
+      rejected_complaints: 0,
+
+      closed_complaints: 0,
+    };
+
+    for (const complaint of complaintSummaryRows) {
+      const complaintStatus = String(
+        complaint.status || ""
+      )
+        .trim()
+        .toLowerCase();
+
+      if (complaintStatus === "open") {
+        summary.open_complaints += 1;
+      } else if (
+        complaintStatus === "under_review"
+      ) {
+        summary.under_review_complaints +=
+          1;
+      } else if (
+        complaintStatus === "resolved"
+      ) {
+        summary.resolved_complaints += 1;
+      } else if (
+        complaintStatus === "rejected"
+      ) {
+        summary.rejected_complaints += 1;
+      } else if (
+        complaintStatus === "closed"
+      ) {
+        summary.closed_complaints += 1;
+      }
+    }
+
+    // =====================================================
+    // FINAL RESPONSE
+    // =====================================================
+
+    return res.status(200).json({
+      success: true,
+
+      message:
+        "Store complaints fetched successfully",
+
+      store: {
+        organization_id:
+          storeOrganizationId,
+
+        store_code:
+          user.store_code ||
+          user.storeCode ||
+          null,
+
+        store_name:
+          user.store_name || null,
+      },
+
+      summary,
+
+      pagination: {
+        current_page: pageNo,
+        per_page: limitNo,
+        total_records: count,
+        total_pages: Math.ceil(
+          count / limitNo
+        ),
+        has_next_page:
+          pageNo <
+          Math.ceil(count / limitNo),
+        has_previous_page:
+          pageNo > 1,
+      },
+
+      data: formattedComplaints,
+    });
+  } catch (error) {
+    console.error(
+      "getStoreComplaints error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Failed to fetch store complaints",
+      error: error.message,
+    });
+  }
+};
+
+
+/**
+ * =========================================================
+ * UPDATE STOCK TRANSFER COMPLAINT STATUS
+ * =========================================================
+ *
+ * Route:
+ * PATCH /api/stock-transfer-complaints/:complaintId/status
+ *
+ * Body:
+ * {
+ *   "status": "under_review",
+ *   "resolution_note": "Complaint verification started"
+ * }
+ *
+ * Allowed statuses:
+ * - open
+ * - under_review
+ * - resolved
+ * - rejected
+ * - closed
+ *
+ * Important:
+ * - Sirf wahi store complaint update kar sakta hai
+ *   jiske against complaint raise hui hai.
+ *
+ * - Complaint status update hone par transfer status
+ *   automatically change nahi hoga.
+ *
+ * - Transfer card aur receiving flow alag rahega.
+ */
+export const updateTransferComplaintStatus = async (
+  req,
+  res
+) => {
+  const transaction = await sequelize.transaction();
+
+  try {
+    const { complaintId } = req.params;
+
+    const {
+      status,
+      resolution_note,
+    } = req.body;
+
+    const user = req.user;
+
+    // =====================================================
+    // USER VALIDATION
+    // =====================================================
+
+    if (!user?.id || !user?.organization_id) {
+      await transaction.rollback();
+
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user",
+      });
+    }
+
+    const organizationId = Number(
+      user.organization_id
+    );
+
+    if (
+      !organizationId ||
+      !Number.isInteger(organizationId) ||
+      organizationId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Valid user organization is required",
+      });
+    }
+
+    // =====================================================
+    // COMPLAINT ID VALIDATION
+    // =====================================================
+
+    const parsedComplaintId = Number(complaintId);
+
+    if (
+      !parsedComplaintId ||
+      !Number.isInteger(parsedComplaintId) ||
+      parsedComplaintId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Valid complaintId is required",
+      });
+    }
+
+    // =====================================================
+    // STATUS VALIDATION
+    // =====================================================
+
+    if (!status) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "status is required",
+      });
+    }
+
+    const normalizedStatus = String(status)
+      .trim()
+      .toLowerCase();
+
+    const allowedStatuses = [
+      "open",
+      "under_review",
+      "resolved",
+      "rejected",
+      "closed",
+    ];
+
+    if (
+      !allowedStatuses.includes(
+        normalizedStatus
+      )
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          "Invalid complaint status",
+
+        allowed_statuses: allowedStatuses,
+      });
+    }
+
+    // =====================================================
+    // RESOLUTION NOTE VALIDATION
+    //
+    // Resolved, rejected aur closed karte waqt
+    // resolution_note required rahega.
+    // =====================================================
+
+    const normalizedResolutionNote = String(
+      resolution_note || ""
+    ).trim();
+
+    const noteRequiredStatuses = [
+      "resolved",
+      "rejected",
+      "closed",
+    ];
+
+    if (
+      noteRequiredStatuses.includes(
+        normalizedStatus
+      ) &&
+      !normalizedResolutionNote
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          `resolution_note is required when complaint status is ${normalizedStatus}`,
+      });
+    }
+
+    // =====================================================
+    // FETCH COMPLAINT
+    // =====================================================
+
+    const complaint =
+      await StockTransferComplaint.findByPk(
+        parsedComplaintId,
+        {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        }
+      );
+
+    if (!complaint) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Complaint not found",
+      });
+    }
+
+    // =====================================================
+    // STORE AUTHORIZATION
+    //
+    // Complaint jis source store ke against raise hui hai,
+    // sirf wahi store status update kar sakta hai.
+    // =====================================================
+
+    if (
+      Number(
+        complaint.from_organization_id
+      ) !== organizationId
+    ) {
+      await transaction.rollback();
+
+      return res.status(403).json({
+        success: false,
+
+        message:
+          "You are not allowed to update this complaint",
+
+        details:
+          "Only the store against which the complaint was raised can update its status",
+      });
+    }
+
+    // =====================================================
+    // CURRENT STATUS
+    // =====================================================
+
+    const oldStatus = String(
+      complaint.status || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    if (oldStatus === normalizedStatus) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          `Complaint status is already ${normalizedStatus}`,
+      });
+    }
+
+    // =====================================================
+    // STATUS TRANSITION VALIDATION
+    //
+    // open         -> under_review / resolved / rejected
+    // under_review -> resolved / rejected / open
+    // resolved     -> closed
+    // rejected     -> closed / under_review
+    // closed       -> no further status update
+    // =====================================================
+
+    const allowedTransitions = {
+      open: [
+        "under_review",
+        "resolved",
+        "rejected",
+      ],
+
+      under_review: [
+        "open",
+        "resolved",
+        "rejected",
+      ],
+
+      resolved: ["closed"],
+
+      rejected: [
+        "under_review",
+        "closed",
+      ],
+
+      closed: [],
+    };
+
+    const validNextStatuses =
+      allowedTransitions[oldStatus] || [];
+
+    if (
+      !validNextStatuses.includes(
+        normalizedStatus
+      )
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          `Complaint status cannot be changed from ${oldStatus} to ${normalizedStatus}`,
+
+        current_status: oldStatus,
+
+        allowed_next_statuses:
+          validNextStatuses,
+      });
+    }
+
+    // =====================================================
+    // FETCH RELATED TRANSFER
+    // =====================================================
+
+    const transfer = complaint.transfer_id
+      ? await StockTransfer.findByPk(
+          complaint.transfer_id,
+          {
+            transaction,
+          }
+        )
+      : null;
+
+    // =====================================================
+    // PREPARE UPDATE PAYLOAD
+    //
+    // rawAttributes check isliye use kiya hai taaki agar
+    // resolved_by, resolved_at ya resolution_note columns
+    // model me available hain tabhi update hon.
+    // =====================================================
+
+    const complaintAttributes =
+      StockTransferComplaint.rawAttributes ||
+      {};
+
+    const updatePayload = {
+      status: normalizedStatus,
+    };
+
+    if (
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "resolution_note"
+      )
+    ) {
+      updatePayload.resolution_note =
+        normalizedResolutionNote || null;
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "updated_by"
+      )
+    ) {
+      updatePayload.updated_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "under_review" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "reviewed_by"
+      )
+    ) {
+      updatePayload.reviewed_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "under_review" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "reviewed_at"
+      )
+    ) {
+      updatePayload.reviewed_at =
+        new Date();
+    }
+
+    if (
+      normalizedStatus === "resolved" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "resolved_by"
+      )
+    ) {
+      updatePayload.resolved_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "resolved" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "resolved_at"
+      )
+    ) {
+      updatePayload.resolved_at =
+        new Date();
+    }
+
+    if (
+      normalizedStatus === "rejected" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "rejected_by"
+      )
+    ) {
+      updatePayload.rejected_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "rejected" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "rejected_at"
+      )
+    ) {
+      updatePayload.rejected_at =
+        new Date();
+    }
+
+    if (
+      normalizedStatus === "closed" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "closed_by"
+      )
+    ) {
+      updatePayload.closed_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "closed" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "closed_at"
+      )
+    ) {
+      updatePayload.closed_at =
+        new Date();
+    }
+
+    // =====================================================
+    // UPDATE COMPLAINT
+    // =====================================================
+
+    await complaint.update(
+      updatePayload,
+      {
+        transaction,
+      }
+    );
+
+    // =====================================================
+    // IMPORTANT
+    //
+    // Transfer ka status yahan update nahi kar rahe.
+    //
+    // Complaint status aur transfer receiving status
+    // dono separate flows hain.
+    //
+    // Isse remaining items ka Stock In continue rahega.
+    // =====================================================
+
+    // No StockTransfer status update here.
+
+    // =====================================================
+    // SYSTEM ACTIVITY
+    // =====================================================
+
+    const receiverStoreCode = String(
+      user.store_code || user.storeCode || ""
+    )
+      .trim()
+      .toUpperCase();
+
+    await SystemActivity.create(
+      {
+        title:
+          "Stock transfer complaint status updated",
+
+        description:
+          `Complaint ${complaint.complaint_no} status changed from ${oldStatus} to ${normalizedStatus}`,
+
+        activity_type:
+          "stock_transfer_complaint_status_updated",
+
+        module_name:
+          "stock_transfer_complaint",
+
+        reference_id:
+          complaint.id,
+
+        reference_no:
+          complaint.complaint_no,
+
+        district_code:
+          user.district_code || null,
+
+        store_code:
+          receiverStoreCode || null,
+
+        store_name:
+          user.store_name || null,
+
+        created_by:
+          user.id,
+
+        created_at:
+          new Date(),
+      },
+      {
+        transaction,
+      }
+    );
+
+    // =====================================================
+    // ACTIVITY LOG
+    // =====================================================
+
+    await ActivityLog.create(
+      {
+        organization_id:
+          organizationId,
+
+        user_id:
+          user.id,
+
+        action:
+          "stock_transfer_complaint_status_updated",
+
+        module_name:
+          "stock_transfer_complaint",
+
+        reference_id:
+          complaint.id,
+
+        reference_no:
+          complaint.complaint_no,
+
+        title:
+          "Complaint status updated",
+
+        description:
+          `Complaint ${complaint.complaint_no} status changed from ${oldStatus} to ${normalizedStatus}`,
+
+        meta: {
+          complaint_id:
+            complaint.id,
+
+          complaint_no:
+            complaint.complaint_no,
+
+          transfer_id:
+            complaint.transfer_id,
+
+          transfer_no:
+            transfer?.transfer_no || null,
+
+          from_organization_id:
+            complaint.from_organization_id,
+
+          to_organization_id:
+            complaint.to_organization_id,
+
+          old_status:
+            oldStatus,
+
+          new_status:
+            normalizedStatus,
+
+          resolution_note:
+            normalizedResolutionNote || null,
+
+          updated_by:
+            user.id,
+
+          transfer_status:
+            transfer?.status || null,
+
+          transfer_status_changed:
+            false,
+        },
+
+        icon:
+          normalizedStatus === "resolved"
+            ? "check-circle"
+            : normalizedStatus === "rejected"
+              ? "x-circle"
+              : normalizedStatus === "closed"
+                ? "lock"
+                : "complaint",
+
+        color:
+          normalizedStatus === "resolved"
+            ? "green"
+            : normalizedStatus === "rejected"
+              ? "red"
+              : normalizedStatus === "closed"
+                ? "gray"
+                : "orange",
+      },
+      {
+        transaction,
+      }
+    );
+
+    await transaction.commit();
+
+    // =====================================================
+    // RESPONSE
+    // =====================================================
+
+    return res.status(200).json({
+      success: true,
+
+      message:
+        `Complaint status updated successfully from ${oldStatus} to ${normalizedStatus}`,
+
+      data: {
+        complaint_id:
+          complaint.id,
+
+        complaint_no:
+          complaint.complaint_no,
+
+        transfer_id:
+          complaint.transfer_id,
+
+        transfer_no:
+          transfer?.transfer_no || null,
+
+        old_status:
+          oldStatus,
+
+        status:
+          complaint.status,
+
+        resolution_note:
+          complaint.resolution_note ||
+          normalizedResolutionNote ||
+          null,
+
+        updated_by: {
+          user_id:
+            user.id,
+
+          organization_id:
+            organizationId,
+
+          store_code:
+            user.store_code ||
+            user.storeCode ||
+            null,
+
+          store_name:
+            user.store_name || null,
+        },
+
+        transfer: {
+          status:
+            transfer?.status || null,
+
+          status_changed:
+            false,
+
+          remaining_items_receivable:
+            transfer?.status ===
+            "in_transit",
+        },
+
+        updated_at:
+          complaint.updated_at,
+      },
+    });
+  } catch (error) {
+    if (
+      transaction &&
+      !transaction.finished
+    ) {
+      await transaction.rollback();
+    }
+
+    console.error(
+      "updateTransferComplaintStatus error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+
+      message:
+        "Failed to update complaint status",
+
+      error:
+        error.message,
     });
   }
 };
