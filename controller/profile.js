@@ -201,6 +201,8 @@ export const login = async (req, res) => {
 };
 
 // ================= FORGOT PASSWORD =================
+
+
 export const forgotPassword = async (req, res) => {
   try {
     console.log("FORGOT PASSWORD CONTROLLER CALLED");
@@ -229,17 +231,39 @@ export const forgotPassword = async (req, res) => {
       });
     }
 
+    // Generate OTP
     const otp = Math.floor(
       100000 + Math.random() * 900000
     ).toString();
 
     console.log("Generated OTP:", otp);
 
+    // Hash OTP
+    const hashedOtp = crypto
+      .createHash("sha256")
+      .update(otp)
+      .digest("hex");
+
+    // OTP Expiry (10 minutes)
+    const otpExpire = new Date(Date.now() + 10 * 60 * 1000);
+
+    // Save in DB
+    await user.update({
+      resetOtp: hashedOtp,
+      resetOtpExpire: otpExpire,
+      otpAttempts: 0,
+    });
+
+    console.log("OTP Saved Successfully");
+
+    // TODO: Send OTP via email here
+
     return res.status(200).json({
       success: true,
-      message: "Forgot password controller is working",
-      otp,
+      message: "OTP sent successfully",
+      otp, // Remove this in production
     });
+
   } catch (error) {
     console.error("FORGOT PASSWORD ERROR:", error);
 
@@ -255,24 +279,58 @@ export const forgotPassword = async (req, res) => {
 export const verifyOtp = async (req, res) => {
   try {
     const { email, otp } = req.body;
-    const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
 
-    const [result] = await sequelize.query(`
-      SELECT reset_otp, NOW() > reset_otp_expire AS expired
-      FROM users WHERE email = :email
-    `, {
-      replacements: { email },
-      type: sequelize.QueryTypes.SELECT,
-    });
-
-    if (!result || result.reset_otp !== hashedOtp || result.expired) {
-      return res.status(400).json({ error: "Invalid or expired OTP" });
+    if (!email || !otp) {
+      return res.status(400).json({
+        success: false,
+        message: "Email and OTP are required",
+      });
     }
 
-    res.json({ message: "OTP verified" });
+    const normalizedEmail = email.trim().toLowerCase();
 
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    const user = await User.findOne({
+      where: {
+        email: normalizedEmail,
+      },
+    });
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const hashedOtp = crypto
+      .createHash("sha256")
+      .update(otp)
+      .digest("hex");
+
+    if (
+      user.resetOtp !== hashedOtp ||
+      !user.resetOtpExpire ||
+      new Date() > new Date(user.resetOtpExpire)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired OTP",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP verified successfully",
+    });
+
+  } catch (error) {
+    console.error("VERIFY OTP ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "OTP verification failed",
+      error: error.message,
+    });
   }
 };
 
@@ -281,36 +339,66 @@ export const resetPassword = async (req, res) => {
   try {
     const { email, otp, newPassword } = req.body;
 
-    const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
+    if (!email || !otp || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: "Email, OTP and new password are required",
+      });
+    }
 
-    const [result] = await sequelize.query(`
-      SELECT reset_otp, NOW() > reset_otp_expire AS expired
-      FROM users WHERE email = :email
-    `, {
-      replacements: { email },
-      type: sequelize.QueryTypes.SELECT,
+    const normalizedEmail = email.trim().toLowerCase();
+
+    const user = await User.findOne({
+      where: {
+        email: normalizedEmail,
+      },
     });
 
-    if (!result || result.reset_otp !== hashedOtp || result.expired) {
-      return res.status(400).json({ error: "Invalid or expired OTP" });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    const hashedOtp = crypto
+      .createHash("sha256")
+      .update(otp)
+      .digest("hex");
+
+    if (
+      user.resetOtp !== hashedOtp ||
+      !user.resetOtpExpire ||
+      new Date() > new Date(user.resetOtpExpire)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired OTP",
+      });
     }
 
     const hashedPassword = await bcrypt.hash(newPassword, 10);
 
-    await User.update(
-      {
-        password: hashedPassword,
-        resetOtp: null,
-        resetOtpExpire: null,
-        otpAttempts: 0,
-      },
-      { where: { email } }
-    );
+    await user.update({
+      password: hashedPassword,
+      resetOtp: null,
+      resetOtpExpire: null,
+      otpAttempts: 0,
+    });
 
-    res.json({ message: "Password reset successful" });
+    return res.status(200).json({
+      success: true,
+      message: "Password reset successful",
+    });
 
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+  } catch (error) {
+    console.error("RESET PASSWORD ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Password reset failed",
+      error: error.message,
+    });
   }
 };
 // ================= PROFILE HELPER =================
