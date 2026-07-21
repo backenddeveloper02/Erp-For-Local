@@ -203,31 +203,51 @@ export const login = async (req, res) => {
 // ================= FORGOT PASSWORD =================
 export const forgotPassword = async (req, res) => {
   try {
+    console.log("FORGOT PASSWORD CONTROLLER CALLED");
+
     const { email } = req.body;
 
-    const user = await User.findOne({ where: { email } });
-    if (!user) return res.status(404).json({ error: "User not found" });
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: "Email is required",
+      });
+    }
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
+    const normalizedEmail = email.trim().toLowerCase();
 
-    await sequelize.query(`
-      UPDATE users 
-      SET reset_otp = :hashedOtp,
-          reset_otp_expire = CURRENT_TIMESTAMP + INTERVAL '24 hours',
-          otp_attempts = 0
-      WHERE email = :email
-    `, {
-      replacements: { hashedOtp, email },
-      type: sequelize.QueryTypes.UPDATE,
+    const user = await User.findOne({
+      where: {
+        email: normalizedEmail,
+      },
     });
 
-    await sendEmail(email, "Reset Password OTP", `<h3>OTP: ${otp}</h3>`);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
 
-    res.json({ message: "OTP sent" });
+    const otp = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
 
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.log("Generated OTP:", otp);
+
+    return res.status(200).json({
+      success: true,
+      message: "Forgot password controller is working",
+      otp,
+    });
+  } catch (error) {
+    console.error("FORGOT PASSWORD ERROR:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Forgot password failed",
+      error: error.message,
+    });
   }
 };
 
