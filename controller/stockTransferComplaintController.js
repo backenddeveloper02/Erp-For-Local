@@ -1,7 +1,7 @@
-import { Op } from "sequelize";
+import { Op,QueryTypes } from "sequelize";
 
 import sequelize from "../config/db.js";
-
+import Item from "../model/item.js";
 import StockTransfer from "../model/stockTransfer.js";
 import StockTransferItem from "../model/stockTransferItem.js";
 import StockTransferComplaint from "../model/StockTransferComplaint.js";
@@ -9,7 +9,7 @@ import SystemActivity from "../model/systemActivity.js";
 import ActivityLog from "../model/activityLog.js";
 import Store from "../model/Store.js";
 import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
-
+import Stock from "../model/stockrecord.js";
 /**
  * Safely converts any value into a number.
  */
@@ -3110,6 +3110,3357 @@ export const getHeadAllTransferComplaints = async (
 
       error:
         error.message,
+    });
+  }
+};
+
+
+/**
+ * Safely converts any value into number.
+ */
+const toComplaintNumber = (value) => {
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : 0;
+};
+
+/**
+ * Converts Sequelize model into normal object.
+ */
+const toPlainObject = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value.toJSON === "function") {
+    return value.toJSON();
+  }
+
+  return value;
+};
+
+/**
+ * Normalizes item resolution status.
+ */
+const normalizeResolutionStatus = (status) => {
+  return String(status || "")
+    .trim()
+    .toLowerCase();
+};
+
+/**
+ * Overall complaint status is calculated from
+ * all complaint-item statuses.
+ */
+const calculateOverallComplaintStatus = (
+  complaintItems
+) => {
+  const statuses = complaintItems.map((item) =>
+    normalizeResolutionStatus(
+      item.resolution_status || "open"
+    )
+  );
+
+  if (
+    statuses.length > 0 &&
+    statuses.every(
+      (status) => status === "closed"
+    )
+  ) {
+    return "closed";
+  }
+
+  if (
+    statuses.length > 0 &&
+    statuses.every((status) =>
+      ["resolved", "closed"].includes(status)
+    )
+  ) {
+    return "resolved";
+  }
+
+  if (
+    statuses.some(
+      (status) =>
+        status === "replacement_dispatched"
+    )
+  ) {
+    return "replacement_dispatched";
+  }
+
+  if (
+    statuses.some(
+      (status) => status === "under_review"
+    )
+  ) {
+    return "under_review";
+  }
+
+  return "open";
+};
+
+/**
+ * =========================================================
+ * UPDATE COMPLAINT STATUS PER ITEM
+ * =========================================================
+ *
+ * Route:
+ *
+ * PATCH
+ * /api/stock-transfer-complaints/:complaintId/items/:transferItemId/status
+ *
+ * Stages:
+ *
+ * open
+ * -> under_review
+ * -> replacement_dispatched
+ * -> resolved
+ * -> closed
+ *
+ * Important:
+ *
+ * 1. Source store:
+ *    open -> under_review
+ *    under_review -> replacement_dispatched
+ *
+ * 2. Receiver store:
+ *    replacement_dispatched -> resolved
+ *    resolved -> closed
+ *
+ * 3. Head Office:
+ *    Can perform any valid transition.
+ *
+ * 4. Replacement stock quantity is not directly added here.
+ *    Normal transfer receiving API will handle stock.
+ *
+ * 5. resolved will be allowed only when linked replacement
+ *    transfer has been received.
+ */
+/* =====================================================
+   STOCK TRANSFER COMPLAINT HELPERS
+===================================================== */
+
+/**
+ * Null, undefined aur extra spaces ko handle karta hai.
+ */
+const normalizeText = (value) => {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  return String(value).trim();
+};
+
+/**
+ * Status ko consistent snake_case format me convert karta hai.
+ *
+ * Example:
+ * "Under Review" -> "under_review"
+ * "REPLACEMENT-DISPATCHED" -> "replacement_dispatched"
+ */
+const normalizeStatus = (value) => {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+    .replace(/_+/g, "_");
+};
+
+/**
+ * Value ko safe number me convert karta hai.
+ */
+// const toNumber = (value, fallback = 0) => {
+//   const parsedValue = Number(value);
+
+//   return Number.isFinite(parsedValue)
+//     ? parsedValue
+//     : fallback;
+// };
+
+/**
+ * Decimal value ko fixed precision tak round karta hai.
+ */
+const roundNumber = (value, precision = 3) => {
+  const numericValue = toNumber(value, 0);
+  const multiplier = 10 ** precision;
+
+  return Math.round(
+    (numericValue + Number.EPSILON) * multiplier
+  ) / multiplier;
+};
+
+/**
+ * Sequelize transaction ko safely rollback karta hai.
+ */
+const safeRollback = async (transaction) => {
+  try {
+    if (
+      transaction &&
+      !transaction.finished
+    ) {
+      await transaction.rollback();
+    }
+  } catch (rollbackError) {
+    console.error(
+      "Transaction rollback error:",
+      rollbackError
+    );
+  }
+};
+
+/**
+ * Sequelize model me attribute available hai ya nahi check karta hai.
+ */
+const modelHasAttribute = (
+  model,
+  attributeName
+) => {
+  if (!model || !attributeName) {
+    return false;
+  }
+
+  const attributes =
+    model.rawAttributes ||
+    model.getAttributes?.() ||
+    {};
+
+  return Boolean(attributes[attributeName]);
+};
+
+/**
+ * Sirf tab object me value set karta hai jab Sequelize model
+ * me woh column/attribute exist karta ho.
+ */
+const setIfModelHasAttribute = (
+  targetObject,
+  model,
+  attributeName,
+  value
+) => {
+  if (
+    modelHasAttribute(model, attributeName)
+  ) {
+    targetObject[attributeName] = value;
+  }
+
+  return targetObject;
+};
+
+/**
+ * JSON string ya array se complaint items safely return karta hai.
+ */
+const parseComplaintStoredItems = (
+  storedItems
+) => {
+  if (Array.isArray(storedItems)) {
+    return storedItems;
+  }
+
+  if (
+    storedItems === null ||
+    storedItems === undefined ||
+    storedItems === ""
+  ) {
+    return [];
+  }
+
+  if (typeof storedItems === "object") {
+    if (Array.isArray(storedItems.items)) {
+      return storedItems.items;
+    }
+
+    return [];
+  }
+
+  if (typeof storedItems === "string") {
+    try {
+      const parsedValue =
+        JSON.parse(storedItems);
+
+      if (Array.isArray(parsedValue)) {
+        return parsedValue;
+      }
+
+      if (
+        parsedValue &&
+        Array.isArray(parsedValue.items)
+      ) {
+        return parsedValue.items;
+      }
+
+      return [];
+    } catch (parseError) {
+      console.error(
+        "Complaint items JSON parse error:",
+        parseError
+      );
+
+      return [];
+    }
+  }
+
+  return [];
+};
+
+/**
+ * Complaint item ko transfer_item_id se find karta hai.
+ */
+const findComplaintItem = (
+  complaintItems,
+  transferItemId
+) => {
+  const normalizedTransferItemId =
+    toNumber(transferItemId);
+
+  return complaintItems.find((item) => {
+    const itemTransferId = toNumber(
+      item?.transfer_item_id ??
+      item?.transferItemId ??
+      item?.stock_transfer_item_id ??
+      item?.id
+    );
+
+    return (
+      itemTransferId ===
+      normalizedTransferItemId
+    );
+  });
+};
+
+/**
+ * Complaint item ka status nikalta hai.
+ */
+const getComplaintItemStatus = (item) => {
+  if (
+    !item ||
+    typeof item !== "object"
+  ) {
+    return "open";
+  }
+
+  const status =
+    item.resolution_status ??
+    item.resolutionStatus ??
+    item.status ??
+    item.complaint_status ??
+    item.complaintStatus ??
+    "open";
+
+  return normalizeStatus(status);
+};
+/**
+ * Sabhi complaint items ko dekhkar parent complaint status decide karta hai.
+ */
+const getComplaintOverallStatus = (
+  complaintItems
+) => {
+  if (
+    !Array.isArray(complaintItems) ||
+    complaintItems.length === 0
+  ) {
+    return "open";
+  }
+
+  const statuses = complaintItems.map(
+    getComplaintItemStatus
+  );
+
+  const allClosed = statuses.every(
+    (status) => status === "closed"
+  );
+
+  if (allClosed) {
+    return "closed";
+  }
+
+  const allResolvedOrClosed =
+    statuses.every((status) =>
+      ["resolved", "closed"].includes(status)
+    );
+
+  if (allResolvedOrClosed) {
+    return "resolved";
+  }
+
+  const hasReplacementDispatched =
+    statuses.some(
+      (status) =>
+        status ===
+        "replacement_dispatched"
+    );
+
+  if (hasReplacementDispatched) {
+    return "replacement_dispatched";
+  }
+
+  const hasUnderReview = statuses.some(
+    (status) => status === "under_review"
+  );
+
+  if (hasUnderReview) {
+    return "under_review";
+  }
+
+  const hasRejected = statuses.some(
+    (status) => status === "rejected"
+  );
+
+  if (hasRejected) {
+    return "rejected";
+  }
+
+  return "open";
+};
+
+/**
+ * Complaint status transition allowed hai ya nahi check karta hai.
+ */
+const isValidComplaintStatusTransition = (
+  currentStatus,
+  nextStatus
+) => {
+  const current =
+    normalizeStatus(currentStatus);
+
+  const next = normalizeStatus(nextStatus);
+
+  const allowedTransitions = {
+    open: [
+      "under_review",
+      "rejected",
+    ],
+
+    under_review: [
+      "replacement_dispatched",
+      "resolved",
+      "rejected",
+    ],
+
+    replacement_dispatched: [
+      "resolved",
+      "closed",
+    ],
+
+    resolved: [
+      "closed",
+    ],
+
+    rejected: [],
+
+    closed: [],
+  };
+
+  if (current === next) {
+    return true;
+  }
+
+  return (
+    allowedTransitions[current]?.includes(
+      next
+    ) || false
+  );
+};
+
+/**
+ * Complaint item me supported keys ko preserve karke status update karta hai.
+ */
+const updateStoredComplaintItem = (
+  complaintItem,
+  updates = {}
+) => {
+  return {
+    ...complaintItem,
+    ...updates,
+    updated_at: new Date().toISOString(),
+  };
+};
+
+/**
+ * Date value ko safe ISO date me convert karta hai.
+ */
+const normalizeDateValue = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  const parsedDate = new Date(value);
+
+  if (
+    Number.isNaN(parsedDate.getTime())
+  ) {
+    return null;
+  }
+
+  return parsedDate;
+};
+
+/**
+ * Quantity aur weight ko negative hone se rokta hai.
+ */
+const subtractSafely = (
+  currentValue,
+  subtractValue,
+  precision = 3
+) => {
+  const result =
+    toNumber(currentValue) -
+    toNumber(subtractValue);
+
+  return roundNumber(
+    Math.max(0, result),
+    precision
+  );
+};
+
+/**
+ * Quantity aur weight ko safely add karta hai.
+ */
+const addSafely = (
+  currentValue,
+  addedValue,
+  precision = 3
+) => {
+  return roundNumber(
+    toNumber(currentValue) +
+    toNumber(addedValue),
+    precision
+  );
+};
+
+/**
+ * Complaint replacement transfer number generate karta hai.
+ */
+const generateComplaintReplacementTransferNo = (
+  complaintId
+) => {
+  return `TRF-REPL-CMP-${complaintId}-${Date.now()}`;
+};
+
+/**
+ * Sequelize instance ya plain object ko plain JSON me convert karta hai.
+ */
+// const toPlainObject = (value) => {
+//   if (!value) {
+//     return null;
+//   }
+
+//   if (
+//     typeof value.get === "function"
+//   ) {
+//     return value.get({
+//       plain: true,
+//     });
+//   }
+
+//   if (
+//     typeof value.toJSON === "function"
+//   ) {
+//     return value.toJSON();
+//   }
+
+//   return {
+//     ...value,
+//   };
+// };
+const isHeadOfficeUser = (user) => {
+  if (!user) {
+    return false;
+  }
+
+  const role = normalizeText(user.role).toLowerCase();
+  const level = normalizeText(
+    user.organization_level ||
+    user.organizationType ||
+    user.organization_type
+  ).toLowerCase();
+
+  return (
+    level === "head_office" ||
+    role === "super_admin" ||
+    role === "head_admin" ||
+    role === "head_manager"
+  );
+};
+const isDistrictUser = (user) => {
+  if (!user) {
+    return false;
+  }
+
+  const level = normalizeText(
+    user.organization_level
+  ).toLowerCase();
+
+  return level === "district";
+};
+
+const isRetailUser = (user) => {
+  if (!user) {
+    return false;
+  }
+
+  const level = normalizeText(
+    user.organization_level
+  ).toLowerCase();
+
+  return level === "retail";
+};
+const createComplaintActivity = async ({
+  transaction = null,
+  user = null,
+  complaint = null,
+  complaintItem = null,
+  action = "complaint_updated",
+  title = "Complaint Updated",
+  description = "",
+  meta = {},
+}) => {
+  try {
+    if (!ActivityLog) {
+      console.warn(
+        "ActivityLog model is not available. Complaint activity skipped."
+      );
+      return null;
+    }
+
+    const complaintId =
+      complaint?.id ||
+      complaint?.complaint_id ||
+      null;
+
+    const complaintNo =
+      complaint?.complaint_no ||
+      complaint?.complaint_number ||
+      `CMP-${complaintId || Date.now()}`;
+
+    const transferItemId =
+      complaintItem?.transfer_item_id ||
+      complaintItem?.transferItemId ||
+      complaintItem?.stock_transfer_item_id ||
+      complaintItem?.id ||
+      null;
+
+    const organizationId =
+      user?.organization_id ||
+      complaint?.from_organization_id ||
+      complaint?.to_organization_id ||
+      null;
+
+    const userId =
+      user?.id ||
+      user?.user_id ||
+      null;
+
+    const activityPayload = {
+      organization_id: organizationId,
+      user_id: userId,
+      action,
+      module_name: "stock_transfer_complaint",
+      reference_id: complaintId,
+      reference_no: complaintNo,
+      title,
+      description:
+        description ||
+        `Complaint ${complaintNo} updated successfully.`,
+      meta: {
+        complaint_id: complaintId,
+        complaint_no: complaintNo,
+        transfer_id:
+          complaint?.transfer_id ||
+          null,
+        transfer_item_id: transferItemId,
+        complaint_item_status:
+          complaintItem?.status ||
+          complaintItem?.complaint_status ||
+          null,
+        performed_by: userId,
+        performed_by_role:
+          user?.role ||
+          null,
+        ...meta,
+      },
+      icon: "complaint",
+    };
+
+    const finalPayload = {};
+
+    const activityAttributes =
+      ActivityLog.rawAttributes ||
+      ActivityLog.getAttributes?.() ||
+      {};
+
+    Object.entries(activityPayload).forEach(
+      ([key, value]) => {
+        if (
+          Object.prototype.hasOwnProperty.call(
+            activityAttributes,
+            key
+          )
+        ) {
+          finalPayload[key] = value;
+        }
+      }
+    );
+
+    return await ActivityLog.create(
+      finalPayload,
+      transaction
+        ? { transaction }
+        : {}
+    );
+  } catch (activityError) {
+    console.error(
+      "createComplaintActivity error:",
+      activityError
+    );
+
+    // Activity log fail hone par main complaint API fail nahi hogi.
+    return null;
+  }
+};
+/**
+ * Error response ko consistent banata hai.
+ */
+const getErrorDetails = (error) => {
+  return {
+    message:
+      error?.message ||
+      "Something went wrong",
+
+    name:
+      error?.name ||
+      "Error",
+
+    validation_errors:
+      error?.errors?.map((item) => ({
+        field:
+          item?.path ||
+          item?.field ||
+          null,
+
+        message:
+          item?.message ||
+          "Validation error",
+
+        value:
+          item?.value ??
+          null,
+      })) || [],
+  };
+};
+export const updateComplaintItemStatus = async (req, res) => {
+  const transaction = await sequelize.transaction();
+
+  try {
+    const { complaintId, transferItemId } = req.params;
+
+    const {
+      status,
+      resolution_note,
+      replacement_transfer_id,
+    } = req.body;
+
+    const user = req.user;
+
+    if (!user?.id || !user?.organization_id) {
+      await safeRollback(transaction);
+
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user",
+      });
+    }
+
+    const parsedComplaintId = Number(complaintId);
+    const parsedTransferItemId = Number(transferItemId);
+
+    if (
+      !parsedComplaintId ||
+      !Number.isInteger(parsedComplaintId) ||
+      parsedComplaintId <= 0
+    ) {
+      await safeRollback(transaction);
+
+      return res.status(400).json({
+        success: false,
+        message: "Valid complaintId is required",
+      });
+    }
+
+    if (
+      !parsedTransferItemId ||
+      !Number.isInteger(parsedTransferItemId) ||
+      parsedTransferItemId <= 0
+    ) {
+      await safeRollback(transaction);
+
+      return res.status(400).json({
+        success: false,
+        message: "Valid transferItemId is required",
+      });
+    }
+
+    const requestedStatus = normalizeStatus(status);
+
+    const allowedStatuses = [
+      "under_review",
+      "replacement_dispatched",
+      "resolved",
+    ];
+
+    if (!allowedStatuses.includes(requestedStatus)) {
+      await safeRollback(transaction);
+
+      return res.status(400).json({
+        success: false,
+        message: "Invalid complaint item status",
+        allowed_statuses: allowedStatuses,
+        note:
+          "resolved status replacement receive hone ke baad item ko automatically closed karega",
+      });
+    }
+
+    const normalizedResolutionNote =
+      normalizeText(resolution_note);
+
+    if (
+      ["replacement_dispatched", "resolved"].includes(
+        requestedStatus
+      ) &&
+      !normalizedResolutionNote
+    ) {
+      await safeRollback(transaction);
+
+      return res.status(400).json({
+        success: false,
+        message: `resolution_note is required when status is ${requestedStatus}`,
+      });
+    }
+
+    const complaint =
+      await StockTransferComplaint.findByPk(
+        parsedComplaintId,
+        {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        }
+      );
+
+    if (!complaint) {
+      await safeRollback(transaction);
+
+      return res.status(404).json({
+        success: false,
+        message: "Complaint not found",
+      });
+    }
+
+    const originalTransfer =
+      await StockTransfer.findByPk(
+        complaint.transfer_id,
+        {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        }
+      );
+
+    if (!originalTransfer) {
+      await safeRollback(transaction);
+
+      return res.status(404).json({
+        success: false,
+        message: "Original transfer not found",
+      });
+    }
+
+    const complaintItems =
+      parseComplaintStoredItems(complaint.items);
+
+    const complaintItemIndex =
+      complaintItems.findIndex(
+        (item) =>
+          Number(item.transfer_item_id) ===
+          parsedTransferItemId
+      );
+
+    if (complaintItemIndex === -1) {
+      await safeRollback(transaction);
+
+      return res.status(404).json({
+        success: false,
+        message: "Complaint item not found",
+      });
+    }
+
+    const complaintItem = {
+      ...complaintItems[complaintItemIndex],
+    };
+
+    const currentItemStatus =
+      getComplaintItemStatus(complaintItem);
+
+    const loggedInOrganizationId = Number(
+      user.organization_id
+    );
+
+    const sourceOrganizationId = Number(
+      complaint.from_organization_id
+    );
+
+    const receiverOrganizationId = Number(
+      complaint.to_organization_id
+    );
+
+    const headOfficeUser = isHeadOfficeUser(user);
+
+    const isSourceStore =
+      loggedInOrganizationId === sourceOrganizationId;
+
+    const isReceiverStore =
+      loggedInOrganizationId === receiverOrganizationId;
+
+    let responseMessage =
+      "Complaint item status updated successfully";
+
+    let linkedReplacementTransfer = null;
+
+    /*
+     * =====================================================
+     * OPEN -> UNDER REVIEW
+     * =====================================================
+     */
+
+    if (requestedStatus === "under_review") {
+      if (!isSourceStore && !headOfficeUser) {
+        await safeRollback(transaction);
+
+        return res.status(403).json({
+          success: false,
+          message:
+            "Only source store or Head Office can mark complaint under review",
+        });
+      }
+
+      if (currentItemStatus !== "open") {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message: `Complaint item cannot move from ${currentItemStatus} to under_review`,
+          required_current_status: "open",
+        });
+      }
+
+      complaintItem.resolution_status =
+        "under_review";
+
+      complaintItem.reviewed_by = user.id;
+
+      complaintItem.reviewed_at = new Date();
+
+      complaintItem.resolution_note =
+        normalizedResolutionNote ||
+        "Complaint verification started";
+
+      responseMessage =
+        "Complaint item marked under review successfully";
+    }
+
+    /*
+     * =====================================================
+     * UNDER REVIEW -> REPLACEMENT DISPATCHED
+     * =====================================================
+     *
+     * Is flow me pehle se created replacement transfer ko
+     * complaint item ke saath link kiya jayega.
+     */
+
+    if (
+      requestedStatus === "replacement_dispatched"
+    ) {
+      if (!isSourceStore && !headOfficeUser) {
+        await safeRollback(transaction);
+
+        return res.status(403).json({
+          success: false,
+          message:
+            "Only source store or Head Office can link replacement transfer",
+        });
+      }
+
+      if (currentItemStatus !== "under_review") {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message: `Complaint item cannot move from ${currentItemStatus} to replacement_dispatched`,
+          required_current_status: "under_review",
+        });
+      }
+
+      const parsedReplacementTransferId = Number(
+        replacement_transfer_id
+      );
+
+      if (
+        !parsedReplacementTransferId ||
+        !Number.isInteger(
+          parsedReplacementTransferId
+        ) ||
+        parsedReplacementTransferId <= 0
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Valid replacement_transfer_id is required",
+        });
+      }
+
+      linkedReplacementTransfer =
+        await StockTransfer.findByPk(
+          parsedReplacementTransferId,
+          {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          }
+        );
+
+      if (!linkedReplacementTransfer) {
+        await safeRollback(transaction);
+
+        return res.status(404).json({
+          success: false,
+          message: "Replacement transfer not found",
+        });
+      }
+
+      if (
+        Number(linkedReplacementTransfer.id) ===
+        Number(originalTransfer.id)
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Original transfer cannot be used as replacement transfer",
+        });
+      }
+
+      if (
+        Number(
+          linkedReplacementTransfer.from_organization_id
+        ) !== sourceOrganizationId
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer source organization does not match complaint source organization",
+        });
+      }
+
+      if (
+        Number(
+          linkedReplacementTransfer.to_organization_id
+        ) !== receiverOrganizationId
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer destination organization does not match complaint receiver organization",
+        });
+      }
+
+      const replacementTransferStatus =
+        normalizeStatus(
+          linkedReplacementTransfer.status
+        );
+
+      const validReplacementTransferStatuses = [
+        "approved",
+        "dispatched",
+        "in_transit",
+      ];
+
+      if (
+        !validReplacementTransferStatuses.includes(
+          replacementTransferStatus
+        )
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer must be approved, dispatched or in_transit before linking",
+          current_transfer_status:
+            linkedReplacementTransfer.status,
+          allowed_transfer_statuses:
+            validReplacementTransferStatuses,
+        });
+      }
+
+      const replacementTransferItems =
+        await StockTransferItem.findAll({
+          where: {
+            transfer_id:
+              linkedReplacementTransfer.id,
+
+            item_id:
+              complaintItem.item_id,
+          },
+
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+
+      if (!replacementTransferItems.length) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer does not contain the complaint item",
+          item_id: complaintItem.item_id,
+        });
+      }
+
+      const totalReplacementQty =
+        roundNumber(
+          replacementTransferItems.reduce(
+            (total, item) =>
+              total + toNumber(item.qty),
+            0
+          )
+        );
+
+      const totalReplacementWeight =
+        roundNumber(
+          replacementTransferItems.reduce(
+            (total, item) =>
+              total + toNumber(item.weight),
+            0
+          )
+        );
+
+      const shortageQty = roundNumber(
+        complaintItem.shortage_qty
+      );
+
+      const shortageWeight = roundNumber(
+        complaintItem.shortage_weight
+      );
+
+      if (totalReplacementQty < shortageQty) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer quantity is less than complaint shortage quantity",
+          shortage_qty: shortageQty,
+          replacement_qty: totalReplacementQty,
+        });
+      }
+
+      if (
+        shortageWeight > 0 &&
+        totalReplacementWeight < shortageWeight
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer weight is less than complaint shortage weight",
+          shortage_weight: shortageWeight,
+          replacement_weight:
+            totalReplacementWeight,
+        });
+      }
+
+      complaintItem.resolution_status =
+        "replacement_dispatched";
+
+      complaintItem.replacement_transfer_id =
+        linkedReplacementTransfer.id;
+
+      complaintItem.replacement_transfer_no =
+        linkedReplacementTransfer.transfer_no;
+
+      complaintItem.replacement_transfer_item_id =
+        replacementTransferItems.length === 1
+          ? replacementTransferItems[0].id
+          : null;
+
+      complaintItem.replacement_qty =
+        totalReplacementQty;
+
+      complaintItem.replacement_weight =
+        totalReplacementWeight;
+
+      complaintItem.replacement_dispatched_by =
+        user.id;
+
+      complaintItem.replacement_dispatched_at =
+        linkedReplacementTransfer.dispatch_date ||
+        linkedReplacementTransfer.transfer_date ||
+        new Date();
+
+      complaintItem.resolution_note =
+        normalizedResolutionNote;
+
+      responseMessage =
+        "Replacement transfer linked and complaint item marked replacement dispatched";
+    }
+
+    /*
+     * =====================================================
+     * REPLACEMENT DISPATCHED -> SOLVED + CLOSED
+     * =====================================================
+     *
+     * Replacement transfer receive hone ke baad:
+     *
+     * 1. Replacement transfer status received verify hoga.
+     * 2. Complaint item solved hoga.
+     * 3. Complaint item automatically closed hoga.
+     * 4. Agar saare complaint items closed hain to complaint
+     *    ka overall status bhi closed ho jayega.
+     */
+
+    if (requestedStatus === "resolved") {
+      if (!isReceiverStore && !headOfficeUser) {
+        await safeRollback(transaction);
+
+        return res.status(403).json({
+          success: false,
+          message:
+            "Only receiver store or Head Office can solve complaint after replacement is received",
+        });
+      }
+
+      if (
+        currentItemStatus !==
+        "replacement_dispatched"
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message: `Complaint item cannot move from ${currentItemStatus} to resolved`,
+          required_current_status:
+            "replacement_dispatched",
+        });
+      }
+
+      const linkedReplacementTransferId = Number(
+        complaintItem.replacement_transfer_id
+      );
+
+      if (!linkedReplacementTransferId) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer is not linked with this complaint item",
+        });
+      }
+
+      linkedReplacementTransfer =
+        await StockTransfer.findByPk(
+          linkedReplacementTransferId,
+          {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          }
+        );
+
+      if (!linkedReplacementTransfer) {
+        await safeRollback(transaction);
+
+        return res.status(404).json({
+          success: false,
+          message: "Replacement transfer not found",
+        });
+      }
+
+      if (
+        normalizeStatus(
+          linkedReplacementTransfer.status
+        ) !== "received"
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer must be received before complaint can be solved",
+
+          replacement_transfer: {
+            id: linkedReplacementTransfer.id,
+
+            transfer_no:
+              linkedReplacementTransfer.transfer_no,
+
+            current_status:
+              linkedReplacementTransfer.status,
+
+            required_status: "received",
+          },
+        });
+      }
+
+      const solvedAt = new Date();
+
+      /*
+       * Pehle resolved information save hogi.
+       */
+
+      complaintItem.resolved_by = user.id;
+
+      complaintItem.resolved_at = solvedAt;
+
+      /*
+       * Latest change:
+       * Resolved ke baad alag close API call ki zarurat nahi.
+       * Complaint item automatically closed ho jayega.
+       */
+
+      complaintItem.closed_by = user.id;
+
+      complaintItem.closed_at = solvedAt;
+
+      complaintItem.resolution_status = "closed";
+
+      complaintItem.replacement_received = true;
+
+      complaintItem.replacement_received_at =
+        linkedReplacementTransfer.received_at ||
+        linkedReplacementTransfer.receive_date ||
+        solvedAt;
+
+      complaintItem.resolution_note =
+        normalizedResolutionNote;
+
+      responseMessage =
+        "Replacement transfer received. Complaint item solved and closed automatically.";
+    }
+
+    /*
+     * Updated item ko complaint items JSON me replace karna.
+     */
+
+    complaintItems[complaintItemIndex] =
+      complaintItem;
+
+    /*
+     * Saare complaint items ke status ke hisaab se
+     * overall complaint status calculate hoga.
+     */
+
+    const overallComplaintStatus =
+      getComplaintOverallStatus(complaintItems);
+
+    const complaintUpdatePayload = {
+      items: complaintItems,
+      status: overallComplaintStatus,
+    };
+
+    /*
+     * Optional model columns exist karte hain tabhi set honge.
+     */
+
+    setIfModelHasAttribute(
+      StockTransferComplaint,
+      complaintUpdatePayload,
+      "updated_by",
+      user.id
+    );
+
+    setIfModelHasAttribute(
+      StockTransferComplaint,
+      complaintUpdatePayload,
+      "resolution_note",
+      normalizedResolutionNote ||
+        complaint.resolution_note ||
+        null
+    );
+
+    if (requestedStatus === "under_review") {
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "reviewed_by",
+        user.id
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "reviewed_at",
+        new Date()
+      );
+    }
+
+    if (overallComplaintStatus === "resolved") {
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "resolved_by",
+        user.id
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "resolved_at",
+        new Date()
+      );
+    }
+
+    if (overallComplaintStatus === "closed") {
+      const closedAt = new Date();
+
+      /*
+       * Overall complaint closed hone par resolved aur closed
+       * dono details maintain ki ja rahi hain.
+       */
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "resolved_by",
+        user.id
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "resolved_at",
+        closedAt
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "closed_by",
+        user.id
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "closed_at",
+        closedAt
+      );
+    }
+
+    await complaint.update(
+      complaintUpdatePayload,
+      {
+        transaction,
+      }
+    );
+
+    await createComplaintActivity({
+      transaction,
+      user,
+      complaint,
+      transfer: originalTransfer,
+
+      action:
+        "stock_transfer_complaint_item_status_updated",
+
+      title:
+        "Complaint item status updated",
+
+      description:
+        requestedStatus === "resolved"
+          ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} solved and closed after replacement transfer receive`
+          : `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} changed from ${currentItemStatus} to ${complaintItem.resolution_status}`,
+
+      meta: {
+        transfer_item_id:
+          parsedTransferItemId,
+
+        item_id:
+          complaintItem.item_id,
+
+        requested_status:
+          requestedStatus,
+
+        old_item_status:
+          currentItemStatus,
+
+        new_item_status:
+          complaintItem.resolution_status,
+
+        overall_complaint_status:
+          overallComplaintStatus,
+
+        resolution_note:
+          normalizedResolutionNote || null,
+
+        replacement_transfer_id:
+          complaintItem.replacement_transfer_id ||
+          null,
+
+        replacement_transfer_no:
+          complaintItem.replacement_transfer_no ||
+          null,
+
+        replacement_received:
+          complaintItem.replacement_received ||
+          false,
+
+        auto_resolved:
+          requestedStatus === "resolved",
+
+        auto_closed:
+          requestedStatus === "resolved",
+      },
+
+      icon:
+        requestedStatus === "resolved"
+          ? "check-circle"
+          : requestedStatus ===
+              "replacement_dispatched"
+            ? "truck"
+            : "complaint",
+
+      color:
+        requestedStatus === "resolved"
+          ? "green"
+          : requestedStatus ===
+              "replacement_dispatched"
+            ? "blue"
+            : "orange",
+    });
+
+    await transaction.commit();
+
+    return res.status(200).json({
+      success: true,
+      message: responseMessage,
+
+      data: {
+        complaint_id:
+          complaint.id,
+
+        complaint_no:
+          complaint.complaint_no,
+
+        transfer_id:
+          complaint.transfer_id,
+
+        transfer_no:
+          originalTransfer.transfer_no,
+
+        complaint_status:
+          overallComplaintStatus,
+
+        overall_complaint_status:
+          overallComplaintStatus,
+
+        updated_item: {
+          ...complaintItem,
+
+          requested_status:
+            requestedStatus,
+
+          status:
+            complaintItem.resolution_status,
+
+          auto_resolved:
+            requestedStatus === "resolved",
+
+          auto_closed:
+            requestedStatus === "resolved",
+
+          replacement_received:
+            complaintItem.replacement_received ||
+            false,
+        },
+
+        replacement_transfer:
+          linkedReplacementTransfer
+            ? {
+                transfer_id:
+                  linkedReplacementTransfer.id,
+
+                transfer_no:
+                  linkedReplacementTransfer.transfer_no,
+
+                status:
+                  linkedReplacementTransfer.status,
+              }
+            : null,
+
+        flow: {
+          previous_status:
+            currentItemStatus,
+
+          requested_status:
+            requestedStatus,
+
+          final_item_status:
+            complaintItem.resolution_status,
+
+          final_complaint_status:
+            overallComplaintStatus,
+        },
+      },
+    });
+  } catch (error) {
+    await safeRollback(transaction);
+
+    console.error(
+      "updateComplaintItemStatus error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Failed to update complaint item status",
+      error: error.message,
+    });
+  }
+};
+/**
+ * =========================================================
+ * SEND DIRECT REPLACEMENT AGAINST COMPLAINT
+ * =========================================================
+ *
+ * Flow:
+ *
+ * open
+ *   ↓
+ * under_review
+ *   ↓
+ * Direct replacement transfer create
+ *   ↓
+ * replacement_dispatched
+ *
+ * Route:
+ * POST /api/stock-transfer-complaints/:complaintId/items/:transferItemId/send-replacement
+ */
+export const sendReplacementAgainstComplaint = async (req, res) => {
+  const transaction = await sequelize.transaction();
+
+  try {
+    // =====================================================
+    // REQUEST DATA
+    // =====================================================
+
+    const complaintId = Number(req.params.complaintId);
+    const transferItemId = Number(req.params.transferItemId);
+
+    const {
+      replacement_item_id,
+      dispatch_qty,
+      dispatch_weight,
+
+      remarks,
+      driver_name,
+      driver_phone,
+      vehicle_number,
+
+      pickup_address,
+      delivery_address,
+
+      expected_delivery_date,
+      expected_delivery_time,
+
+      additional_notes,
+    } = req.body;
+
+    const user = req.user;
+
+    // =====================================================
+    // BASIC VALIDATION
+    // =====================================================
+
+    if (!user?.id || !user?.organization_id) {
+      await transaction.rollback();
+
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user",
+      });
+    }
+
+    if (!Number.isInteger(complaintId) || complaintId <= 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Valid complaintId is required",
+      });
+    }
+
+    if (!Number.isInteger(transferItemId) || transferItemId <= 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Valid transferItemId is required",
+      });
+    }
+
+    // =====================================================
+    // FETCH COMPLAINT
+    // =====================================================
+
+    const complaintRows = await sequelize.query(
+      `
+      SELECT
+        id,
+        complaint_no,
+        transfer_id,
+        from_organization_id,
+        to_organization_id,
+        complaint_type,
+        description,
+        items,
+        status,
+        raised_by,
+        resolution_note,
+        resolved_by,
+        resolved_at,
+        created_at,
+        updated_at
+      FROM stock_transfer_complaints
+      WHERE id = :complaintId
+      FOR UPDATE
+      `,
+      {
+        replacements: {
+          complaintId,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const complaint = complaintRows[0];
+
+    if (!complaint) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Complaint not found",
+      });
+    }
+
+    const sourceOrganizationId = Number(
+      complaint.from_organization_id
+    );
+
+    const destinationOrganizationId = Number(
+      complaint.to_organization_id
+    );
+
+    const loggedInOrganizationId = Number(
+      user.organization_id
+    );
+
+    // =====================================================
+    // AUTHORIZATION
+    // =====================================================
+
+    const normalizedRole = String(user.role || "")
+      .trim()
+      .toLowerCase()
+      .replaceAll("-", "_")
+      .replaceAll(" ", "_");
+
+    const allowedHeadOfficeRoles = [
+      "super_admin",
+      "head_office",
+      "head_office_admin",
+      "admin",
+    ];
+
+    const isHeadOfficeUser =
+      allowedHeadOfficeRoles.includes(normalizedRole);
+
+    if (
+      loggedInOrganizationId !== sourceOrganizationId &&
+      !isHeadOfficeUser
+    ) {
+      await transaction.rollback();
+
+      return res.status(403).json({
+        success: false,
+        message:
+          "Only source organization or Head Office can send replacement",
+        source_organization_id: sourceOrganizationId,
+        logged_in_organization_id:
+          loggedInOrganizationId,
+      });
+    }
+
+    // =====================================================
+    // COMPLAINT STATUS VALIDATION
+    // =====================================================
+
+    const complaintStatus = String(
+      complaint.status || ""
+    )
+      .trim()
+      .toLowerCase()
+      .replaceAll("-", "_")
+      .replaceAll(" ", "_");
+
+    if (complaintStatus !== "under_review") {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Replacement can only be dispatched when complaint is under review",
+        current_status: complaintStatus,
+        required_status: "under_review",
+      });
+    }
+
+    // =====================================================
+    // PARSE COMPLAINT ITEMS
+    // =====================================================
+
+    let complaintItems = [];
+
+    if (Array.isArray(complaint.items)) {
+      complaintItems = complaint.items;
+    } else if (typeof complaint.items === "string") {
+      try {
+        const parsedItems = JSON.parse(complaint.items);
+
+        complaintItems = Array.isArray(parsedItems)
+          ? parsedItems
+          : [];
+      } catch {
+        complaintItems = [];
+      }
+    }
+
+    const complaintItemIndex = complaintItems.findIndex(
+      (item) =>
+        Number(item.transfer_item_id) === transferItemId
+    );
+
+    if (complaintItemIndex === -1) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "Transfer item not found inside complaint",
+        complaint_id: complaintId,
+        transfer_item_id: transferItemId,
+      });
+    }
+
+    const complaintItem = {
+      ...complaintItems[complaintItemIndex],
+    };
+
+    // =====================================================
+    // DUPLICATE REPLACEMENT CHECK
+    // =====================================================
+
+    if (
+      complaintItem.replacement_transfer_id ||
+      complaintItem.replacement_transfer_item_id
+    ) {
+      await transaction.rollback();
+
+      return res.status(409).json({
+        success: false,
+        message:
+          "Replacement has already been dispatched for this complaint item",
+        replacement_transfer_id:
+          complaintItem.replacement_transfer_id || null,
+        replacement_transfer_no:
+          complaintItem.replacement_transfer_no || null,
+      });
+    }
+        // =====================================================
+    // FETCH ORIGINAL TRANSFER
+    // =====================================================
+
+    const originalTransferRows =
+      await sequelize.query(
+        `
+        SELECT
+          id,
+          transfer_no,
+          request_id,
+          from_organization_id,
+          to_organization_id,
+          transfer_date,
+          dispatch_date,
+          receive_date,
+          status,
+          remarks
+        FROM stock_transfers
+        WHERE id = :transferId
+        FOR UPDATE
+        `,
+        {
+          replacements: {
+            transferId: Number(
+              complaint.transfer_id
+            ),
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const originalTransfer =
+      originalTransferRows[0];
+
+    if (!originalTransfer) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Original stock transfer not found",
+      });
+    }
+
+    // =====================================================
+    // FETCH ORIGINAL TRANSFER ITEM
+    // =====================================================
+
+    const originalTransferItemRows =
+      await sequelize.query(
+        `
+        SELECT
+          id,
+          transfer_id,
+          item_id,
+          qty,
+          weight,
+          rate,
+          remarks,
+          parent_batch_id,
+          child_batch_id,
+          external_item_data
+        FROM stock_transfer_items
+        WHERE id = :transferItemId
+        FOR UPDATE
+        `,
+        {
+          replacements: {
+            transferItemId,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const originalTransferItem =
+      originalTransferItemRows[0];
+
+    if (!originalTransferItem) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "Original transfer item not found",
+      });
+    }
+
+    if (
+      Number(originalTransferItem.transfer_id) !==
+      Number(originalTransfer.id)
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Transfer item does not belong to the complaint transfer",
+      });
+    }
+
+    // =====================================================
+    // ORIGINAL & REPLACEMENT ITEM
+    // =====================================================
+
+    const originalItemId = Number(
+      complaintItem.item_id ||
+        originalTransferItem.item_id
+    );
+
+    if (
+      !Number.isInteger(originalItemId) ||
+      originalItemId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Original item ID is missing or invalid",
+      });
+    }
+
+    const replacementItemId =
+      replacement_item_id === undefined ||
+      replacement_item_id === null ||
+      replacement_item_id === ""
+        ? originalItemId
+        : Number(replacement_item_id);
+
+    if (
+      !Number.isInteger(replacementItemId) ||
+      replacementItemId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Valid replacement_item_id is required",
+      });
+    }
+
+    // =====================================================
+    // FETCH REPLACEMENT ITEM
+    // =====================================================
+
+    const replacementItemRows =
+      await sequelize.query(
+        `
+        SELECT
+          id,
+          article_code,
+          sku_code,
+          item_name,
+          metal_type,
+          category,
+          purity,
+          gross_weight,
+          net_weight,
+          stone_weight,
+          stone_amount,
+          making_charge,
+          purchase_rate,
+          sale_rate,
+          hsn_code,
+          unit,
+          current_status,
+          organization_id,
+          "storeCode",
+          "storeName",
+          is_active
+        FROM items
+        WHERE id = :replacementItemId
+        `,
+        {
+          replacements: {
+            replacementItemId,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const replacementItem =
+      replacementItemRows[0];
+
+    if (!replacementItem) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "Replacement item not found",
+        replacement_item_id:
+          replacementItemId,
+      });
+    }
+
+    if (replacementItem.is_active === false) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Inactive item cannot be sent as replacement",
+        replacement_item_id:
+          replacementItemId,
+      });
+    }
+
+    // =====================================================
+    // QUANTITY VALIDATION
+    // =====================================================
+
+    const shortageQty = Number(
+      complaintItem.shortage_qty || 0
+    );
+
+    const shortageWeight = Number(
+      complaintItem.shortage_weight || 0
+    );
+
+    const replacementQty =
+      dispatch_qty === undefined ||
+      dispatch_qty === null ||
+      dispatch_qty === ""
+        ? shortageQty
+        : Number(dispatch_qty);
+
+    const replacementWeight =
+      dispatch_weight === undefined ||
+      dispatch_weight === null ||
+      dispatch_weight === ""
+        ? shortageWeight
+        : Number(dispatch_weight);
+
+    if (
+      !Number.isFinite(shortageQty) ||
+      shortageQty <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Complaint does not contain valid shortage quantity",
+      });
+    }
+
+    if (
+      !Number.isFinite(replacementQty) ||
+      replacementQty <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "dispatch_qty must be greater than zero",
+      });
+    }
+
+    if (replacementQty > shortageQty) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Replacement quantity cannot exceed shortage quantity",
+      });
+    }
+
+    if (
+      !Number.isFinite(replacementWeight) ||
+      replacementWeight < 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "dispatch_weight cannot be negative",
+      });
+    }
+
+    if (
+      shortageWeight > 0 &&
+      replacementWeight > shortageWeight
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Replacement weight cannot exceed shortage weight",
+      });
+    }
+        // =====================================================
+    // FETCH SOURCE AND DESTINATION STORES
+    // Only actual database columns are selected.
+    // =====================================================
+
+    const sourceStoreRows = await sequelize.query(
+      `
+        SELECT
+          id,
+          store_code,
+          store_name,
+          organization_level,
+          state,
+          district,
+          district_id,
+          address,
+          phone_number,
+          is_active
+        FROM stores
+        WHERE id = :sourceOrganizationId
+      `,
+      {
+        replacements: {
+          sourceOrganizationId,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const sourceStore = sourceStoreRows[0];
+
+    if (!sourceStore) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Source organization not found",
+        organization_id: sourceOrganizationId,
+      });
+    }
+
+    if (sourceStore.is_active === false) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Source organization is inactive",
+        organization_id: sourceOrganizationId,
+      });
+    }
+
+    const destinationStoreRows =
+      await sequelize.query(
+        `
+          SELECT
+            id,
+            store_code,
+            store_name,
+            organization_level,
+            state,
+            district,
+            district_id,
+            address,
+            phone_number,
+            is_active
+          FROM stores
+          WHERE id = :destinationOrganizationId
+        `,
+        {
+          replacements: {
+            destinationOrganizationId,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const destinationStore =
+      destinationStoreRows[0];
+
+    if (!destinationStore) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "Destination organization not found",
+        organization_id:
+          destinationOrganizationId,
+      });
+    }
+
+    if (destinationStore.is_active === false) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Destination organization is inactive",
+        organization_id:
+          destinationOrganizationId,
+      });
+    }
+
+    // =====================================================
+    // FETCH AND LOCK SOURCE STOCK
+    //
+    // Ek single stock row ke andar required quantity aur
+    // required weight dono available hone chahiye.
+    // =====================================================
+
+    const sourceStockRows = await sequelize.query(
+      `
+        SELECT
+          id,
+          item_id,
+          organization_id,
+          organization_type,
+          store_code,
+          batch_id,
+          COALESCE(available_qty, 0) AS available_qty,
+          COALESCE(available_weight, 0) AS available_weight,
+          COALESCE(reserved_qty, 0) AS reserved_qty,
+          COALESCE(reserved_weight, 0) AS reserved_weight,
+          COALESCE(transit_qty, 0) AS transit_qty,
+          COALESCE(transit_weight, 0) AS transit_weight,
+          COALESCE(damaged_qty, 0) AS damaged_qty,
+          COALESCE(damaged_weight, 0) AS damaged_weight,
+          COALESCE(dead_qty, 0) AS dead_qty,
+          COALESCE(dead_weight, 0) AS dead_weight
+        FROM stocks
+        WHERE organization_id = :sourceOrganizationId
+          AND item_id = :replacementItemId
+          AND COALESCE(available_qty, 0) >= :replacementQty
+          AND (
+            :replacementWeight = 0
+            OR COALESCE(available_weight, 0) >= :replacementWeight
+          )
+        ORDER BY
+          CASE
+            WHEN batch_id IS NOT NULL THEN 0
+            ELSE 1
+          END,
+          id ASC
+        LIMIT 1
+        FOR UPDATE
+      `,
+      {
+        replacements: {
+          sourceOrganizationId,
+          replacementItemId,
+          replacementQty,
+          replacementWeight,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const sourceStock = sourceStockRows[0];
+
+    // =====================================================
+    // STOCK NOT FOUND / INSUFFICIENT STOCK
+    // =====================================================
+
+    if (!sourceStock) {
+      const stockSummaryRows = await sequelize.query(
+        `
+          SELECT
+            COUNT(*)::integer AS stock_row_count,
+
+            COALESCE(
+              SUM(COALESCE(available_qty, 0)),
+              0
+            ) AS total_available_qty,
+
+            COALESCE(
+              SUM(COALESCE(available_weight, 0)),
+              0
+            ) AS total_available_weight
+
+          FROM stocks
+
+          WHERE organization_id = :sourceOrganizationId
+            AND item_id = :replacementItemId
+        `,
+        {
+          replacements: {
+            sourceOrganizationId,
+            replacementItemId,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+      const stockSummary = stockSummaryRows[0];
+
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          Number(
+            stockSummary?.stock_row_count || 0
+          ) === 0
+            ? "Source stock record not found for replacement item"
+            : "Insufficient source stock for replacement",
+
+        original_item_id: originalItemId,
+
+        replacement_item_id:
+          replacementItemId,
+
+        source_organization_id:
+          sourceOrganizationId,
+
+        source_store_code:
+          sourceStore.store_code,
+
+        required_qty:
+          replacementQty,
+
+        required_weight:
+          replacementWeight,
+
+        total_available_qty: Number(
+          stockSummary?.total_available_qty || 0
+        ),
+
+        total_available_weight: Number(
+          stockSummary?.total_available_weight || 0
+        ),
+      });
+    }
+
+    // =====================================================
+    // OPENING STOCK VALUES
+    // =====================================================
+
+    const openingAvailableQty = Number(
+      sourceStock.available_qty || 0
+    );
+
+    const openingAvailableWeight = Number(
+      sourceStock.available_weight || 0
+    );
+
+    const openingReservedQty = Number(
+      sourceStock.reserved_qty || 0
+    );
+
+    const openingReservedWeight = Number(
+      sourceStock.reserved_weight || 0
+    );
+
+    const openingTransitQty = Number(
+      sourceStock.transit_qty || 0
+    );
+
+    const openingTransitWeight = Number(
+      sourceStock.transit_weight || 0
+    );
+
+    const openingDamagedQty = Number(
+      sourceStock.damaged_qty || 0
+    );
+
+    const openingDamagedWeight = Number(
+      sourceStock.damaged_weight || 0
+    );
+
+    // =====================================================
+    // CLOSING STOCK VALUES
+    //
+    // Replacement dispatch hone par:
+    // available stock kam hoga
+    // transit stock badhega
+    // =====================================================
+
+    const closingAvailableQty =
+      openingAvailableQty - replacementQty;
+
+    const closingAvailableWeight =
+      openingAvailableWeight - replacementWeight;
+
+    const closingReservedQty =
+      openingReservedQty;
+
+    const closingReservedWeight =
+      openingReservedWeight;
+
+    const closingTransitQty =
+      openingTransitQty + replacementQty;
+
+    const closingTransitWeight =
+      openingTransitWeight + replacementWeight;
+
+    const closingDamagedQty =
+      openingDamagedQty;
+
+    const closingDamagedWeight =
+      openingDamagedWeight;
+
+    // =====================================================
+    // FINAL NEGATIVE STOCK VALIDATION
+    // =====================================================
+
+    if (
+      closingAvailableQty < 0 ||
+      closingAvailableWeight < 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Source stock became negative during replacement validation",
+
+        available_qty:
+          openingAvailableQty,
+
+        available_weight:
+          openingAvailableWeight,
+
+        requested_qty:
+          replacementQty,
+
+        requested_weight:
+          replacementWeight,
+      });
+    }
+        // =====================================================
+    // GENERATE REPLACEMENT TRANSFER NUMBER
+    // =====================================================
+
+    const replacementTransferNo =
+      `RPL-${complaintId}-${Date.now()}-${Math.floor(
+        1000 + Math.random() * 9000
+      )}`;
+
+    const transferRemarks =
+      String(remarks || "").trim() ||
+      `Replacement dispatched against complaint ${complaint.complaint_no}`;
+
+    // =====================================================
+    // CREATE REPLACEMENT TRANSFER
+    // =====================================================
+
+    const replacementTransferRows =
+      await sequelize.query(
+        `
+        INSERT INTO stock_transfers
+        (
+          transfer_no,
+          request_id,
+          from_organization_id,
+          to_organization_id,
+          transfer_date,
+          dispatch_date,
+          status,
+          remarks,
+          approved_by,
+          dispatched_by,
+          created_by,
+          driver_name,
+          driver_phone,
+          vehicle_number,
+          tracking_number,
+          pickup_address,
+          delivery_address,
+          expected_delivery_date,
+          expected_delivery_time,
+          additional_notes,
+          created_at,
+          updated_at
+        )
+        VALUES
+        (
+          :replacementTransferNo,
+          NULL,
+          :sourceOrganizationId,
+          :destinationOrganizationId,
+          CURRENT_DATE,
+          NOW(),
+          'in_transit',
+          :transferRemarks,
+          :userId,
+          :userId,
+          :userId,
+          :driverName,
+          :driverPhone,
+          :vehicleNumber,
+          :replacementTransferNo,
+          :pickupAddress,
+          :deliveryAddress,
+          :expectedDeliveryDate,
+          :expectedDeliveryTime,
+          :additionalNotes,
+          NOW(),
+          NOW()
+        )
+        RETURNING *
+        `,
+        {
+          replacements: {
+            replacementTransferNo,
+            sourceOrganizationId,
+            destinationOrganizationId,
+
+            userId: Number(user.id),
+
+            transferRemarks,
+
+            driverName:
+              String(driver_name || "").trim() ||
+              null,
+
+            driverPhone:
+              String(driver_phone || "").trim() ||
+              null,
+
+            vehicleNumber:
+              String(vehicle_number || "").trim() ||
+              null,
+
+            pickupAddress:
+              String(pickup_address || "").trim() ||
+              sourceStore.address ||
+              null,
+
+            deliveryAddress:
+              String(delivery_address || "").trim() ||
+              destinationStore.address ||
+              null,
+
+            expectedDeliveryDate:
+              expected_delivery_date || null,
+
+            expectedDeliveryTime:
+              expected_delivery_time || null,
+
+            additionalNotes:
+              String(additional_notes || "").trim() ||
+              `Replacement against complaint ${complaint.complaint_no} and original transfer ${originalTransfer.transfer_no}`,
+          },
+
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const replacementTransfer =
+      replacementTransferRows[0];
+
+    if (!replacementTransfer) {
+      throw new Error(
+        "Replacement stock transfer could not be created"
+      );
+    }
+
+    // =====================================================
+    // CREATE REPLACEMENT TRANSFER ITEM
+    // =====================================================
+
+    const replacementRate = Number(
+      replacementItem.sale_rate ||
+      replacementItem.purchase_rate ||
+      originalTransferItem.rate ||
+      0
+    );
+
+    const externalItemData = JSON.stringify({
+      complaint_id: complaintId,
+      complaint_no: complaint.complaint_no,
+
+      original_transfer_id:
+        Number(originalTransfer.id),
+
+      original_transfer_no:
+        originalTransfer.transfer_no,
+
+      original_transfer_item_id:
+        transferItemId,
+
+      original_item_id:
+        originalItemId,
+
+      replacement_item_id:
+        replacementItemId,
+
+      source_stock_id:
+        Number(sourceStock.id),
+
+      source_batch_id:
+        sourceStock.batch_id || null,
+    });
+
+    const replacementTransferItemRows =
+      await sequelize.query(
+        `
+        INSERT INTO stock_transfer_items
+        (
+          transfer_id,
+          item_id,
+          qty,
+          weight,
+          rate,
+          remarks,
+          parent_batch_id,
+          child_batch_id,
+          external_item_data
+        )
+        VALUES
+        (
+          :replacementTransferId,
+          :replacementItemId,
+          :replacementQty,
+          :replacementWeight,
+          :replacementRate,
+          :itemRemarks,
+          :parentBatchId,
+          NULL,
+          CAST(:externalItemData AS jsonb)
+        )
+        RETURNING *
+        `,
+        {
+          replacements: {
+            replacementTransferId:
+              Number(replacementTransfer.id),
+
+            replacementItemId,
+
+            replacementQty,
+
+            replacementWeight,
+
+            replacementRate,
+
+            itemRemarks:
+              `Replacement against complaint ${complaint.complaint_no}`,
+
+            parentBatchId:
+              sourceStock.batch_id || null,
+
+            externalItemData,
+          },
+
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const replacementTransferItem =
+      replacementTransferItemRows[0];
+
+    if (!replacementTransferItem) {
+      throw new Error(
+        "Replacement transfer item could not be created"
+      );
+    }
+        // =====================================================
+    // UPDATE SOURCE STOCK: AVAILABLE -> TRANSIT
+    // =====================================================
+
+    const updatedStockRows = await sequelize.query(
+      `
+        UPDATE stocks
+        SET
+          available_qty = :closingAvailableQty,
+          available_weight = :closingAvailableWeight,
+          transit_qty = :closingTransitQty,
+          transit_weight = :closingTransitWeight,
+          updated_at = NOW()
+        WHERE id = :stockId
+        RETURNING
+          id,
+          item_id,
+          organization_id,
+          store_code,
+          batch_id,
+          available_qty,
+          available_weight,
+          reserved_qty,
+          reserved_weight,
+          transit_qty,
+          transit_weight,
+          damaged_qty,
+          damaged_weight,
+          dead_qty,
+          dead_weight,
+          updated_at
+      `,
+      {
+        replacements: {
+          stockId: Number(sourceStock.id),
+          closingAvailableQty,
+          closingAvailableWeight,
+          closingTransitQty,
+          closingTransitWeight,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const updatedStock = updatedStockRows[0];
+
+    if (!updatedStock) {
+      throw new Error(
+        "Source stock could not be updated"
+      );
+    }
+
+    // =====================================================
+    // CREATE STOCK MOVEMENT
+    // movement_type = dispatch DB constraint me allowed hai
+    // =====================================================
+
+    const movementMakingCharge = Number(
+      replacementItem.making_charge || 0
+    );
+
+    const movementStoneAmount = Number(
+      replacementItem.stone_amount || 0
+    );
+
+    const movementTotalAmount =
+      replacementRate * replacementQty +
+      movementMakingCharge +
+      movementStoneAmount;
+
+    const stockMovementRows = await sequelize.query(
+      `
+        INSERT INTO stock_movements
+        (
+          organization_id,
+          item_id,
+          movement_type,
+          reference_type,
+          reference_id,
+          qty,
+          weight,
+
+          opening_available_qty,
+          closing_available_qty,
+
+          opening_reserved_qty,
+          closing_reserved_qty,
+
+          opening_transit_qty,
+          closing_transit_qty,
+
+          opening_damaged_qty,
+          closing_damaged_qty,
+
+          opening_available_weight,
+          closing_available_weight,
+
+          opening_reserved_weight,
+          closing_reserved_weight,
+
+          opening_transit_weight,
+          closing_transit_weight,
+
+          opening_damaged_weight,
+          closing_damaged_weight,
+
+          remarks,
+          created_by,
+          created_at,
+
+          rate,
+          making_charge,
+          stone_amount,
+          total_amount,
+          profit_amount,
+
+          from_organization_id,
+          to_organization_id,
+
+          movement_weight,
+          transfer_id
+        )
+        VALUES
+        (
+          :sourceOrganizationId,
+          :replacementItemId,
+          'dispatch',
+          'complaint_replacement',
+          :replacementTransferId,
+          :replacementQty,
+          :replacementWeight,
+
+          :openingAvailableQty,
+          :closingAvailableQty,
+
+          :openingReservedQty,
+          :closingReservedQty,
+
+          :openingTransitQty,
+          :closingTransitQty,
+
+          :openingDamagedQty,
+          :closingDamagedQty,
+
+          :openingAvailableWeight,
+          :closingAvailableWeight,
+
+          :openingReservedWeight,
+          :closingReservedWeight,
+
+          :openingTransitWeight,
+          :closingTransitWeight,
+
+          :openingDamagedWeight,
+          :closingDamagedWeight,
+
+          :movementRemarks,
+          :userId,
+          NOW(),
+
+          :movementRate,
+          :movementMakingCharge,
+          :movementStoneAmount,
+          :movementTotalAmount,
+          0,
+
+          :sourceOrganizationId,
+          :destinationOrganizationId,
+
+          :replacementWeight,
+          :replacementTransferId
+        )
+        RETURNING *
+      `,
+      {
+        replacements: {
+          sourceOrganizationId,
+          destinationOrganizationId,
+
+          replacementItemId,
+
+          replacementTransferId: Number(
+            replacementTransfer.id
+          ),
+
+          replacementQty,
+          replacementWeight,
+
+          openingAvailableQty,
+          closingAvailableQty,
+
+          openingReservedQty,
+          closingReservedQty,
+
+          openingTransitQty,
+          closingTransitQty,
+
+          openingDamagedQty,
+          closingDamagedQty,
+
+          openingAvailableWeight,
+          closingAvailableWeight,
+
+          openingReservedWeight,
+          closingReservedWeight,
+
+          openingTransitWeight,
+          closingTransitWeight,
+
+          openingDamagedWeight,
+          closingDamagedWeight,
+
+          movementRemarks:
+            `Replacement dispatched against complaint ${complaint.complaint_no}`,
+
+          userId: Number(user.id),
+
+          movementRate: replacementRate,
+          movementMakingCharge,
+          movementStoneAmount,
+          movementTotalAmount,
+        },
+
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const stockMovement =
+      stockMovementRows[0];
+
+    if (!stockMovement) {
+      throw new Error(
+        "Stock movement could not be created"
+      );
+    }
+
+    // =====================================================
+    // UPDATE COMPLAINT ITEM JSONB
+    // =====================================================
+
+    const dispatchedAt =
+      new Date().toISOString();
+
+    const updatedComplaintItem = {
+      ...complaintItem,
+
+      status: "replacement_dispatched",
+
+      resolution_status:
+        "replacement_dispatched",
+
+      original_item_id:
+        originalItemId,
+
+      replacement_item_id:
+        replacementItemId,
+
+      replacement_transfer_id:
+        Number(replacementTransfer.id),
+
+      replacement_transfer_no:
+        replacementTransfer.transfer_no,
+
+      replacement_transfer_item_id:
+        Number(replacementTransferItem.id),
+
+      replacement_qty:
+        replacementQty,
+
+      replacement_weight:
+        replacementWeight,
+
+      replacement_rate:
+        replacementRate,
+
+      replacement_stock_id:
+        Number(sourceStock.id),
+
+      replacement_batch_id:
+        sourceStock.batch_id || null,
+
+      replacement_dispatched_by:
+        Number(user.id),
+
+      replacement_dispatched_at:
+        dispatchedAt,
+
+      resolution_note:
+        String(remarks || "").trim() ||
+        "Replacement item dispatched",
+    };
+
+    complaintItems[complaintItemIndex] =
+      updatedComplaintItem;
+
+    /*
+      Complaint ka main status under_review hi rakha gaya hai.
+
+      Kyunki database ke complaint status constraint ki
+      complete allowed values abhi confirm nahi hain.
+
+      Individual complaint item ke andar:
+      replacement_dispatched status save ho raha hai.
+    */
+
+    const updatedComplaintStatus =
+      "under_review";
+
+    const updatedComplaintRows =
+      await sequelize.query(
+        `
+          UPDATE stock_transfer_complaints
+          SET
+            items = CAST(:complaintItems AS jsonb),
+            status = :updatedComplaintStatus,
+            resolution_note = :resolutionNote,
+            updated_at = NOW()
+          WHERE id = :complaintId
+          RETURNING
+            id,
+            complaint_no,
+            transfer_id,
+            from_organization_id,
+            to_organization_id,
+            complaint_type,
+            description,
+            items,
+            status,
+            raised_by,
+            resolution_note,
+            resolved_by,
+            resolved_at,
+            created_at,
+            updated_at
+        `,
+        {
+          replacements: {
+            complaintItems:
+              JSON.stringify(complaintItems),
+
+            updatedComplaintStatus,
+
+            resolutionNote:
+              String(remarks || "").trim() ||
+              `Replacement transfer ${replacementTransfer.transfer_no} dispatched`,
+
+            complaintId,
+          },
+
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const updatedComplaint =
+      updatedComplaintRows[0];
+
+    if (!updatedComplaint) {
+      throw new Error(
+        "Complaint could not be updated"
+      );
+    }
+
+    // =====================================================
+    // COMMIT TRANSACTION
+    // =====================================================
+
+    await transaction.commit();
+
+    // =====================================================
+    // SUCCESS RESPONSE
+    // =====================================================
+
+    return res.status(201).json({
+      success: true,
+
+      message:
+        "Replacement item dispatched successfully",
+
+      data: {
+        complaint: {
+          id: Number(updatedComplaint.id),
+
+          complaint_no:
+            updatedComplaint.complaint_no,
+
+          status:
+            updatedComplaint.status,
+
+          original_transfer_id:
+            Number(originalTransfer.id),
+
+          original_transfer_no:
+            originalTransfer.transfer_no,
+
+          source_organization_id:
+            sourceOrganizationId,
+
+          source_store_code:
+            sourceStore.store_code,
+
+          destination_organization_id:
+            destinationOrganizationId,
+
+          destination_store_code:
+            destinationStore.store_code,
+        },
+
+        complaint_item: {
+          original_transfer_item_id:
+            transferItemId,
+
+          original_item_id:
+            originalItemId,
+
+          sent_qty: Number(
+            updatedComplaintItem.sent_qty || 0
+          ),
+
+          received_qty: Number(
+            updatedComplaintItem.received_qty || 0
+          ),
+
+          shortage_qty:
+            shortageQty,
+
+          shortage_weight:
+            shortageWeight,
+
+          replacement_item_id:
+            replacementItemId,
+
+          replacement_qty:
+            replacementQty,
+
+          replacement_weight:
+            replacementWeight,
+
+          resolution_status:
+            "replacement_dispatched",
+        },
+
+        replacement_transfer: {
+          id: Number(
+            replacementTransfer.id
+          ),
+
+          transfer_no:
+            replacementTransfer.transfer_no,
+
+          status:
+            replacementTransfer.status,
+
+          from_organization_id: Number(
+            replacementTransfer.from_organization_id
+          ),
+
+          to_organization_id: Number(
+            replacementTransfer.to_organization_id
+          ),
+
+          dispatch_date:
+            replacementTransfer.dispatch_date,
+
+          tracking_number:
+            replacementTransfer.tracking_number,
+
+          driver_name:
+            replacementTransfer.driver_name,
+
+          driver_phone:
+            replacementTransfer.driver_phone,
+
+          vehicle_number:
+            replacementTransfer.vehicle_number,
+        },
+
+        replacement_transfer_item: {
+          id: Number(
+            replacementTransferItem.id
+          ),
+
+          transfer_id: Number(
+            replacementTransferItem.transfer_id
+          ),
+
+          item_id: Number(
+            replacementTransferItem.item_id
+          ),
+
+          qty: Number(
+            replacementTransferItem.qty
+          ),
+
+          weight: Number(
+            replacementTransferItem.weight
+          ),
+
+          rate: Number(
+            replacementTransferItem.rate
+          ),
+        },
+
+        stock_after_dispatch: {
+          stock_id: Number(
+            updatedStock.id
+          ),
+
+          item_id: Number(
+            updatedStock.item_id
+          ),
+
+          organization_id: Number(
+            updatedStock.organization_id
+          ),
+
+          store_code:
+            updatedStock.store_code,
+
+          batch_id:
+            updatedStock.batch_id,
+
+          available_qty: Number(
+            updatedStock.available_qty
+          ),
+
+          available_weight: Number(
+            updatedStock.available_weight
+          ),
+
+          transit_qty: Number(
+            updatedStock.transit_qty
+          ),
+
+          transit_weight: Number(
+            updatedStock.transit_weight
+          ),
+        },
+
+        stock_movement: {
+          id: Number(
+            stockMovement.id
+          ),
+
+          movement_type:
+            stockMovement.movement_type,
+
+          reference_type:
+            stockMovement.reference_type,
+
+          reference_id: Number(
+            stockMovement.reference_id
+          ),
+
+          opening_available_qty: Number(
+            stockMovement.opening_available_qty
+          ),
+
+          closing_available_qty: Number(
+            stockMovement.closing_available_qty
+          ),
+
+          opening_transit_qty: Number(
+            stockMovement.opening_transit_qty
+          ),
+
+          closing_transit_qty: Number(
+            stockMovement.closing_transit_qty
+          ),
+        },
+      },
+    });
+  } catch (error) {
+    // =====================================================
+    // ROLLBACK TRANSACTION
+    // =====================================================
+
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+
+    console.error(
+      "sendReplacementAgainstComplaint error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+
+      message:
+        "Failed to dispatch replacement item",
+
+      error:
+        error.message,
+
+      database_error:
+        error?.parent?.message ||
+        error?.original?.message ||
+        null,
+
+      sql_state:
+        error?.parent?.code ||
+        error?.original?.code ||
+        null,
     });
   }
 };
