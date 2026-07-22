@@ -6464,3 +6464,662 @@ export const sendReplacementAgainstComplaint = async (req, res) => {
     });
   }
 };
+/**
+ * ==========================================================
+ * GET COMPLAINT DETAILS (STORE)
+ * ==========================================================
+ * GET /stock-transfer-complaints/:complaintId
+ *
+ * Only the receiver store (complaint raiser)
+ * can view complaint details.
+ * ==========================================================
+ */
+
+export const getComplaintDetails = async (req, res) => {
+  try {
+    const { complaintId } = req.params;
+    const user = req.user;
+
+    // =====================================================
+    // VALIDATION
+    // =====================================================
+
+    if (!user?.id || !user?.organization_id) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user.",
+      });
+    }
+
+    const id = Number(complaintId);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid complaint id.",
+      });
+    }
+
+    // =====================================================
+    // FETCH COMPLAINT
+    // =====================================================
+
+    const complaint = await StockTransferComplaint.findByPk(id);
+
+    if (!complaint) {
+      return res.status(404).json({
+        success: false,
+        message: "Complaint not found.",
+      });
+    }
+
+    // =====================================================
+    // AUTHORIZATION
+    // =====================================================
+
+    if (
+      Number(user.organization_id) !==
+      Number(complaint.to_organization_id)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "You are not authorized to view this complaint.",
+      });
+    }
+
+    // =====================================================
+    // FETCH EVERYTHING
+    // =====================================================
+
+    const [
+      transfer,
+      transferItems,
+      senderStore,
+      receiverStore,
+    ] = await Promise.all([
+      StockTransfer.findByPk(complaint.transfer_id),
+
+      StockTransferItem.findAll({
+        where: {
+          transfer_id: complaint.transfer_id,
+        },
+        raw: true,
+      }),
+
+      sequelize.query(
+        `
+        SELECT
+            id,
+            store_code,
+            store_name,
+            organization_level,
+            state,
+            district,
+            district_id,
+            address,
+            phone_number,
+            is_active
+        FROM stores
+        WHERE id=:id
+        `,
+        {
+          replacements: {
+            id: complaint.from_organization_id,
+          },
+          type: QueryTypes.SELECT,
+        }
+      ),
+
+      sequelize.query(
+        `
+        SELECT
+            id,
+            store_code,
+            store_name,
+            organization_level,
+            state,
+            district,
+            district_id,
+            address,
+            phone_number,
+            is_active
+        FROM stores
+        WHERE id=:id
+        `,
+        {
+          replacements: {
+            id: complaint.to_organization_id,
+          },
+          type: QueryTypes.SELECT,
+        }
+      ),
+    ]);
+
+    if (!transfer) {
+      return res.status(404).json({
+        success: false,
+        message: "Transfer not found.",
+      });
+    }
+
+    const fromStore = senderStore[0] || null;
+    const toStore = receiverStore[0] || null;
+
+    // =====================================================
+    // PREPARE MAPS
+    // =====================================================
+
+    const transferItemMap = new Map();
+
+    transferItems.forEach((x) =>
+      transferItemMap.set(Number(x.id), x)
+    );
+
+    const itemIds = [
+      ...new Set(
+        transferItems.map((x) =>
+          Number(x.item_id)
+        )
+      ),
+    ];
+
+    const items =
+      itemIds.length === 0
+        ? []
+        : await Item.findAll({
+            where: {
+              id: {
+                [Op.in]: itemIds,
+              },
+            },
+            raw: true,
+          });
+
+    const itemMap = new Map();
+
+    items.forEach((x) =>
+      itemMap.set(Number(x.id), x)
+    );
+
+    const complaintItems = Array.isArray(
+      complaint.items
+    )
+      ? complaint.items
+      : [];
+
+    let totalSentQty = 0;
+    let totalReceivedQty = 0;
+    let totalShortageQty = 0;
+
+    let totalSentWeight = 0;
+    let totalReceivedWeight = 0;
+    let totalShortageWeight = 0;
+
+    const formattedItems = [];
+        // =====================================================
+    // BUILD ITEM DETAILS
+    // =====================================================
+
+    for (const complaintItem of complaintItems) {
+
+      const transferItem =
+        transferItemMap.get(
+          Number(complaintItem.transfer_item_id)
+        ) || null;
+
+      const item =
+        itemMap.get(
+          Number(complaintItem.item_id)
+        ) || null;
+
+      const sentQty = Number(
+        complaintItem.sent_qty || 0
+      );
+
+      const receivedQty = Number(
+        complaintItem.received_qty || 0
+      );
+
+      const shortageQty = Number(
+        complaintItem.shortage_qty || 0
+      );
+
+      const sentWeight = Number(
+        complaintItem.sent_weight || 0
+      );
+
+      const receivedWeight = Number(
+        complaintItem.received_weight || 0
+      );
+
+      const shortageWeight = Number(
+        complaintItem.shortage_weight || 0
+      );
+
+      // =============================================
+      // SUMMARY
+      // =============================================
+
+      totalSentQty += sentQty;
+      totalReceivedQty += receivedQty;
+      totalShortageQty += shortageQty;
+
+      totalSentWeight += sentWeight;
+      totalReceivedWeight += receivedWeight;
+      totalShortageWeight += shortageWeight;
+
+      // =============================================
+      // PUSH ITEM
+      // =============================================
+
+      formattedItems.push({
+
+        transfer_item_id:
+          complaintItem.transfer_item_id,
+
+        item_id:
+          complaintItem.item_id,
+
+        article_code:
+          item?.article_code ?? null,
+
+        sku_code:
+          item?.sku_code ?? null,
+
+        item_name:
+          item?.item_name ?? null,
+
+        category:
+          item?.category ?? null,
+
+        metal_type:
+          item?.metal_type ?? null,
+
+        purity:
+          item?.purity ?? null,
+
+        details:
+          item?.details ?? null,
+
+        image_url:
+          item?.image_url ?? null,
+
+        qr_code_url:
+          item?.qr_code_url ?? null,
+
+        qr_code_value:
+          item?.qr_code_value ?? null,
+
+        unit:
+          item?.unit ?? null,
+
+        gross_weight:
+          Number(item?.gross_weight || 0),
+
+        net_weight:
+          Number(item?.net_weight || 0),
+
+        stone_weight:
+          Number(item?.stone_weight || 0),
+
+        making_charge:
+          Number(item?.making_charge || 0),
+
+        purchase_rate:
+          Number(item?.purchase_rate || 0),
+
+        sale_rate:
+          Number(item?.sale_rate || 0),
+
+        current_status:
+          item?.current_status ?? null,
+
+        organization_id:
+          item?.organization_id ?? null,
+
+        // =========================================
+        // Transfer Snapshot
+        // =========================================
+
+        transfer: transferItem
+          ? {
+
+              id:
+                transferItem.id,
+
+              qty:
+                Number(
+                  transferItem.qty || 0
+                ),
+
+              weight:
+                Number(
+                  transferItem.weight || 0
+                ),
+
+              rate:
+                Number(
+                  transferItem.rate || 0
+                ),
+
+              remarks:
+                transferItem.remarks,
+            }
+          : null,
+
+        // =========================================
+        // Complaint Snapshot
+        // =========================================
+
+        complaint: {
+
+          sent_qty:
+            sentQty,
+
+          received_qty:
+            receivedQty,
+
+          shortage_qty:
+            shortageQty,
+
+          sent_weight:
+            sentWeight,
+
+          received_weight:
+            receivedWeight,
+
+          shortage_weight:
+            shortageWeight,
+
+          note:
+            complaintItem.note || "",
+        },
+      });
+
+    }
+
+    // =====================================================
+    // SUMMARY OBJECT
+    // =====================================================
+
+    const summary = {
+
+      total_items:
+        formattedItems.length,
+
+      total_sent_qty:
+        Number(totalSentQty.toFixed(3)),
+
+      total_received_qty:
+        Number(totalReceivedQty.toFixed(3)),
+
+      total_shortage_qty:
+        Number(totalShortageQty.toFixed(3)),
+
+      total_sent_weight:
+        Number(totalSentWeight.toFixed(3)),
+
+      total_received_weight:
+        Number(totalReceivedWeight.toFixed(3)),
+
+      total_shortage_weight:
+        Number(totalShortageWeight.toFixed(3)),
+    };
+
+    // =====================================================
+    // TIMELINE
+    // =====================================================
+
+    const timeline = [];
+
+    timeline.push({
+      key: "raised",
+      title: "Complaint Raised",
+      completed: true,
+      date: complaint.created_at,
+    });
+
+    timeline.push({
+      key: "review",
+      title: "Under Review",
+      completed: [
+        "under_review",
+        "resolved",
+        "closed",
+        "rejected",
+      ].includes(complaint.status),
+      date:
+        complaint.status === "under_review"
+          ? complaint.updated_at
+          : null,
+    });
+
+    timeline.push({
+      key: "resolved",
+      title: "Resolved",
+      completed:
+        complaint.status === "resolved",
+      date:
+        complaint.resolved_at,
+    });
+
+    timeline.push({
+      key: "rejected",
+      title: "Rejected",
+      completed:
+        complaint.status === "rejected",
+      date:
+        complaint.resolved_at,
+    });
+
+    timeline.push({
+      key: "closed",
+      title: "Closed",
+      completed:
+        complaint.status === "closed",
+      date:
+        complaint.updated_at,
+    });
+        // =====================================================
+    // RESPONSE OBJECT
+    // =====================================================
+
+    const response = {
+      complaint: {
+        id: complaint.id,
+        complaint_no: complaint.complaint_no,
+        transfer_id: complaint.transfer_id,
+
+        complaint_type: complaint.complaint_type,
+        status: complaint.status,
+
+        description: complaint.description,
+
+        raised_by: complaint.raised_by,
+
+        from_organization_id:
+          complaint.from_organization_id,
+
+        to_organization_id:
+          complaint.to_organization_id,
+
+        created_at: complaint.created_at,
+        updated_at: complaint.updated_at,
+
+        resolution_note:
+          complaint.resolution_note,
+
+        resolved_by:
+          complaint.resolved_by,
+
+        resolved_at:
+          complaint.resolved_at,
+      },
+
+      transfer: {
+        id: transfer.id,
+
+        transfer_no:
+          transfer.transfer_no,
+
+        request_id:
+          transfer.request_id,
+
+        status:
+          transfer.status,
+
+        transfer_date:
+          transfer.transfer_date,
+
+        dispatch_date:
+          transfer.dispatch_date,
+
+        receive_date:
+          transfer.receive_date,
+
+        remarks:
+          transfer.remarks,
+
+        approved_by:
+          transfer.approved_by,
+
+        dispatched_by:
+          transfer.dispatched_by,
+
+        received_by:
+          transfer.received_by,
+
+        created_by:
+          transfer.created_by,
+
+        driver_name:
+          transfer.driver_name,
+
+        driver_phone:
+          transfer.driver_phone,
+
+        vehicle_number:
+          transfer.vehicle_number,
+
+        tracking_number:
+          transfer.tracking_number,
+
+        dispatch_address:
+          transfer.dispatch_address,
+
+        destination_address:
+          transfer.destination_address,
+
+        expected_delivery_date:
+          transfer.expected_delivery_date,
+
+        expected_delivery_time:
+          transfer.expected_delivery_time,
+
+        dispatch_image_url:
+          transfer.dispatch_image_url,
+
+        dispatch_video_url:
+          transfer.dispatch_video_url,
+
+        e_way_bill_url:
+          transfer.e_way_bill_url,
+      },
+
+      sender_store: fromStore
+        ? {
+            id: fromStore.id,
+            store_code:
+              fromStore.store_code,
+            store_name:
+              fromStore.store_name,
+            organization_level:
+              fromStore.organization_level,
+            state:
+              fromStore.state,
+            district:
+              fromStore.district,
+            district_id:
+              fromStore.district_id,
+            address:
+              fromStore.address,
+            phone_number:
+              fromStore.phone_number,
+            is_active:
+              fromStore.is_active,
+          }
+        : null,
+
+      receiver_store: toStore
+        ? {
+            id: toStore.id,
+            store_code:
+              toStore.store_code,
+            store_name:
+              toStore.store_name,
+            organization_level:
+              toStore.organization_level,
+            state:
+              toStore.state,
+            district:
+              toStore.district,
+            district_id:
+              toStore.district_id,
+            address:
+              toStore.address,
+            phone_number:
+              toStore.phone_number,
+            is_active:
+              toStore.is_active,
+          }
+        : null,
+
+      evidence: {
+        image_1_url:
+          complaint.image_1_url,
+
+        image_2_url:
+          complaint.image_2_url,
+
+        video_url:
+          complaint.video_url,
+      },
+
+      summary,
+
+      items: formattedItems,
+
+      timeline,
+    };
+
+    // =====================================================
+    // SUCCESS RESPONSE
+    // =====================================================
+
+    return res.status(200).json({
+      success: true,
+      message:
+        "Complaint details fetched successfully.",
+      data: response,
+    });
+
+  } catch (error) {
+
+    console.error(
+      "getComplaintDetails Error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message:
+        "Failed to fetch complaint details.",
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
+    });
+
+  }
+};
