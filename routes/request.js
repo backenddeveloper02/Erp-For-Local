@@ -38,7 +38,7 @@ import {
   getAvailableStoresForHeadRequest,
   getAnyTransferDetailsForHead,
 } from "../controller/headoffice/headrequestflow.js";
-import {raiseTransferComplaint,getStoreComplaints, getHeadAllTransferComplaints,updateComplaintItemStatus,sendReplacementAgainstComplaint} from "../controller/stockTransferComplaintController.js";
+import {raiseTransferComplaint,getStoreComplaints, getHeadAllTransferComplaints,updateComplaintItemStatus,sendReplacementAgainstComplaint,getComplaintDetails} from "../controller/stockTransferComplaintController.js";
 const router = express.Router();
 
 /* =====================================================
@@ -337,4 +337,5 @@ router.post(
   auth,
   sendReplacementAgainstComplaint
 );
+router.get("/:complaintId",auth,getComplaintDetails)
 export default router;
