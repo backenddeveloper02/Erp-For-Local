@@ -3553,7 +3553,7 @@ export const receiveTransfer = async (req, res) => {
           include: [
             {
               model: StockTransferItem,
-              as: "items",
+              as: "transfer_items",
               required: false,
             },
           ],
