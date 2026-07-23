@@ -105,7 +105,7 @@ router.get("/transfers/incoming", auth, getIncomingTransfers);
 
 router.get("/transfers/outgoing", auth, getOutgoingTransfers);
 
-router.put("/transfers/:transferId", auth, receiveTransfer);
+router.put("/transfers/:transferId/receive", auth, receiveTransfer);
 
 router.get("/transfers/:id/details", auth, getTransferDetails);
 
