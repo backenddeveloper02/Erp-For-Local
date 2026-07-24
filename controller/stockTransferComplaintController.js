@@ -1629,6 +1629,7 @@ export const updateTransferComplaintStatus = async (
     const allowedStatuses = [
       "open",
       "under_review",
+      "replacement_dispatched",
       "resolved",
       "rejected",
       "closed",
@@ -6163,7 +6164,7 @@ export const sendReplacementAgainstComplaint = async (req, res) => {
     */
 
     const updatedComplaintStatus =
-      "under_review";
+  "replacement_dispatched";
 
     const updatedComplaintRows =
       await sequelize.query(
