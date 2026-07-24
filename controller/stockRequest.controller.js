@@ -1,6 +1,6 @@
 import sequelize from "../config/db.js";
 import { Op, where, cast, col, QueryTypes } from "sequelize";
-
+import StockTransferComplaint from "../model/StockTransferComplaint.js";
 import Store from "../model/Store.js";
 import StockTransfer from "../model/stockTransfer.js";
 import StockTransferItem from "../model/stockTransferItem.js";
@@ -3553,7 +3553,7 @@ export const receiveTransfer = async (req, res) => {
           include: [
             {
               model: StockTransferItem,
-              as: "transfer_items",
+              as: "items",
               required: false,
             },
           ],
@@ -3666,7 +3666,8 @@ const buildDeliveryDetails = (plain, storeMap) => {
 const buildTransferResponse = (
   transfers,
   storeMap,
-  userMap
+  userMap,
+  complaintMap = new Map()
 ) => {
   return transfers.map((t) => {
     const plain =
@@ -3674,16 +3675,25 @@ const buildTransferResponse = (
         ? t.toJSON()
         : t;
 
+    const complaint =
+      complaintMap.get(Number(plain.id)) ||
+      null;
+
     return {
       id: plain.id,
+
       transfer_no: plain.transfer_no,
+
       tracking_number:
         plain.tracking_number ||
         plain.transfer_no,
-      request_id: plain.request_id,
+
+      request_id:
+        plain.request_id,
 
       from_organization_id:
         plain.from_organization_id,
+
       from_organization_name:
         pickStoreName(
           storeMap.get(
@@ -3695,6 +3705,7 @@ const buildTransferResponse = (
 
       to_organization_id:
         plain.to_organization_id,
+
       to_organization_name:
         pickStoreName(
           storeMap.get(
@@ -3704,91 +3715,175 @@ const buildTransferResponse = (
           )
         ) || null,
 
-      /* ✅ NEW ADDITION */
       delivery_details:
         buildDeliveryDetails(
           plain,
           storeMap
         ),
 
-      transfer_date: plain.transfer_date,
-      dispatch_date: plain.dispatch_date,
-      receive_date: plain.receive_date,
+      transfer_date:
+        plain.transfer_date,
+
+      dispatch_date:
+        plain.dispatch_date,
+
+      receive_date:
+        plain.receive_date,
+
       expected_delivery_date:
         plain.expected_delivery_date ||
         null,
+
       expected_delivery_time:
         plain.expected_delivery_time ||
         null,
 
-      status: plain.status,
-      remarks: plain.remarks,
+      status:
+        plain.status,
 
-      approved_by: plain.approved_by,
+      remarks:
+        plain.remarks,
+
+      approved_by:
+        plain.approved_by,
+
       approved_by_name:
         pickUserName(
           userMap.get(
-            Number(plain.approved_by)
+            Number(
+              plain.approved_by
+            )
           )
         ) || null,
 
       dispatched_by:
         plain.dispatched_by,
+
       dispatched_by_name:
         pickUserName(
           userMap.get(
-            Number(plain.dispatched_by)
+            Number(
+              plain.dispatched_by
+            )
           )
         ) || null,
 
-      received_by: plain.received_by,
+      received_by:
+        plain.received_by,
+
       received_by_name:
         pickUserName(
           userMap.get(
-            Number(plain.received_by)
+            Number(
+              plain.received_by
+            )
           )
         ) || null,
 
-      created_by: plain.created_by,
+      created_by:
+        plain.created_by,
+
       created_by_name:
         pickUserName(
           userMap.get(
-            Number(plain.created_by)
+            Number(
+              plain.created_by
+            )
           )
         ) || null,
 
       driver_details: {
         driver_name:
-          plain.driver_name || null,
+          plain.driver_name ||
+          null,
+
         driver_phone:
-          plain.driver_phone || null,
+          plain.driver_phone ||
+          null,
+
         vehicle_number:
-          plain.vehicle_number || null,
+          plain.vehicle_number ||
+          null,
+
         tracking_number:
-          plain.tracking_number || null,
+          plain.tracking_number ||
+          null,
+
         driver_photo_url:
-          plain.driver_photo_url || null,
+          plain.driver_photo_url ||
+          null,
       },
 
-    media: {
-  dispatch_image_url:
-    plain.dispatch_image_url || null,
+      media: {
+        dispatch_image_url:
+          plain.dispatch_image_url ||
+          null,
 
-  dispatch_video_url:
-    plain.dispatch_video_url || null,
+        dispatch_video_url:
+          plain.dispatch_video_url ||
+          null,
 
-  receive_image_url:
-    plain.receive_image_url || null,
+        receive_image_url:
+          plain.receive_image_url ||
+          null,
 
-  e_way_bill_url:
-    plain.e_way_bill_url || null,
-},
+        e_way_bill_url:
+          plain.e_way_bill_url ||
+          null,
+      },
 
-      created_at: plain.created_at,
-      updated_at: plain.updated_at,
+      // ===================================================
+      // COMPLAINT DETAILS
+      // ===================================================
+
+      complaint: complaint
+        ? {
+            complaint_exists: true,
+
+            complaint_id:
+              complaint.id,
+
+            complaint_no:
+              complaint.complaint_no,
+
+            complaint_type:
+              complaint.complaint_type,
+
+            complaint_status:
+              complaint.status,
+
+            complaint_created_at:
+              complaint.created_at,
+          }
+        : {
+            complaint_exists:
+              false,
+
+            complaint_id:
+              null,
+
+            complaint_no:
+              null,
+
+            complaint_type:
+              null,
+
+            complaint_status:
+              null,
+
+            complaint_created_at:
+              null,
+          },
+
+      created_at:
+        plain.created_at,
+
+      updated_at:
+        plain.updated_at,
 
       transfer_items:
-        plain.transfer_items || [],
+        plain.transfer_items ||
+        [],
     };
   });
 };
@@ -4380,6 +4475,10 @@ export const getIncomingTransfers = async (
   try {
     const user = req.user;
 
+    // =====================================================
+    // AUTHORIZATION
+    // =====================================================
+
     if (
       !user?.organization_id &&
       !user?.organizationId &&
@@ -4390,6 +4489,10 @@ export const getIncomingTransfers = async (
         message: "Unauthorized user",
       });
     }
+
+    // =====================================================
+    // FILTERS
+    // =====================================================
 
     const listWhere =
       getIncomingListWhereCondition(
@@ -4407,6 +4510,10 @@ export const getIncomingTransfers = async (
       [Op.in]:
         ACTIVE_TRANSFER_STATUSES,
     };
+
+    // =====================================================
+    // FETCH TRANSFERS
+    // =====================================================
 
     const [
       transfers,
@@ -4445,17 +4552,102 @@ export const getIncomingTransfers = async (
       }),
     ]);
 
+    // =====================================================
+    // LOAD STORE & USER META
+    // =====================================================
+
     const { storeMap, userMap } =
       await loadTransferMeta(
         transfers
       );
 
+    // =====================================================
+    // LOAD COMPLAINTS
+    // =====================================================
+
+    const transferIds =
+      transfers
+        .map((transfer) =>
+          Number(transfer.id)
+        )
+        .filter(Boolean);
+
+    let complaintMap =
+      new Map();
+
+    if (transferIds.length) {
+      const complaints =
+        await StockTransferComplaint.findAll(
+          {
+            where: {
+              transfer_id: {
+                [Op.in]:
+                  transferIds,
+              },
+            },
+
+            attributes: [
+              "id",
+              "transfer_id",
+              "complaint_no",
+              "complaint_type",
+              "status",
+              "created_at",
+            ],
+
+            order: [
+              [
+                "created_at",
+                "DESC",
+              ],
+            ],
+
+            raw: true,
+          }
+        );
+
+      complaintMap =
+        new Map();
+
+      for (const complaint of complaints) {
+        const transferId =
+          Number(
+            complaint.transfer_id
+          );
+
+        /**
+         * Agar multiple complaints hain
+         * toh latest complaint hi lenge.
+         */
+
+        if (
+          !complaintMap.has(
+            transferId
+          )
+        ) {
+          complaintMap.set(
+            transferId,
+            complaint
+          );
+        }
+      }
+    }
+
+    // =====================================================
+    // BUILD RESPONSE
+    // =====================================================
+
     const responseData =
       buildTransferResponse(
         transfers,
         storeMap,
-        userMap
+        userMap,
+        complaintMap
       );
+
+    // =====================================================
+    // ADD DIRECTION
+    // =====================================================
 
     const data =
       addTransferDirection(
@@ -4463,18 +4655,28 @@ export const getIncomingTransfers = async (
         user
       );
 
+    // =====================================================
+    // SUMMARY
+    // =====================================================
+
     const summary =
       buildCardSummary(
         summaryTransfers,
         "incoming"
       );
 
+    // =====================================================
+    // RESPONSE
+    // =====================================================
+
     return res.status(200).json({
       success: true,
+
       summary,
-  //       id: plain.id,
-  // transfer_no: plain.transfer_no,
-      count: summary.incoming,
+
+      count:
+        summary.incoming,
+
       data,
     });
   } catch (error) {
@@ -4485,9 +4687,12 @@ export const getIncomingTransfers = async (
 
     return res.status(500).json({
       success: false,
+
       message:
         "Failed to fetch incoming transfers",
-      error: error.message,
+
+      error:
+        error.message,
     });
   }
 };
