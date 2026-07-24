@@ -4708,6 +4708,10 @@ export const getOutgoingTransfers = async (
   try {
     const user = req.user;
 
+    // =====================================================
+    // AUTHORIZATION
+    // =====================================================
+
     if (
       !user?.organization_id &&
       !user?.organizationId &&
@@ -4718,6 +4722,10 @@ export const getOutgoingTransfers = async (
         message: "Unauthorized user",
       });
     }
+
+    // =====================================================
+    // FILTERS
+    // =====================================================
 
     const listWhere =
       getOutgoingListWhereCondition(
@@ -4735,6 +4743,10 @@ export const getOutgoingTransfers = async (
       [Op.in]:
         ACTIVE_TRANSFER_STATUSES,
     };
+
+    // =====================================================
+    // FETCH TRANSFERS
+    // =====================================================
 
     const [
       transfers,
@@ -4773,17 +4785,96 @@ export const getOutgoingTransfers = async (
       }),
     ]);
 
+    // =====================================================
+    // LOAD STORE & USER META
+    // =====================================================
+
     const { storeMap, userMap } =
       await loadTransferMeta(
         transfers
       );
 
+    // =====================================================
+    // LOAD COMPLAINTS
+    // =====================================================
+
+    const transferIds =
+      transfers
+        .map((transfer) =>
+          Number(transfer.id)
+        )
+        .filter(Boolean);
+
+    let complaintMap =
+      new Map();
+
+    if (transferIds.length) {
+      const complaints =
+        await StockTransferComplaint.findAll({
+          where: {
+            transfer_id: {
+              [Op.in]:
+                transferIds,
+            },
+          },
+
+          attributes: [
+            "id",
+            "transfer_id",
+            "complaint_no",
+            "complaint_type",
+            "status",
+            "created_at",
+          ],
+
+          order: [
+            [
+              "created_at",
+              "DESC",
+            ],
+          ],
+
+          raw: true,
+        });
+
+      complaintMap =
+        new Map();
+
+      for (const complaint of complaints) {
+        const transferId =
+          Number(
+            complaint.transfer_id
+          );
+
+        // Keep latest complaint only
+        if (
+          !complaintMap.has(
+            transferId
+          )
+        ) {
+          complaintMap.set(
+            transferId,
+            complaint
+          );
+        }
+      }
+    }
+
+    // =====================================================
+    // BUILD RESPONSE
+    // =====================================================
+
     const responseData =
       buildTransferResponse(
         transfers,
         storeMap,
-        userMap
+        userMap,
+        complaintMap
       );
+
+    // =====================================================
+    // ADD DIRECTION
+    // =====================================================
 
     const data =
       addTransferDirection(
@@ -4791,18 +4882,25 @@ export const getOutgoingTransfers = async (
         user
       );
 
+    // =====================================================
+    // SUMMARY
+    // =====================================================
+
     const summary =
       buildCardSummary(
         summaryTransfers,
         "outgoing"
       );
 
+    // =====================================================
+    // RESPONSE
+    // =====================================================
+
     return res.status(200).json({
       success: true,
       summary,
       count: summary.outgoing,
       data,
-      
     });
   } catch (error) {
     console.error(
@@ -4822,190 +4920,814 @@ export const getOutgoingTransfers = async (
 // SINGLE TRANSFER DETAILS
 // ==========================================
 export const getTransferDetails = async (req, res) => {
+
   try {
+
     const { id } = req.params;
+
     const user = req.user;
 
+
+
     const transfer = await StockTransfer.findByPk(id, {
+
       include: [
+
         {
+
           model: StockTransferItem,
+
           as: "transfer_items",
+
           include: [
+
             {
+
               model: Item,
+
               as: "item",
+
               attributes: [
+
                 "id",
+
                 "item_name",
+
                 "article_code",
+
                 "category",
+
                 "sale_rate",
+
                 "gross_weight",
+
                 "net_weight",
+
               ],
+
             },
+
           ],
+
         },
+
       ],
+
     });
 
+
+
     if (!transfer) {
+
       return res.status(404).json({
+
         success: false,
+
         message: "Transfer not found",
+
       });
+
     }
+
+
 
     const plainTransfer = transfer.get({ plain: true });
 
+
+
     if (
-      Number(user.organization_id) !== Number(plainTransfer.from_organization_id) &&
-      Number(user.organization_id) !== Number(plainTransfer.to_organization_id) &&
+
+      Number(user.organization_id) !==
+
+        Number(plainTransfer.from_organization_id) &&
+
+      Number(user.organization_id) !==
+
+        Number(plainTransfer.to_organization_id) &&
+
       String(user.role || "").toLowerCase() !== "super_admin"
+
     ) {
+
       return res.status(403).json({
+
         success: false,
+
         message: "You are not allowed to view this transfer",
+
       });
+
     }
 
+
+
+    // =====================================================
+
+    // FETCH STORES
+
+    // =====================================================
+
+
+
     const stores = await Store.findAll({
+
       where: {
+
         id: {
+
           [Op.in]: [
+
             Number(plainTransfer.from_organization_id),
+
             Number(plainTransfer.to_organization_id),
+
           ],
+
         },
+
       },
+
     });
 
-    const storeMap = new Map(stores.map((s) => [Number(s.id), s]));
+
+
+    const storeMap = new Map(
+
+      stores.map((store) => [Number(store.id), store])
+
+    );
+
+
+
+    // =====================================================
+
+    // FETCH USERS
+
+    // =====================================================
+
+
 
     const userIds = [
+
       Number(plainTransfer.created_by || 0),
+
       Number(plainTransfer.approved_by || 0),
+
       Number(plainTransfer.dispatched_by || 0),
+
       Number(plainTransfer.received_by || 0),
+
     ].filter(Boolean);
 
+
+
     const users = userIds.length
+
       ? await User.findAll({
+
           where: {
+
             id: {
+
               [Op.in]: userIds,
+
             },
+
           },
+
           attributes: ["id", "username", "email"],
+
         })
+
       : [];
 
-    const userMap = new Map(users.map((u) => [Number(u.id), u]));
+
+
+    const userMap = new Map(
+
+      users.map((user) => [Number(user.id), user])
+
+    );
+
+
+
+    // =====================================================
+
+    // FETCH COMPLAINTS FOR THIS TRANSFER
+
+    // =====================================================
+
+
+
+    const complaints = await StockTransferComplaint.findAll({
+
+      where: {
+
+        transfer_id: plainTransfer.id,
+
+      },
+
+      order: [["created_at", "DESC"]],
+
+    });
+
+
+
+    /**
+
+     * Key:
+
+     * transfer_item_id
+
+     *
+
+     * Value:
+
+     * Complaint Details
+
+     */
+
+
+
+    const complaintMap = new Map();
+
+
+
+    for (const complaint of complaints) {
+
+      const complaintItems = Array.isArray(complaint.items)
+
+        ? complaint.items
+
+        : [];
+
+
+
+      for (const item of complaintItems) {
+
+        complaintMap.set(Number(item.transfer_item_id), {
+
+          complaint_exists: true,
+
+
+
+          complaint_id: complaint.id,
+
+          complaint_no: complaint.complaint_no,
+
+
+
+          complaint_status: complaint.status,
+
+
+
+          complaint_type: complaint.complaint_type,
+
+
+
+          description: complaint.description,
+
+
+
+          resolution_note: complaint.resolution_note,
+
+
+
+          raised_by: complaint.raised_by,
+
+
+
+          created_at: complaint.created_at,
+
+
+
+          updated_at: complaint.updated_at,
+
+
+
+          sent_qty: Number(item.sent_qty || 0),
+
+
+
+          received_qty: Number(item.received_qty || 0),
+
+
+
+          shortage_qty: Number(item.shortage_qty || 0),
+
+
+
+          sent_weight: Number(item.sent_weight || 0),
+
+
+
+          received_weight: Number(item.received_weight || 0),
+
+
+
+          shortage_weight: Number(item.shortage_weight || 0),
+
+
+
+          note: item.note || null,
+
+        });
+
+      }
+
+    }
+
+
+
+    // =====================================================
+
+    // RESPONSE DATA
+
+    // =====================================================
+
+
 
     const data = {
+
       id: plainTransfer.id,
+
+
+
       transfer_no: plainTransfer.transfer_no,
+
+
+
       tracking_number:
+
         plainTransfer.tracking_number || plainTransfer.transfer_no,
 
+
+
       status: plainTransfer.status,
+
+
+
       remarks: plainTransfer.remarks,
 
+
+
       from_organization_id: plainTransfer.from_organization_id,
+
+
+
       from_organization_name: pickStoreName(
+
         storeMap.get(Number(plainTransfer.from_organization_id))
+
       ),
+
+
 
       to_organization_id: plainTransfer.to_organization_id,
+
+
+
       to_organization_name: pickStoreName(
+
         storeMap.get(Number(plainTransfer.to_organization_id))
+
       ),
 
+
+
       transfer_date: plainTransfer.transfer_date,
+
+
+
       dispatch_date: plainTransfer.dispatch_date,
+
+
+
       receive_date: plainTransfer.receive_date,
 
+
+
       expected_delivery_date:
+
         plainTransfer.expected_delivery_date || null,
+
+
+
       expected_delivery_time:
+
         plainTransfer.expected_delivery_time || null,
 
-      e_way_bill_url: plainTransfer.e_way_bill_url || null,
+
+
+      e_way_bill_url:
+
+        plainTransfer.e_way_bill_url || null,
+
+
 
       driver_details: {
-        driver_name: plainTransfer.driver_name || null,
-        driver_phone: plainTransfer.driver_phone || null,
-        vehicle_number: plainTransfer.vehicle_number || null,
-        tracking_number: plainTransfer.tracking_number || null,
-        driver_photo_url: plainTransfer.driver_photo_url || null,
+
+        driver_name:
+
+          plainTransfer.driver_name || null,
+
+
+
+        driver_phone:
+
+          plainTransfer.driver_phone || null,
+
+
+
+        vehicle_number:
+
+          plainTransfer.vehicle_number || null,
+
+
+
+        tracking_number:
+
+          plainTransfer.tracking_number || null,
+
+
+
+        driver_photo_url:
+
+          plainTransfer.driver_photo_url || null,
+
       },
+
+
 
       media: {
-        dispatch_image_url: plainTransfer.dispatch_image_url || null,
-        dispatch_video_url: plainTransfer.dispatch_video_url || null,
-        receive_image_url: plainTransfer.receive_image_url || null,
-        e_way_bill_url: plainTransfer.e_way_bill_url || null,
+
+        dispatch_image_url:
+
+          plainTransfer.dispatch_image_url || null,
+
+
+
+        dispatch_video_url:
+
+          plainTransfer.dispatch_video_url || null,
+
+
+
+        receive_image_url:
+
+          plainTransfer.receive_image_url || null,
+
+
+
+        e_way_bill_url:
+
+          plainTransfer.e_way_bill_url || null,
+
       },
+
+
 
       created_by: {
+
         id: plainTransfer.created_by,
-        name: pickUserName(userMap.get(Number(plainTransfer.created_by))),
+
+
+
+        name: pickUserName(
+
+          userMap.get(Number(plainTransfer.created_by))
+
+        ),
+
       },
+
+
 
       approved_by: {
+
         id: plainTransfer.approved_by,
-        name: pickUserName(userMap.get(Number(plainTransfer.approved_by))),
+
+
+
+        name: pickUserName(
+
+          userMap.get(Number(plainTransfer.approved_by))
+
+        ),
+
       },
+
+
 
       dispatched_by: {
+
         id: plainTransfer.dispatched_by,
-        name: pickUserName(userMap.get(Number(plainTransfer.dispatched_by))),
+
+
+
+        name: pickUserName(
+
+          userMap.get(Number(plainTransfer.dispatched_by))
+
+        ),
+
       },
+
+
 
       received_by: {
+
         id: plainTransfer.received_by,
-        name: pickUserName(userMap.get(Number(plainTransfer.received_by))),
+
+
+
+        name: pickUserName(
+
+          userMap.get(Number(plainTransfer.received_by))
+
+        ),
+
       },
 
-      products: (plainTransfer.transfer_items || []).map((row) => ({
-  id: row.id,
-  item_id: row.item_id,
 
-  // ✅ Requested Quantity (same as qty)
-  requested_qty: Number(row.qty || 0),
 
-  // ✅ Existing Quantity
-  qty: Number(row.qty || 0),
+    products: (plainTransfer.transfer_items || []).map((row) => {
 
-  weight: Number(row.weight || 0),
-  remarks: row.remarks || null,
+  const complaint =
 
-  item_name: row.item?.item_name || null,
-  article_code: row.item?.article_code || null,
-  category: row.item?.category || null,
-  rate: Number(row.item?.sale_rate || 0),
-  gross_weight: Number(row.item?.gross_weight || 0),
-  net_weight: Number(row.item?.net_weight || 0),
-})),
+    complaintMap.get(Number(row.id)) || null;
+
+
+
+  return {
+
+    id: row.id,
+
+
+
+    item_id: row.item_id,
+
+
+
+    // Requested Quantity
+
+    requested_qty: Number(row.qty || 0),
+
+
+
+    // Actual Transfer Quantity
+
+    qty: Number(row.qty || 0),
+
+
+
+    weight: Number(row.weight || 0),
+
+
+
+    remarks: row.remarks || null,
+
+
+
+    item_name: row.item?.item_name || null,
+
+
+
+    article_code: row.item?.article_code || null,
+
+
+
+    category: row.item?.category || null,
+
+
+
+    rate: Number(row.item?.sale_rate || 0),
+
+
+
+    gross_weight: Number(
+
+      row.item?.gross_weight || 0
+
+    ),
+
+
+
+    net_weight: Number(
+
+      row.item?.net_weight || 0
+
+    ),
+
+
+
+    complaint: complaint
+
+      ? {
+
+          complaint_exists: true,
+
+
+
+          complaint_id: complaint.complaint_id,
+
+
+
+          complaint_no: complaint.complaint_no,
+
+
+
+          complaint_status:
+
+            complaint.complaint_status,
+
+
+
+          complaint_type:
+
+            complaint.complaint_type,
+
+
+
+          description:
+
+            complaint.description,
+
+
+
+          resolution_note:
+
+            complaint.resolution_note,
+
+
+
+          raised_by:
+
+            complaint.raised_by,
+
+
+
+          created_at:
+
+            complaint.created_at,
+
+
+
+          updated_at:
+
+            complaint.updated_at,
+
+
+
+          sent_qty:
+
+            complaint.sent_qty,
+
+
+
+          received_qty:
+
+            complaint.received_qty,
+
+
+
+          shortage_qty:
+
+            complaint.shortage_qty,
+
+
+
+          sent_weight:
+
+            complaint.sent_weight,
+
+
+
+          received_weight:
+
+            complaint.received_weight,
+
+
+
+          shortage_weight:
+
+            complaint.shortage_weight,
+
+
+
+          note:
+
+            complaint.note,
+
+        }
+
+      : {
+
+          complaint_exists: false,
+
+
+
+          complaint_id: null,
+
+
+
+          complaint_no: null,
+
+
+
+          complaint_status: null,
+
+
+
+          complaint_type: null,
+
+
+
+          description: null,
+
+
+
+          resolution_note: null,
+
+
+
+          raised_by: null,
+
+
+
+          created_at: null,
+
+
+
+          updated_at: null,
+
+
+
+          sent_qty: 0,
+
+
+
+          received_qty: 0,
+
+
+
+          shortage_qty: 0,
+
+
+
+          sent_weight: 0,
+
+
+
+          received_weight: 0,
+
+
+
+          shortage_weight: 0,
+
+
+
+          note: null,
+
+        },
+
+  };
+
+}),
+
     };
 
+
+
     return res.status(200).json({
+
       success: true,
+
       message: "Transfer details fetched successfully",
+
       data,
+
     });
+
   } catch (error) {
+
     console.error("getTransferDetails error:", error);
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch transfer details",
-      error: error.message,
-    });
-  }
-};
 
+
+    return res.status(500).json({
+
+      success: false,
+
+      message: "Failed to fetch transfer details",
+
+      error: error.message,
+
+    });
+
+  }
+
+};
 
 export const getEWayBillByTransferId = async (req, res) => {
   try {
