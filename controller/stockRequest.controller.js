@@ -2825,774 +2825,1537 @@ export const approveAndDispatchRequest = async (req, res) => {
 // ==========================================
 
 export const receiveTransfer = async (req, res) => {
+
   const transaction = await sequelize.transaction();
 
+
+
   try {
+
     const { transferId } = req.params;
+
     const { remarks } = req.body;
+
     const user = req.user;
 
+
+
     if (!user?.id || !user?.organization_id) {
+
       await transaction.rollback();
+
+
 
       return res.status(401).json({
+
         success: false,
+
         message: "Unauthorized user",
+
       });
+
     }
+
+
 
     const receiverStoreCode = String(
+
       user.store_code || user.storeCode || ""
+
     )
+
       .trim()
+
       .toUpperCase();
 
+
+
     if (!receiverStoreCode) {
+
       await transaction.rollback();
 
+
+
       return res.status(400).json({
+
         success: false,
+
         message: "Receiver store code is missing",
+
       });
+
     }
 
+
+
     // =====================================================
+
     // FETCH AND LOCK TRANSFER
+
     // =====================================================
+
+
 
     const transfer = await StockTransfer.findByPk(transferId, {
+
       transaction,
+
       lock: transaction.LOCK.UPDATE,
+
     });
+
+
 
     if (!transfer) {
+
       await transaction.rollback();
+
+
 
       return res.status(404).json({
+
         success: false,
+
         message: "Transfer not found",
+
       });
+
     }
 
-    // =====================================================
-    // RECEIVER VALIDATION
+
+
     // =====================================================
 
+    // RECEIVER VALIDATION
+
+    // =====================================================
+
+
+
     if (
+
       Number(transfer.to_organization_id) !==
+
       Number(user.organization_id)
+
     ) {
+
       await transaction.rollback();
+
+
 
       return res.status(403).json({
+
         success: false,
+
         message: "You are not allowed to receive this transfer",
+
       });
+
     }
+
+
 
     if (
+
       String(transfer.status || "").toLowerCase() !==
+
       "in_transit"
+
     ) {
+
       await transaction.rollback();
 
+
+
       return res.status(400).json({
+
         success: false,
+
         message: "Only in_transit transfer can be received",
+
       });
+
     }
 
+
+
     // =====================================================
+
     // FETCH TRANSFER ITEMS
+
     // =====================================================
+
+
 
     const transferItems = await StockTransferItem.findAll({
+
       where: {
+
         transfer_id: transfer.id,
+
       },
+
       transaction,
+
       lock: transaction.LOCK.UPDATE,
+
     });
 
+
+
     if (!transferItems.length) {
+
       await transaction.rollback();
 
+
+
       return res.status(400).json({
+
         success: false,
+
         message: "No items found in this transfer",
+
       });
+
     }
+
+
 
     const receivedItems = [];
 
+
+
     // =====================================================
+
     // PROCESS EACH TRANSFER ITEM
+
     // =====================================================
+
+
 
     for (const trItem of transferItems) {
+
       const itemId = Number(trItem.item_id);
+
       const qty = toNumber(trItem.qty);
+
       const weight = toNumber(trItem.weight);
 
+
+
       if (!itemId) {
+
         throw new Error(
+
           `Invalid item_id found in transfer item ${trItem.id}`
+
         );
+
       }
+
+
 
       if (qty <= 0 && weight <= 0) {
+
         throw new Error(
+
           `Invalid transfer quantity for item ${itemId}`
+
         );
+
       }
 
+
+
       // ===================================================
+
       // VERIFY ITEM
+
       // ===================================================
+
+
 
       const item = await Item.findByPk(itemId, {
+
         transaction,
+
         lock: transaction.LOCK.UPDATE,
+
       });
 
+
+
       if (!item) {
+
         throw new Error(`Item not found for item_id ${itemId}`);
+
       }
 
+
+
       // ===================================================
+
       // SOURCE STOCK
+
       // Source ki transit quantity clear hogi
+
       // ===================================================
+
+
 
       const sourceStock = await getOrCreateStock(
+
         transfer.from_organization_id,
+
         itemId,
+
         transaction
+
       );
+
+
 
       const sourceTransitQty = toNumber(
+
         sourceStock.transit_qty
+
       );
+
+
 
       const sourceTransitWeight = toNumber(
+
         sourceStock.transit_weight
+
       );
 
+
+
       if (sourceTransitQty < qty) {
+
         throw new Error(
+
           `Insufficient transit quantity for item ${itemId}. ` +
+
             `Transit: ${sourceTransitQty}, Receiving: ${qty}`
+
         );
+
       }
+
+
 
       if (
+
         weight > 0 &&
+
         sourceTransitWeight < weight
+
       ) {
+
         throw new Error(
+
           `Insufficient transit weight for item ${itemId}. ` +
+
             `Transit weight: ${sourceTransitWeight}, Receiving: ${weight}`
+
         );
+
       }
 
+
+
       const sourceBefore = {
+
         available_qty: toNumber(
+
           sourceStock.available_qty
+
         ),
 
+
+
         reserved_qty: toNumber(
+
           sourceStock.reserved_qty
+
         ),
+
+
 
         transit_qty: sourceTransitQty,
 
+
+
         damaged_qty: toNumber(
+
           sourceStock.damaged_qty
+
         ),
+
+
 
         available_weight: toNumber(
+
           sourceStock.available_weight
+
         ),
 
+
+
         reserved_weight: toNumber(
+
           sourceStock.reserved_weight
+
         ),
+
+
 
         transit_weight: sourceTransitWeight,
 
+
+
         damaged_weight: toNumber(
+
           sourceStock.damaged_weight
+
         ),
+
       };
+
+
 
       await sourceStock.update(
+
         {
+
           transit_qty: Math.max(
+
             0,
+
             sourceTransitQty - qty
+
           ),
+
+
 
           transit_weight: Math.max(
+
             0,
+
             sourceTransitWeight - weight
+
           ),
+
         },
+
         {
+
           transaction,
+
         }
+
       );
 
+
+
       await sourceStock.reload({
+
         transaction,
+
       });
 
+
+
       const sourceAfter = {
+
         available_qty: toNumber(
+
           sourceStock.available_qty
+
         ),
+
+
 
         reserved_qty: toNumber(
+
           sourceStock.reserved_qty
+
         ),
+
+
 
         transit_qty: toNumber(
+
           sourceStock.transit_qty
+
         ),
+
+
 
         damaged_qty: toNumber(
+
           sourceStock.damaged_qty
+
         ),
+
+
 
         available_weight: toNumber(
+
           sourceStock.available_weight
+
         ),
+
+
 
         reserved_weight: toNumber(
+
           sourceStock.reserved_weight
+
         ),
+
+
 
         transit_weight: toNumber(
+
           sourceStock.transit_weight
+
         ),
+
+
 
         damaged_weight: toNumber(
+
           sourceStock.damaged_weight
+
         ),
+
       };
 
+
+
       await createMovement({
+
         organization_id:
+
           transfer.from_organization_id,
 
+
+
         item_id: itemId,
+
+
 
         movement_type: "dispatch",
 
+
+
         reference_type:
+
           "stock_transfer_transit_clear",
 
+
+
         reference_id: transfer.id,
+
+
 
         qty: 0,
 
+
+
         weight: 0,
+
+
 
         stockBefore: sourceBefore,
 
+
+
         stockAfter: sourceAfter,
 
+
+
         remarks:
+
           `Transit cleared after receive for ` +
+
           `${transfer.transfer_no}`,
+
+
 
         created_by: user.id,
 
+
+
         transaction,
+
       });
 
       // ===================================================
+
       // DESTINATION STOCK
+
       //
+
       // Important:
+
       // Same item_id destination stock me use hoga.
+
       // Inventory visibility stocks.store_code se hogi.
+
       // ===================================================
 
+
+
       const destinationStock =
+
         await getOrCreateStock(
+
           transfer.to_organization_id,
+
           itemId,
+
           transaction,
+
           receiverStoreCode
+
         );
 
+
+
       const destinationBefore = {
+
         available_qty: toNumber(
+
           destinationStock.available_qty
+
         ),
+
+
 
         reserved_qty: toNumber(
+
           destinationStock.reserved_qty
+
         ),
+
+
 
         transit_qty: toNumber(
+
           destinationStock.transit_qty
+
         ),
+
+
 
         damaged_qty: toNumber(
+
           destinationStock.damaged_qty
+
         ),
+
+
 
         available_weight: toNumber(
+
           destinationStock.available_weight
+
         ),
+
+
 
         reserved_weight: toNumber(
+
           destinationStock.reserved_weight
+
         ),
+
+
 
         transit_weight: toNumber(
+
           destinationStock.transit_weight
+
         ),
+
+
 
         damaged_weight: toNumber(
+
           destinationStock.damaged_weight
+
         ),
+
       };
 
+
+
       await destinationStock.update(
+
         {
+
           available_qty:
+
             toNumber(
+
               destinationStock.available_qty
+
             ) + qty,
 
+
+
           available_weight:
+
             toNumber(
+
               destinationStock.available_weight
+
             ) + weight,
+
+
 
           store_code: receiverStoreCode,
 
+
+
           organization_id:
+
             transfer.to_organization_id,
+
         },
+
         {
+
           transaction,
+
         }
+
       );
+
+
 
       await destinationStock.reload({
+
         transaction,
+
       });
 
+
+
       const destinationAfter = {
+
         available_qty: toNumber(
+
           destinationStock.available_qty
+
         ),
+
+
 
         reserved_qty: toNumber(
+
           destinationStock.reserved_qty
+
         ),
+
+
 
         transit_qty: toNumber(
+
           destinationStock.transit_qty
+
         ),
+
+
 
         damaged_qty: toNumber(
+
           destinationStock.damaged_qty
+
         ),
+
+
 
         available_weight: toNumber(
+
           destinationStock.available_weight
+
         ),
+
+
 
         reserved_weight: toNumber(
+
           destinationStock.reserved_weight
+
         ),
+
+
 
         transit_weight: toNumber(
+
           destinationStock.transit_weight
+
         ),
+
+
 
         damaged_weight: toNumber(
+
           destinationStock.damaged_weight
+
         ),
+
       };
 
+
+
       // ===================================================
+
       // IMPORTANT ITEM FIX
+
       //
+
       // organization_id aur storeCode change nahi karenge.
+
       // Ek item multiple stores ke stock me ho sakta hai.
+
       // Store ownership stocks table decide karegi.
+
       // ===================================================
+
+
 
       const totalItemStockResult =
+
         await Stock.findAll({
+
           where: {
+
             item_id: itemId,
+
           },
+
+
 
           attributes: [
+
             "available_qty",
+
             "reserved_qty",
+
             "transit_qty",
+
           ],
 
+
+
           transaction,
+
         });
 
+
+
       const totalAvailableQty =
+
         totalItemStockResult.reduce(
+
           (sum, stock) =>
+
             sum +
+
             toNumber(stock.available_qty),
+
           0
+
         );
+
+
 
       const totalReservedQty =
+
         totalItemStockResult.reduce(
+
           (sum, stock) =>
+
             sum +
+
             toNumber(stock.reserved_qty),
+
           0
+
         );
+
+
 
       const totalTransitQty =
+
         totalItemStockResult.reduce(
+
           (sum, stock) =>
+
             sum +
+
             toNumber(stock.transit_qty),
+
           0
+
         );
+
+
 
       const totalActiveQty =
+
         totalAvailableQty +
+
         totalReservedQty +
+
         totalTransitQty;
 
+
+
       await item.update(
+
         {
+
           current_status:
+
             totalActiveQty > 0
+
               ? "in_stock"
+
               : "sold",
+
         },
+
         {
+
           transaction,
+
         }
+
       );
 
+
+
       // ===================================================
+
       // BATCH UPDATE
+
       //
+
       // Sirf transferred batch update karna best hai.
+
       // Agar transfer item me batch_id available hai to wahi use hoga.
+
       // ===================================================
+
+
 
       const transferBatchId =
+
         trItem.batch_id ||
+
         trItem.inventory_batch_id ||
+
         null;
 
+
+
       if (transferBatchId) {
+
         await InventoryBatch.update(
+
           {
+
             current_organization_id:
+
               transfer.to_organization_id,
 
+
+
             status: "delivered",
+
           },
+
           {
+
             where: {
+
               id: transferBatchId,
+
               item_id: itemId,
+
             },
+
             transaction,
+
           }
+
         );
+
       } else {
+
         /*
+
          * Fallback:
+
          * Agar transfer item me batch_id store nahi ho raha,
+
          * to active in_transit batch update hoga.
+
          *
+
          * Sabhi batches ko item_id se update nahi karna,
+
          * warna source ke purane batches bhi destination me shift ho jayenge.
+
          */
 
+
+
         const inTransitBatch =
+
           await InventoryBatch.findOne({
+
             where: {
+
               item_id: itemId,
+
               status: "in_transit",
+
             },
+
+
 
             order: [["id", "DESC"]],
 
+
+
             transaction,
+
             lock: transaction.LOCK.UPDATE,
+
           });
 
+
+
         if (inTransitBatch) {
+
           await inTransitBatch.update(
+
             {
+
               current_organization_id:
+
                 transfer.to_organization_id,
 
+
+
               status: "delivered",
+
             },
+
             {
+
               transaction,
+
             }
+
           );
+
         }
+
       }
 
       // ===================================================
+
       // DESTINATION MOVEMENT
+
       // ===================================================
 
+
+
       await createMovement({
+
         organization_id:
+
           transfer.to_organization_id,
 
+
+
         item_id: itemId,
+
+
 
         movement_type: "receive",
 
+
+
         reference_type: "stock_transfer",
 
+
+
         reference_id: transfer.id,
+
+
 
         qty,
 
+
+
         weight,
+
+
 
         stockBefore: destinationBefore,
 
+
+
         stockAfter: destinationAfter,
 
+
+
         remarks:
+
           `Received via ${transfer.transfer_no}`,
+
+
 
         created_by: user.id,
 
+
+
         transaction,
+
       });
+
+
 
       receivedItems.push({
+
         transfer_item_id: trItem.id,
+
         item_id: itemId,
+
         item_name: item.item_name,
+
         article_code: item.article_code,
+
         sku_code: item.sku_code,
+
         received_qty: qty,
+
         received_weight: weight,
+
         destination_available_qty:
+
           destinationAfter.available_qty,
+
         destination_available_weight:
+
           destinationAfter.available_weight,
+
         store_code: receiverStoreCode,
+
       });
+
     }
 
-    // =====================================================
-    // UPDATE TRANSFER
+
+
     // =====================================================
 
+    // UPDATE TRANSFER
+
+    // =====================================================
+
+
+
     await transfer.update(
+
       {
+
         receive_date: new Date(),
+
+
 
         status: "received",
 
+
+
         received_by: user.id,
 
+
+
         remarks:
+
           remarks || transfer.remarks,
+
       },
+
       {
+
         transaction,
+
       }
+
     );
 
+
+
     // =====================================================
+
     // UPDATE REQUEST
+
     // =====================================================
+
+
 
     if (transfer.request_id) {
+
       const request =
+
         await StockRequest.findByPk(
+
           transfer.request_id,
+
           {
+
             transaction,
+
             lock: transaction.LOCK.UPDATE,
+
           }
+
         );
+
+
 
       if (request) {
+
         await request.update(
+
           {
+
             status: "completed",
+
           },
+
           {
+
             transaction,
+
           }
+
         );
+
       }
+
     }
 
+
+
     // =====================================================
+
     // SYSTEM ACTIVITY
+
     // =====================================================
+
+
 
     await SystemActivity.create(
+
       {
+
         title: "Stock transfer received",
 
+
+
         description:
+
           `Transfer ${transfer.transfer_no} ` +
+
           `received successfully`,
 
+
+
         activity_type:
+
           "stock_transfer_received",
+
+
 
         module_name: "stock_transfer",
 
+
+
         reference_id: transfer.id,
 
+
+
         reference_no:
+
           transfer.transfer_no,
 
+
+
         district_code:
+
           user.district_code || null,
 
+
+
         store_code:
+
           receiverStoreCode,
 
+
+
         store_name:
+
           user.store_name || null,
+
+
 
         created_by: user.id,
 
+
+
         created_at: new Date(),
+
       },
+
       {
+
         transaction,
+
       }
+
     );
 
-    // =====================================================
-    // ACTIVITY LOG
+
+
     // =====================================================
 
+    // ACTIVITY LOG
+
+    // =====================================================
+
+
+
     await ActivityLog.create(
+
       {
+
         organization_id:
+
           user.organization_id || null,
+
+
 
         user_id: user.id,
 
+
+
         action:
+
           "stock_transfer_received",
+
+
 
         module_name: "stock_transfer",
 
+
+
         reference_id: transfer.id,
 
+
+
         reference_no:
+
           transfer.transfer_no,
+
+
 
         title: "Stock transfer received",
 
+
+
         description:
+
           `Transfer ${transfer.transfer_no} ` +
+
           `received successfully`,
 
+
+
         meta: {
+
           transfer_id: transfer.id,
 
+
+
           transfer_no:
+
             transfer.transfer_no,
 
+
+
           from_organization_id:
+
             transfer.from_organization_id,
 
+
+
           to_organization_id:
+
             transfer.to_organization_id,
 
+
+
           store_code:
+
             receiverStoreCode,
+
+
 
           status: "received",
 
+
+
           remarks: remarks || null,
 
+
+
           received_items:
+
             receivedItems,
+
         },
+
+
 
         icon: "activity",
 
+
+
         color: "green",
+
       },
+
       {
+
         transaction,
+
       }
+
     );
 
     await transaction.commit();
 
+
+
     // Updated transfer response
+
     const updatedTransfer =
+
       await StockTransfer.findByPk(
+
         transfer.id,
+
         {
+
           include: [
+
             {
+
               model: StockTransferItem,
+
               as: "items",
+
               required: false,
+
             },
+
           ],
+
         }
+
       );
 
+
+
     return res.status(200).json({
+
       success: true,
 
+
+
       message:
+
         "Stock received successfully",
 
+
+
       data: {
+
         transfer: updatedTransfer,
+
         received_items: receivedItems,
+
       },
+
     });
+
   } catch (error) {
+
     if (
+
       transaction &&
+
       !transaction.finished
+
     ) {
+
       await transaction.rollback();
+
     }
 
+
+
     console.error(
+
       "receiveTransfer error:",
+
       error
+
     );
 
+
+
     return res.status(500).json({
+
       success: false,
 
+
+
       message:
+
         "Failed to receive transfer",
 
+
+
       error: error.message,
+
     });
+
   }
+
 };
 
 
@@ -3678,7 +4441,31 @@ const buildTransferResponse = (
     const complaint =
       complaintMap.get(Number(plain.id)) ||
       null;
+let replacementInfo = null;
 
+if (
+  Array.isArray(plain.transfer_items) &&
+  plain.transfer_items.length
+) {
+  const item =
+    plain.transfer_items.find(
+      (x) => x.external_item_data
+    );
+
+  if (item?.external_item_data) {
+    let meta = item.external_item_data;
+
+    if (typeof meta === "string") {
+      try {
+        meta = JSON.parse(meta);
+      } catch {
+        meta = null;
+      }
+    }
+
+    replacementInfo = meta;
+  }
+}
     return {
       id: plain.id,
 
@@ -3687,7 +4474,21 @@ const buildTransferResponse = (
       tracking_number:
         plain.tracking_number ||
         plain.transfer_no,
+      replacement_for: replacementInfo
+  ? {
+      complaint_id:
+        replacementInfo.complaint_id,
 
+      complaint_no:
+        replacementInfo.complaint_no,
+
+      original_transfer_id:
+        replacementInfo.original_transfer_id,
+
+      original_transfer_no:
+        replacementInfo.original_transfer_no,
+    }
+  : null,
       request_id:
         plain.request_id,
 
@@ -4755,13 +5556,23 @@ export const getOutgoingTransfers = async (
       StockTransfer.findAll({
         where: listWhere,
 
-        include: [
-          {
-            model: StockTransferItem,
-            as: "transfer_items",
-            required: false,
-          },
-        ],
+     include: [
+  {
+    model: StockTransferItem,
+    as: "transfer_items",
+    required: false,
+    attributes: [
+      "id",
+      "transfer_id",
+      "item_id",
+      "qty",
+      "weight",
+      "rate",
+      "remarks",
+      "external_item_data",
+    ],
+  },
+],
 
         order: [
           ["created_at", "DESC"],
