@@ -5582,18 +5582,19 @@ export const sendReplacementAgainstComplaint = async (req, res) => {
     const originalTransferRows =
       await sequelize.query(
         `
-        SELECT
-          id,
-          transfer_no,
-          request_id,
-          from_organization_id,
-          to_organization_id,
-          transfer_date,
-          dispatch_date,
-          receive_date,
-          status,
-          remarks
-        FROM stock_transfers
+       SELECT
+    id,
+    transfer_no,
+    tracking_number,
+    request_id,
+    from_organization_id,
+    to_organization_id,
+    transfer_date,
+    dispatch_date,
+    receive_date,
+    status,
+    remarks
+FROM stock_transfers
         WHERE id = :transferId
         FOR UPDATE
         `,
@@ -6348,31 +6349,34 @@ export const sendReplacementAgainstComplaint = async (req, res) => {
       0
     );
 
-    const externalItemData = JSON.stringify({
-      complaint_id: complaintId,
-      complaint_no: complaint.complaint_no,
+   const externalItemData = JSON.stringify({
+  complaint_id: complaintId,
+  complaint_no: complaint.complaint_no,
 
-      original_transfer_id:
-        Number(originalTransfer.id),
+  original_transfer_id: Number(originalTransfer.id),
 
-      original_transfer_no:
-        originalTransfer.transfer_no,
+  original_transfer_no:
+    originalTransfer.transfer_no,
 
-      original_transfer_item_id:
-        transferItemId,
+  original_tracking_number:
+    originalTransfer.tracking_number ||
+    originalTransfer.transfer_no,
 
-      original_item_id:
-        originalItemId,
+  original_transfer_item_id:
+    transferItemId,
 
-      replacement_item_id:
-        replacementItemId,
+  original_item_id:
+    originalItemId,
 
-      source_stock_id:
-        Number(sourceStock.id),
+  replacement_item_id:
+    replacementItemId,
 
-      source_batch_id:
-        sourceStock.batch_id || null,
-    });
+  source_stock_id:
+    Number(sourceStock.id),
+
+  source_batch_id:
+    sourceStock.batch_id || null,
+});
 
     const replacementTransferItemRows =
       await sequelize.query(
