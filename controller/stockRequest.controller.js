@@ -1,7190 +1,2149 @@
+import { Op,QueryTypes } from "sequelize";
+
 import sequelize from "../config/db.js";
-import { Op, where, cast, col, QueryTypes } from "sequelize";
-import StockTransferComplaint from "../model/StockTransferComplaint.js";
-import Store from "../model/Store.js";
+import Item from "../model/item.js";
 import StockTransfer from "../model/stockTransfer.js";
 import StockTransferItem from "../model/stockTransferItem.js";
-import Stock from "../model/stockrecord.js";
-import StockMovement from "../model/stockmovement.js";
-import ActivityLog from "../model/activityLog.js";
+import StockTransferComplaint from "../model/StockTransferComplaint.js";
 import SystemActivity from "../model/systemActivity.js";
-import Item from "../model/item.js";
-import Task from "../model/task.js";
-import StockRequest from "../model/StockRequest.js";
-import StockRequestItem from "../model/stockRequestItem.js";
-import District from "../model/District.js";
-import cloudinary from "../utils/cloudinary.js";
-import User from "../model/user.js";
-import { generateDeliveryChallanPdf } from "../service/deliveryChallan.helper.js";
-import { InventoryTrackingService } from "../service/inventoryTracking.service.js";
-import InventoryBatch from "../model/inventoryBatch.js";
+import ActivityLog from "../model/activityLog.js";
+import Store from "../model/Store.js";
+import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
+import Stock from "../model/stockrecord.js";
+/**
+ * Safely converts any value into a number.
+ */
+const toNumber = (value) => {
+  const number = Number(value);
 
-// import Store from "../model/Store.js";
-// import { uploadToCloudinary } from "../utils/cloudinaryUpload.js";
-const generateTransferNo = () => {
-  return `TRF-${Date.now()}`;
+  return Number.isFinite(number) ? number : 0;
 };
 
-const generateRequestNo = () => {
-  return `REQ-${Date.now()}`;
+/**
+ * Generates a unique complaint number.
+ */
+const generateComplaintNo = (transferNo, transferId) => {
+  const safeTransferNo = String(transferNo || transferId)
+    .trim()
+    .replace(/[^a-zA-Z0-9]/g, "-")
+    .toUpperCase();
+
+  return `CMP-${safeTransferNo}-${Date.now()}`;
 };
 
-const toNumber = (val) => {
-  const num = Number(val);
-  return Number.isFinite(num) ? num : 0;
+/**
+ * Parses complaint items from multipart form-data.
+ *
+ * Items may come as:
+ * 1. Direct JavaScript array
+ * 2. JSON string inside form-data
+ */
+const COMPLAINT_TYPES = {
+  QUANTITY_SHORTAGE: "quantity_shortage",
+  DAMAGED_ITEM: "damaged_item",
+  MISSING_ITEM: "missing_item",
+  WRONG_ITEM: "wrong_item",
+  OTHER: "other",
 };
+const ALLOWED_COMPLAINT_TYPES = Object.values(
+  COMPLAINT_TYPES
+);
 
-const getOrCreateStock = async (organization_id, item_id, transaction) => {
-  let stock = await Stock.findOne({
-    where: { organization_id, item_id },
-    transaction,
-    lock: transaction.LOCK.UPDATE,
-  });
-
-  if (!stock) {
-    stock = await Stock.create(
-      {
-        organization_id,
-        item_id,
-        available_qty: 0,
-        available_weight: 0,
-        reserved_qty: 0,
-        reserved_weight: 0,
-        transit_qty: 0,
-        transit_weight: 0,
-        damaged_qty: 0,
-        damaged_weight: 0,
-      },
-      { transaction }
-    );
+const normalizeComplaintType = (value) => {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+};
+const parseComplaintItems = (items) => {
+  if (!items) {
+    return [];
   }
 
-  return stock;
-};
-
-const createMovement = async ({
-  organization_id,
-  item_id,
-  movement_type,
-  reference_type,
-  reference_id,
-  qty = 0,
-  weight = 0,
-  stockBefore,
-  stockAfter,
-  remarks = null,
-  created_by = null,
-  transaction,
-}) => {
-  await StockMovement.create(
-    {
-      organization_id,
-      item_id,
-      movement_type,
-      reference_type,
-      reference_id,
-      qty,
-      weight,
-
-      opening_available_qty: toNumber(stockBefore.available_qty),
-      closing_available_qty: toNumber(stockAfter.available_qty),
-
-      opening_reserved_qty: toNumber(stockBefore.reserved_qty),
-      closing_reserved_qty: toNumber(stockAfter.reserved_qty),
-
-      opening_transit_qty: toNumber(stockBefore.transit_qty),
-      closing_transit_qty: toNumber(stockAfter.transit_qty),
-
-      opening_damaged_qty: toNumber(stockBefore.damaged_qty),
-      closing_damaged_qty: toNumber(stockAfter.damaged_qty),
-
-      opening_available_weight: toNumber(stockBefore.available_weight),
-      closing_available_weight: toNumber(stockAfter.available_weight),
-
-      opening_reserved_weight: toNumber(stockBefore.reserved_weight),
-      closing_reserved_weight: toNumber(stockAfter.reserved_weight),
-
-      opening_transit_weight: toNumber(stockBefore.transit_weight),
-      closing_transit_weight: toNumber(stockAfter.transit_weight),
-
-      opening_damaged_weight: toNumber(stockBefore.damaged_weight),
-      closing_damaged_weight: toNumber(stockAfter.damaged_weight),
-
-      remarks,
-      created_by,
-    },
-    { transaction }
-  );
-};
-
-const createActivity = async ({
-  user_id,
-  action,
-  title,
-  description,
-  meta = {},
-  transaction,
-}) => {
-  await ActivityLog.create(
-    {
-      user_id,
-      action,
-      title,
-      description,
-      meta,
-      icon: "activity",
-      color: "blue",
-    },
-    { transaction }
-  );
-};
-
-const safeUnlink = (filePath) => {
-  try {
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-  } catch (error) {
-    console.error("File delete error:", error.message);
-  }
-};
-
-const uploadToCloudinary = async (
-  filePath,
-  folder,
-  resourceType = "image"
-) => {
-  return cloudinary.uploader.upload(filePath, {
-    folder,
-    resource_type: resourceType,
-
-    //  Important fix
-    type: "upload",
-    access_mode: "public",
-
-    use_filename: true,
-    unique_filename: true,
-    overwrite: false,
-  });
-};
-
-const tryJsonParse = (value) => {
-  try {
-    return JSON.parse(value);
-  } catch (error) {
-    return null;
-  }
-};
-
-const normalizeItemRow = (row = {}) => {
-  return {
-    item_id: toNumber(row.item_id ?? row.id ?? row.itemId),
-    qty: toNumber(row.qty ?? row.approved_qty ?? row.approve_qty ?? row.quantity),
-    weight: toNumber(row.weight ?? row.approved_weight ?? row.total_weight),
-    rate: toNumber(row.rate ?? row.item_rate ?? row.price),
-    remarks: row.remarks || row.note || null,
-  };
-};
-
-const parseItemsFromBody = (body = {}) => {
-  const normalizeItem = (item = {}) => ({
-    item_id: toNumber(item.item_id),
-    parent_batch_id: toNumber(item.parent_batch_id || item.batch_id),
-    batch_id: toNumber(item.batch_id || item.parent_batch_id),
-    qty: toNumber(item.qty || item.approved_qty),
-    weight: toNumber(item.weight || item.approved_weight),
-    rate: toNumber(item.rate),
-    remarks: item.remarks || null,
-  });
-
-  const rawItems = body.items;
-
-  if (Array.isArray(rawItems)) {
-    return rawItems.map(normalizeItem);
+  if (Array.isArray(items)) {
+    return items;
   }
 
-  if (typeof rawItems === "string") {
-    const text = rawItems.trim();
-
-    if (!text) return [];
-
+  if (typeof items === "string") {
     try {
-      const parsed = JSON.parse(text);
-
-      if (!Array.isArray(parsed)) return [];
-
-      return parsed.map(normalizeItem);
+      return JSON.parse(items);
     } catch (error) {
-      console.error("parseItemsFromBody JSON parse error:", error.message);
       return [];
     }
   }
 
-  const indexedItems = [];
-
-  Object.keys(body || {}).forEach((key) => { 
-    const match = key.match(/^items\[(\d+)\]\[(.+)\]$/);
-
-    if (!match) return;
-
-    const index = Number(match[1]);
-    const field = match[2];
-
-    if (!indexedItems[index]) indexedItems[index] = {};
-
-    indexedItems[index][field] = body[key];
-  });
-
-  return indexedItems.filter(Boolean).map(normalizeItem);
+  return [];
 };
-
-export const getAvailableStockForRequest = async (req, res) => {
-  try {
-    const user = req.user;
-    const { category, search, metal_type } = req.query;
-
-    if (!user?.organization_id) {
-      return res.status(401).json({
-        success: false,
-        message: "Unauthorized user",
-      });
-    }
-
-    const orgId = Number(user.organization_id);
-
-    const itemWhere = {
-      organization_id: orgId,
-      current_status: "in_stock",
-    };
-
-    const stockWhere = {
-      organization_id: orgId,
-      available_qty: {
-        [Op.gt]: 0,
-      },
-    };
-
-    if (category) {
-      itemWhere.category = category;
-    }
-
-    if (metal_type) {
-      itemWhere.metal_type = metal_type;
-    }
-
-    if (search) {
-      itemWhere[Op.or] = [
-        { item_name: { [Op.iLike]: `%${search}%` } },
-        { article_code: { [Op.iLike]: `%${search}%` } },
-        { sku_code: { [Op.iLike]: `%${search}%` } },
-        { purity: { [Op.iLike]: `%${search}%` } },
-        { category: { [Op.iLike]: `%${search}%` } },
-      ];
-    }
-
-    const items = await Item.findAll({
-      attributes: [
-        "id",
-        "item_name",
-        "article_code",
-        "sku_code",
-        "metal_type",
-        "category",
-        "purity",
-        "unit",
-        "organization_id",
-      ],
-      where: itemWhere,
-      include: [
-        {
-          model: Stock,
-          as: "stocks",
-          required: true,
-          where: stockWhere,
-          attributes: [
-            "id",
-            "item_id",
-            "organization_id",
-            "available_qty",
-            "available_weight",
-          ],
-        },
-      ],
-      order: [["id", "DESC"]],
-    });
-
-    const data = items.map((item) => {
-      const stock =
-        Array.isArray(item.stocks) && item.stocks.length > 0
-          ? item.stocks[0]
-          : null;
-
-      const availableQty = Number(stock?.available_qty || 0);
-
-      let statusLabel = "medium";
-      if (availableQty <= 2) {
-        statusLabel = "critical";
-      } else if (availableQty <= 12) {
-        statusLabel = "medium";
-      } else {
-        statusLabel = "optimum";
-      }
-
-      return {
-        item_id: Number(item.id),
-        item_name: item.item_name || "",
-        article_code: item.article_code || "",
-        sku_code: item.sku_code || "",
-        category: item.category || "",
-        metal_type: item.metal_type || "",
-        purity: item.purity || "",
-        unit: item.unit || "",
-        available_qty: availableQty,
-        available_weight: Number(stock?.available_weight || 0),
-        status_label: statusLabel,
-        request_qty: 0,
-      };
-    });
-
-    return res.status(200).json({
-      success: true,
-      message: "Available stock fetched successfully",
-      count: data.length,
-      data,
-    });
-  } catch (error) {
-    console.error("getAvailableStockForRequest error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch available stock items",
-      error: error.message,
-    });
-  }
-};
-// helper
-
-
-export const createStockRequest = async (req, res) => {
+/**
+ * Raise complaint against selected transfer items.
+ *
+ * Important:
+ * - Transfer status will remain "in_transit".
+ * - Stock request status will not be changed.
+ * - Remaining transfer items can still be received.
+ * - Complaint items remain tracked separately.
+ */
+export const raiseTransferComplaint = async (req, res) => {
   const transaction = await sequelize.transaction();
 
   try {
-    const user = req.user;
-    const { store_id, items, priority, category, notes } = req.body;
-
-    // ================= VALIDATION =================
-    if (!store_id || !Array.isArray(items) || items.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "store_id and items are required",
-      });
-    }
-
-    // ================= GET RETAIL STORE =================
-    const store = await Store.findOne({
-      where: {
-        id: store_id,
-        is_active: true,
-      },
-      transaction,
-    });
-
-    if (!store) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Store not found",
-      });
-    }
-
-    // ================= DISTRICT STORE RESOLUTION =================
-    let districtStore = null;
-
-    if (store.district_id) {
-      districtStore = await Store.findOne({
-        where: {
-          id: store.district_id,
-          organizationlevel: "District",
-          is_active: true,
-        },
-        transaction,
-      });
-    }
-
-    if (!districtStore) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Cannot resolve district for this store",
-        debug: {
-          store_id: store.id,
-          store_code: store.store_code,
-          store_name: store.store_name,
-          district_id: store.district_id,
-        },
-      });
-    }
-
-    // ================= VALID ITEMS FORMAT =================
-    const validItems = items
-      .filter(
-        (item) =>
-          item.item_id &&
-          Number.isFinite(Number(item.request_qty)) &&
-          Number(item.request_qty) > 0
-      )
-      .map((item) => ({
-        item_id: Number(item.item_id),
-        request_qty: Number(item.request_qty),
-        approved_qty: 0,
-        status: "pending",
-      }));
-
-    if (validItems.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "No valid items found",
-      });
-    }
-
-    // ================= MERGE SAME ITEMS =================
-    const itemMap = new Map();
-
-    for (const item of validItems) {
-      if (itemMap.has(item.item_id)) {
-        itemMap.get(item.item_id).request_qty += item.request_qty;
-      } else {
-        itemMap.set(item.item_id, item);
-      }
-    }
-
-    const finalItems = Array.from(itemMap.values());
-
-    // ================= ITEM EXISTENCE CHECK =================
-    const itemIds = finalItems.map((item) => item.item_id);
-
-    const existingItems = await Item.findAll({
-      where: {
-        id: {
-          [Op.in]: itemIds,
-        },
-        is_active: true,
-      },
-      attributes: [
-        "id",
-        "item_name",
-        "article_code",
-        "sku_code",
-        "store_id",
-        "storeCode",
-        "organization_id",
-      ],
-      transaction,
-      raw: true,
-    });
-
-    const existingItemIds = existingItems.map((item) => Number(item.id));
-
-    const invalidItemIds = itemIds.filter(
-      (id) => !existingItemIds.includes(Number(id))
-    );
-
-    if (invalidItemIds.length > 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Invalid item_id found",
-        invalid_item_ids: invalidItemIds,
-      });
-    }
-
-    // ================= ITEM STORE VALIDATION =================
-    const invalidStoreItems = existingItems.filter((item) => {
-      const itemStoreId = Number(item.store_id || 0);
-      const itemOrgId = Number(item.organization_id || 0);
-      const itemStoreCode = String(item.storeCode || "").trim().toUpperCase();
-
-      return (
-        itemStoreId !== Number(store.id) &&
-        itemOrgId !== Number(store.id) &&
-        itemStoreCode !== String(store.store_code).trim().toUpperCase()
-      );
-    });
-
-    if (invalidStoreItems.length > 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Some items do not belong to selected store",
-        invalid_items: invalidStoreItems.map((item) => ({
-          id: item.id,
-          item_name: item.item_name,
-          article_code: item.article_code,
-          sku_code: item.sku_code,
-          store_id: item.store_id,
-          storeCode: item.storeCode,
-          organization_id: item.organization_id,
-        })),
-      });
-    }
-
-    // ================= REQUEST NO =================
-    const request_no = `REQ-${store.id}-${Date.now()}`;
-
-    const finalDistrictId = districtStore.id;
-    const finalDistrictCode = districtStore.store_code;
-    const finalDistrictName = districtStore.store_name;
-
-    // ================= CREATE REQUEST =================
-    const stockRequest = await StockRequest.create(
-      {
-        request_no,
-
-        from_organization_id: store.id,
-        from_store_code: store.store_code,
-        from_store_name: store.store_name,
-
-        to_organization_id: finalDistrictId,
-        to_store_code: finalDistrictCode,
-        to_store_name: finalDistrictName,
-
-        to_district_code: finalDistrictCode,
-        to_district_name: finalDistrictName,
-
-        priority: priority || "medium",
-        category: category || null,
-        notes: notes || null,
-        status: "pending",
-        created_by: user?.id || null,
-      },
-      { transaction }
-    );
-
-    // ================= ITEMS =================
-    const requestItemsPayload = finalItems.map((item) => ({
-      request_id: stockRequest.id,
-      item_id: item.item_id,
-      request_qty: item.request_qty,
-      approved_qty: 0,
-      status: "pending",
-    }));
-
-    await StockRequestItem.bulkCreate(requestItemsPayload, {
-      transaction,
-    });
-
-    // ================= TASK =================
-    await Task.create(
-      {
-        title: "Stock request approval required",
-        description: `${store.store_name} sent request ${stockRequest.request_no} to ${finalDistrictName}`,
-        priority: priority || "medium",
-        status: "pending",
-        task_type: "stock_request_approval",
-        reference_id: stockRequest.id,
-        reference_no: stockRequest.request_no,
-
-        district_code: finalDistrictCode,
-        store_code: store.store_code,
-        store_name: store.store_name,
-
-        created_by: user?.id || null,
-      },
-      { transaction }
-    );
-
-    await transaction.commit();
-
-    return res.status(201).json({
-      success: true,
-      message: "Stock request created successfully",
-      data: {
-        request_id: stockRequest.id,
-        request_no: stockRequest.request_no,
-        total_items: requestItemsPayload.length,
-
-        from_store: {
-          id: store.id,
-          store_code: store.store_code,
-          store_name: store.store_name,
-        },
-
-        district: {
-          id: finalDistrictId,
-          store_code: finalDistrictCode,
-          store_name: finalDistrictName,
-        },
-
-        items: requestItemsPayload.map((item) => ({
-          item_id: item.item_id,
-          request_qty: item.request_qty,
-          status: item.status,
-        })),
-      },
-    });
-  } catch (error) {
-    await transaction.rollback();
-
-    return res.status(500).json({
-      success: false,
-      message: "Server error",
-      error: error.message,
-    });
-  }
-};
-/*
-Request flow:
-Store -> District (Request creation, approval, dispatch)
-  */
-const TRANSFER_ACTIVE_STATUSES = [
-  "approved",
-  "dispatched",
-  "in_transit",
-  "received",
-];
-
-const APPROVED_REQUEST_STATUSES = [
-  "approved",
-  "partially_approved",
-  "completed",
-];
-
-const LOW_STOCK_THRESHOLD = 5;
-
-const calculateStockRequestSummary = (requests = []) => {
-  let totalRequests = requests.length;
-  let approvedRequests = 0;
-  let transitGoods = 0;
-  let lowStockItems = 0;
-
-  for (const reqRow of requests) {
-    const row = reqRow.toJSON ? reqRow.toJSON() : reqRow;
-
-    const requestStatus = String(row.status || "").toLowerCase();
-    const transferStatus = String(row.transfer?.status || "").toLowerCase();
-
-    if (APPROVED_REQUEST_STATUSES.includes(requestStatus)) {
-      approvedRequests += 1;
-    }
-
-    const requestItems = Array.isArray(row.request_items)
-      ? row.request_items
-      : [];
-
-    for (const itemRow of requestItems) {
-      const qty = Number(
-        itemRow.approved_qty ||
-          itemRow.request_qty ||
-          itemRow.qty ||
-          itemRow.quantity ||
-          0
-      );
-
-      if (row.transfer && TRANSFER_ACTIVE_STATUSES.includes(transferStatus)) {
-        transitGoods += qty;
-      }
-
-      if (qty > 0 && qty <= LOW_STOCK_THRESHOLD) {
-        lowStockItems += 1;
-      }
-    }
-  }
-
-  return {
-    total_requests: totalRequests,
-    approved_requests: approvedRequests,
-    low_stock_items: lowStockItems,
-    transit_goods: transitGoods,
-  };
-};
-
-const addTransferDirection = (rows = [], user) => {
-  return rows.map((row) => {
-    const item = row.toJSON ? row.toJSON() : row;
-
-    const transferStatus = String(item.transfer?.status || "").toLowerCase();
-
-    const isSender =
-      Number(item.from_organization_id) === Number(user.organization_id);
-
-    const isReceiver =
-      Number(item.to_organization_id) === Number(user.organization_id);
-
-    let movement_type = "unknown";
-
-    if (isSender && transferStatus === "in_transit") {
-      movement_type = "in_transit_send";
-    } else if (isReceiver && transferStatus === "in_transit") {
-      movement_type = "in_transit_receive";
-    } else if (isSender) {
-      movement_type = "send";
-    } else if (isReceiver) {
-      movement_type = "receive";
-    }
-
-    return {
-      ...item,
-      movement_type,
-      is_sent: isSender,
-      is_received: isReceiver,
-    };
-  });
-};
-
-export const getMyStockRequests = async (req, res) => {
-  try {
-    const user = req.user;
-
-    const userOrgId = Number(user.organization_id);
-    const userStoreCode = String(user.store_code || user.storeCode || "")
-      .trim()
-      .toUpperCase();
-
-    // ==========================================
-    // BATCH MAP (ADDED)
-    // ==========================================
-
-    const batchRows = await sequelize.query(
-      `
-      SELECT
-        item_id,
-        id AS parent_batch_id,
-        root_batch_id,
-        batch_no
-      FROM inventory_batches
-      WHERE
-        parent_batch_id IS NULL
-        OR parent_batch_id = root_batch_id
-      `,
-      {
-        type: sequelize.QueryTypes.SELECT,
-      }
-    );
-
-    const batchMap = new Map();
-
-    for (const batch of batchRows) {
-      if (!batchMap.has(Number(batch.item_id))) {
-        batchMap.set(Number(batch.item_id), batch);
-      }
-    }
-
-    const whereCondition = {
-      [Op.or]: [
-        {
-          created_by: user.id,
-        },
-
-        {
-          to_organization_id: userOrgId,
-        },
-
-        {
-          to_district_code: userStoreCode,
-        },
-      ],
-    };
-
-    const requests = await StockRequest.findAll({
-      where: whereCondition,
-      include: [
-        {
-          model: StockRequestItem,
-          as: "request_items",
-          include: [
-            {
-              model: Item,
-              as: "item",
-              attributes: [
-                "id",
-                "item_name",
-                "article_code",
-                "sku_code",
-                "category",
-                "metal_type",
-                "purity",
-                "unit",
-                "gross_weight",
-                "net_weight",
-              ],
-              required: false,
-            },
-          ],
-        },
-        {
-          model: StockTransfer,
-          as: "transfer",
-          required: false,
-          attributes: [
-            "id",
-            "request_id",
-            "transfer_no",
-            "status",
-            "dispatch_date",
-            "receive_date",
-            "created_at",
-          ],
-        },
-      ],
-      order: [["created_at", "DESC"]],
-    });
-
-    const finalData = addTransferDirection(requests, user);
-
-    // ==========================================
-    // PARENT BATCH DETAILS ADDED
-    // ==========================================
-
-    const updatedData = finalData.map((request) => ({
-      ...request,
-      request_items: (request.request_items || []).map((reqItem) => ({
-        ...reqItem,
-
-        parent_batch_id:
-          batchMap.get(Number(reqItem.item_id))
-            ?.parent_batch_id || null,
-
-        root_batch_id:
-          batchMap.get(Number(reqItem.item_id))
-            ?.root_batch_id || null,
-
-        batch_id:
-          batchMap.get(Number(reqItem.item_id))
-            ?.parent_batch_id || null,
-
-        batch_no:
-          batchMap.get(Number(reqItem.item_id))
-            ?.batch_no || null,
-      })),
-    }));
-
-    const createdRequests = updatedData.filter(
-      (reqItem) =>
-        Number(reqItem.created_by) === Number(user.id)
-    );
-
-    const receivedRequests = updatedData.filter(
-      (reqItem) =>
-        Number(reqItem.to_organization_id) === userOrgId ||
-        String(reqItem.to_district_code || "").toUpperCase() ===
-          userStoreCode
-    );
-
-    const approvedRequests = updatedData.filter((reqItem) =>
-      ["approved", "partially_approved", "completed"].includes(
-        reqItem.status
-      )
-    );
-
-    const transitGoods = updatedData.filter(
-      (reqItem) =>
-        reqItem.transfer &&
-        ["dispatched", "in_transit"].includes(
-          reqItem.transfer.status
-        )
-    );
-
-    const summary = {
-      total_requests: updatedData.length,
-      created_requests: createdRequests.length,
-      received_requests: receivedRequests.length,
-      approved_requests: approvedRequests.length,
-      low_stock_items: 0,
-      transit_goods: transitGoods.length,
-    };
-
-    return res.status(200).json({
-      success: true,
-      summary,
-      count: updatedData.length,
-      data: updatedData,
-    });
-  } catch (error) {
-    console.error("getMyStockRequests error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch my stock requests",
-      error: error.message,
-    });
-  }
-};
-export const getReceivedStockRequests = async (req, res) => {
-  try {
-    const user = req.user;
-
-    // ==========================================
-    // BATCH MAP (ADDED ONLY)
-    // ==========================================
-
-    const batchRows = await sequelize.query(
-      `
-      SELECT
-        item_id,
-        id AS parent_batch_id,
-        root_batch_id,
-        batch_no
-      FROM inventory_batches
-      WHERE
-        parent_batch_id IS NULL
-        OR parent_batch_id = root_batch_id
-      `,
-      {
-        type: sequelize.QueryTypes.SELECT,
-      }
-    );
-
-    const batchMap = new Map();
-
-    for (const batch of batchRows) {
-      if (!batchMap.has(Number(batch.item_id))) {
-        batchMap.set(Number(batch.item_id), batch);
-      }
-    }
-
-    const requests = await StockRequest.findAll({
-      where: {
-        to_organization_id: user.organization_id,
-      },
-      include: [
-        {
-          model: StockRequestItem,
-          as: "request_items",
-          include: [
-            {
-              model: Item,
-              as: "item",
-              attributes: [
-                "id",
-                "item_name",
-                "article_code",
-                "sku_code",
-                "category",
-                "metal_type",
-                "purity",
-                "unit",
-                "gross_weight",
-                "net_weight",
-              ],
-              required: false,
-            },
-          ],
-        },
-        {
-          model: StockTransfer,
-          as: "transfer",
-          required: false,
-          attributes: [
-            "id",
-            "request_id",
-            "transfer_no",
-            "status",
-            "dispatch_date",
-            "receive_date",
-            "created_at",
-          ],
-        },
-      ],
-      order: [["created_at", "DESC"]],
-    });
-
-    const finalData = addTransferDirection(requests, user)
-      .map((row) => {
-        const plainRow = row.toJSON?.() || row;
-
-        return {
-          ...plainRow,
-          request_type: "received",
-
-          request_items: (
-            plainRow.request_items || []
-          ).map((reqItem) => ({
-            ...reqItem,
-
-            parent_batch_id:
-              batchMap.get(Number(reqItem.item_id))
-                ?.parent_batch_id || null,
-
-            root_batch_id:
-              batchMap.get(Number(reqItem.item_id))
-                ?.root_batch_id || null,
-
-            batch_id:
-              batchMap.get(Number(reqItem.item_id))
-                ?.parent_batch_id || null,
-
-            batch_no:
-              batchMap.get(Number(reqItem.item_id))
-                ?.batch_no || null,
-          })),
-        };
-      });
-
-    const summary = calculateStockRequestSummary(finalData);
-
-    const lowStockAlert = {
-      show_alert: summary.low_stock_items > 0,
-      message:
-        summary.low_stock_items > 0
-          ? `${summary.low_stock_items} low-quantity requested item(s) found.`
-          : "No low stock items.",
-      request_button_text: "Review Requests",
-    };
-
-    return res.status(200).json({
-      success: true,
-      summary,
-      low_stock_alert: lowStockAlert,
-      count: finalData.length,
-      data: finalData,
-    });
-  } catch (error) {
-    console.error("getReceivedStockRequests error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch received stock requests",
-      error: error.message,
-    });
-  }
-};
-// ==========================================
-// GET SINGLE REQUEST
-// ==========================================
-export const getStockRequestById = async (req, res) => {
-  try {
-    const { requestId } = req.params;
-    const user = req.user;
-
-    const request = await StockRequest.findByPk(requestId, {
-      include: [
-        {
-          model: StockRequestItem,
-          as: "request_items",
-          include: [
-            {
-              model: Item,
-              as: "item",
-              attributes: [
-                "id",
-                "item_name",
-                "article_code",
-                "sku_code",
-                "category",
-                "metal_type",
-                "purity",
-                "unit",
-                "gross_weight",
-                "net_weight",
-              ],
-              required: false,
-            },
-          ],
-        },
-        {
-          model: StockTransfer,
-          as: "transfer",
-          include: [
-            {
-              model: StockTransferItem,
-              as: "transfer_items",
-            },
-          ],
-        },
-      ],
-    });
-
-    if (!request) {
-      return res.status(404).json({
-        success: false,
-        message: "Stock request not found",
-      });
-    }
-
-    const allowed =
-      Number(request.from_organization_id) === Number(user.organization_id) ||
-      Number(request.to_organization_id) === Number(user.organization_id);
-
-    if (!allowed) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to view this request",
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      data: request,
-    });
-  } catch (error) {
-    console.error("getStockRequestById error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch stock request details",
-      error: error.message,
-    });
-  }
-};
-
-
-// ==========================================
-// STORE -> CANCEL PENDING REQUEST
-// ==========================================
-export const cancelStockRequest = async (req, res) => {
-  const transaction = await sequelize.transaction();
-
-  try {
-    const { requestId } = req.params;
-    const user = req.user;
-
-    const request = await StockRequest.findByPk(requestId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (!request) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Stock request not found",
-      });
-    }
-
-    if (Number(request.from_organization_id) !== Number(user.organization_id)) {
-      await transaction.rollback();
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to cancel this request",
-      });
-    }
-
-    if (request.status !== "pending") {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Only pending request can be cancelled",
-      });
-    }
-
-    await request.update(
-      {
-        status: "cancelled",
-      },
-      { transaction }
-    );
-
-    await createActivity({
-      user_id: user.id,
-      action: "stock_request_cancelled",
-      title: "Stock request cancelled",
-      description: `Stock request ${request.request_no} cancelled`,
-      meta: {
-        request_id: request.id,
-        request_no: request.request_no,
-      },
-      transaction,
-    });
-
-    await transaction.commit();
-
-    return res.status(200).json({
-      success: true,
-      message: "Stock request cancelled successfully",
-    });
-  } catch (error) {
-    await transaction.rollback();
-    return res.status(500).json({
-      success: false,
-      message: "Failed to cancel stock request",
-      error: error.message,
-    });
-  }
-};
-
-
-
-// ==========================================
-// PARENT ORG -> REJECT REQUEST
-// ==========================================
-export const rejectStockRequest = async (req, res) => {
-  const transaction = await sequelize.transaction();
-
-  try {
-    const { requestId } = req.params;
-    const { remarks } = req.body;
-    const user = req.user;
-
-    const request = await StockRequest.findByPk(requestId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (!request) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Stock request not found",
-      });
-    }
-
-    if (Number(request.to_organization_id) !== Number(user.organization_id)) {
-      await transaction.rollback();
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to reject this request",
-      });
-    }
-
-    if (request.status !== "pending") {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Only pending request can be rejected",
-      });
-    }
-
-    await request.update(
-      {
-        status: "rejected",
-        remarks: remarks || request.remarks,
-      },
-      { transaction }
-    );
-
-    await createActivity({
-      user_id: user.id,
-      action: "stock_request_rejected",
-      title: "Stock request rejected",
-      description: `Stock request ${request.request_no} rejected`,
-      meta: {
-        request_id: request.id,
-        request_no: request.request_no,
-      },
-      transaction,
-    });
-
-    await transaction.commit();
-
-    return res.status(200).json({
-      success: true,
-      message: "Stock request rejected successfully",
-    });
-  } catch (error) {
-    await transaction.rollback();
-    return res.status(500).json({
-      success: false,
-      message: "Failed to reject stock request",
-      error: error.message,
-    });
-  }
-};
-
-const canApproveDispatch = (user, allowedLevels = []) => {
-  const userLevel = String(user?.organization_level || "").toLowerCase();
-  return allowedLevels.includes(userLevel);
-};
-
-export const approveAndDispatchHeadRequest = async (req, res) => {
-  req.allowedApproveLevels = ["head"];
-  return approveAndDispatchRequest(req, res);
-};
-
-
-
-
-
-
-
-//this is 
-export const approveAndDispatchRequestfromretail = async (req, res) => {
-  const transaction = await sequelize.transaction();
-  const uploadedLocalPaths = [];
-
-  try {
-    const { requestId } = req.params;
-
-    const {
-      remarks,
-      driver_name,
-      driver_phone,
-      vehicle_number,
-      tracking_number,
-      pickup_address,
-      delivery_address,
-      expected_delivery_date,
-      expected_delivery_time,
-      additional_notes,
-    } = req.body;
-
-    const user = req.user;
-    const parsedItems = parseItemsFromBody(req.body);
-
-    console.log("approveAndDispatchRequest req.body keys:", Object.keys(req.body || {}));
-    console.log("approveAndDispatchRequest raw items:", req.body?.items);
-    console.log("approveAndDispatchRequest parsedItems:", parsedItems);
-    console.log("approveAndDispatchRequest files:", {
-      driver_photo: req.files?.driver_photo?.length || 0,
-      dispatch_images: req.files?.dispatch_images?.length || 0,
-      dispatch_video: req.files?.dispatch_video?.length || 0,
-      e_way_bill: req.files?.e_way_bill?.length || 0,
-    });
-
-    if (!Array.isArray(parsedItems) || parsedItems.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message:
-          "Approved items are required. Send items as JSON string or items[0][item_id], items[0][qty] format.",
-      });
-    }
-
-    if (!driver_name || !driver_phone || !vehicle_number) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Driver name, driver phone, and vehicle number are required",
-      });
-    }
-
-    const approvedRows = parsedItems.filter((row) => Number(row.qty || 0) > 0);
-
-    if (approvedRows.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "At least one item must have qty greater than 0 for approval",
-      });
-    }
-
-    if (!pickup_address || !delivery_address) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Pickup and delivery address are required",
-      });
-    }
-
-    if (!expected_delivery_date || !expected_delivery_time) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Expected delivery date and time are required",
-      });
-    }
-
-    const driverPhotoFile = req.files?.driver_photo?.[0] || null;
-    const dispatchImageFiles = req.files?.dispatch_images || [];
-    const dispatchVideoFile = req.files?.dispatch_video?.[0] || null;
-    const eWayBillFile = req.files?.e_way_bill?.[0] || null;
-
-    if (dispatchImageFiles.length > 3) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Maximum 3 dispatch images allowed",
-      });
-    }
-
-    if (driverPhotoFile?.path) uploadedLocalPaths.push(driverPhotoFile.path);
-
-    for (const file of dispatchImageFiles) {
-      if (file?.path) uploadedLocalPaths.push(file.path);
-    }
-
-    if (dispatchVideoFile?.path) uploadedLocalPaths.push(dispatchVideoFile.path);
-    if (eWayBillFile?.path) uploadedLocalPaths.push(eWayBillFile.path);
-
-    const request = await StockRequest.findByPk(requestId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (!request) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Stock request not found",
-      });
-    }
-
-    const requestItems = await StockRequestItem.findAll({
-      where: { request_id: request.id },
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    const allowedLevels = req.allowedApproveLevels || ["retail", "district"];
-
-    if (!canApproveDispatch(user, allowedLevels)) {
-      await transaction.rollback();
-      return res.status(403).json({
-        success: false,
-        message: allowedLevels.includes("head")
-          ? "Only head can approve this request"
-          : "Only retail or district can approve this request",
-      });
-    }
-
-    if (Number(request.to_organization_id) !== Number(user.organization_id)) {
-      await transaction.rollback();
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to approve this request",
-      });
-    }
-
-    if (request.status !== "pending") {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Only pending request can be approved",
-      });
-    }
-
-    const existingTransfer = await StockTransfer.findOne({
-      where: { request_id: request.id },
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (existingTransfer) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Transfer already created for this request",
-      });
-    }
-
-    const requestItemMap = new Map(
-      requestItems.map((x) => [Number(x.item_id), x])
-    );
-
-    for (const row of parsedItems) {
-      const item_id = toNumber(row.item_id);
-      const qty = toNumber(row.qty);
-      const parent_batch_id = toNumber(row.parent_batch_id || row.batch_id);
-
-      if (!item_id || qty < 0) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: "Each item must have valid item_id and qty",
-        });
-      }
-
-      if (qty > 0 && !parent_batch_id) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `parent_batch_id is required for item ${item_id}`,
-        });
-      }
-
-      const requestItem = requestItemMap.get(item_id);
-
-      if (!requestItem) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Requested item not found for item_id ${item_id}`,
-        });
-      }
-
-      const requestedQty = toNumber(requestItem.request_qty);
-
-      if (qty > requestedQty) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Approved qty cannot exceed requested qty for item ${item_id}`,
-        });
-      }
-    }
-
-    let driver_photo_url = null;
-    let dispatch_image_urls = [];
-    let dispatch_video_url = null;
-    let e_way_bill_url = null;
-
-    if (driverPhotoFile?.path) {
-      const uploadedDriverPhoto = await uploadToCloudinary(
-        driverPhotoFile.path,
-        "stock-transfer/driver-photo",
-        "image"
-      );
-      driver_photo_url = uploadedDriverPhoto.secure_url;
-    }
-
-    if (dispatchImageFiles.length > 0) {
-      for (const file of dispatchImageFiles) {
-        const uploadedImage = await uploadToCloudinary(
-          file.path,
-          "stock-transfer/dispatch-images",
-          "image"
-        );
-        dispatch_image_urls.push(uploadedImage.secure_url);
-      }
-    }
-
-    if (dispatchVideoFile?.path) {
-      const uploadedVideo = await uploadToCloudinary(
-        dispatchVideoFile.path,
-        "stock-transfer/dispatch-video",
-        "video"
-      );
-      dispatch_video_url = uploadedVideo.secure_url;
-    }
-
-    if (eWayBillFile?.path) {
-      const isPdf =
-        eWayBillFile.mimetype === "application/pdf" ||
-        eWayBillFile.originalname?.toLowerCase().endsWith(".pdf");
-
-      const uploadedEWayBill = await uploadToCloudinary(
-        eWayBillFile.path,
-        "stock-transfer/e-way-bills",
-        isPdf ? "raw" : "image"
-      );
-
-      e_way_bill_url = uploadedEWayBill.secure_url;
-    }
-
-    const transfer = await StockTransfer.create(
-      {
-        transfer_no: generateTransferNo(),
-        request_id: request.id,
-
-        from_organization_id: user.organization_id,
-        to_organization_id: request.from_organization_id,
-
-        transfer_date: new Date(),
-        dispatch_date: new Date(),
-        status: "in_transit",
-
-        approved_by: user.id,
-        dispatched_by: user.id,
-        created_by: user.id,
-
-        remarks: remarks || null,
-
-        driver_name: driver_name || null,
-        driver_phone: driver_phone || null,
-        vehicle_number: vehicle_number || null,
-        tracking_number: tracking_number || null,
-
-        driver_photo_url: driver_photo_url || null,
-        dispatch_image_url:
-          dispatch_image_urls.length > 0
-            ? JSON.stringify(dispatch_image_urls)
-            : null,
-        dispatch_video_url: dispatch_video_url || null,
-        e_way_bill_url: e_way_bill_url || null,
-
-        pickup_address: pickup_address || null,
-        delivery_address: delivery_address || null,
-        expected_delivery_date: expected_delivery_date || null,
-        expected_delivery_time: expected_delivery_time || null,
-        additional_notes: additional_notes || null,
-      },
-      { transaction }
-    );
-
-    let totalRequested = 0;
-    let totalApproved = 0;
-    let totalWeight = 0;
-    let estimatedValue = 0;
-    let approvedItemsCount = 0;
-
-    const dispatchedBatches = [];
-    const challanItems = [];
-
-    for (const row of parsedItems) {
-      const item_id = toNumber(row.item_id);
-      const qty = toNumber(row.qty);
-      const weight = toNumber(row.weight);
-      const rate = toNumber(row.rate);
-      const parent_batch_id = toNumber(row.parent_batch_id || row.batch_id);
-
-      const requestItem = requestItemMap.get(item_id);
-      const requestedQty = toNumber(requestItem.request_qty);
-
-      totalRequested += requestedQty;
-      totalApproved += qty;
-
-      if (qty === 0) {
-        await requestItem.update(
-          {
-            approved_qty: 0,
-            approved_weight: 0,
-            status: "rejected",
-          },
-          { transaction }
-        );
-        continue;
-      }
-
-      // Replace only Item.findOne block in your controller with this
-
-const itemDetails = await Item.findOne({
-  where: {
-    id: item_id,
-    organization_id: request.to_organization_id, // ✅ FIXED
-    is_active: true,
-  },
-  transaction,
-  lock: transaction.LOCK.UPDATE,
-});
-
-if (!itemDetails) {
-  await transaction.rollback();
-  return res.status(404).json({
-    success: false,
-    message: `Item not found in source organization for item_id ${item_id}`,
-  });
-}
-
-if (String(itemDetails.current_status || "").toLowerCase() === "sold") {
-  await transaction.rollback();
-  return res.status(409).json({
-    success: false,
-    message: `Item ${item_id} is already sold and cannot be dispatched`,
-  });
-}
-      const batchRows = await sequelize.query(
-        `
-        SELECT
-          id,
-          batch_no,
-          item_id,
-          organization_id,
-          current_organization_id,
-          available_qty,
-          available_weight,
-          status
-        FROM public.inventory_batches
-        WHERE id = :parent_batch_id
-        FOR UPDATE
-        `,
-        {
-          replacements: { parent_batch_id },
-          type: QueryTypes.SELECT,
-          transaction,
-        }
-      );
-
-      const parentBatch = batchRows?.[0];
-
-      if (!parentBatch) {
-        await transaction.rollback();
-        return res.status(404).json({
-          success: false,
-          message: `Parent batch not found for item ${item_id}`,
-        });
-      }
-
-      if (Number(parentBatch.item_id) !== Number(item_id)) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Parent batch ${parent_batch_id} does not belong to item ${item_id}`,
-        });
-      }
-
-      const parentBatchOrgId = Number(
-        parentBatch.current_organization_id || parentBatch.organization_id || 0
-      );
-
-      if (parentBatchOrgId !== Number(user.organization_id)) {
-        await transaction.rollback();
-        return res.status(403).json({
-          success: false,
-          message: `Parent batch ${parent_batch_id} does not belong to your organization`,
-        });
-      }
-
-      if (
-        ["sold", "damaged", "dead"].includes(
-          String(parentBatch.status || "").toLowerCase()
-        )
-      ) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: `Parent batch ${parent_batch_id} is already ${parentBatch.status}`,
-        });
-      }
-
-      if (Number(parentBatch.available_qty || 0) < qty) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: `Insufficient batch qty for item ${item_id}`,
-        });
-      }
-
-      if (weight > 0 && Number(parentBatch.available_weight || 0) < weight) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: `Insufficient batch weight for item ${item_id}`,
-        });
-      }
-
-      approvedItemsCount += 1;
-      totalWeight += weight;
-      estimatedValue += weight * rate;
-
-      const fromStock = await getOrCreateStock(
-        user.organization_id,
-        item_id,
-        transaction
-      );
-
-      const availableQty = toNumber(fromStock.available_qty);
-      const availableWeight = toNumber(fromStock.available_weight);
-      const reservedQty = toNumber(fromStock.reserved_qty);
-      const reservedWeight = toNumber(fromStock.reserved_weight);
-      const transitQty = toNumber(fromStock.transit_qty);
-      const transitWeight = toNumber(fromStock.transit_weight);
-      const damagedQty = toNumber(fromStock.damaged_qty);
-      const damagedWeight = toNumber(fromStock.damaged_weight);
-
-      if (availableQty < qty) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient available qty for item ${item_id}`,
-        });
-      }
-
-      if (weight > 0 && availableWeight < weight) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient available weight for item ${item_id}`,
-        });
-      }
-
-      const transferItem = await StockTransferItem.create(
-        {
-          transfer_id: transfer.id,
-          item_id,
-          parent_batch_id,
-          qty,
-          weight,
-          rate,
-          remarks: row.remarks || null,
-        },
-        { transaction }
-      );
-
-      await requestItem.update(
-        {
-          approved_qty: qty,
-          approved_weight: weight,
-          status: qty < requestedQty ? "partially_approved" : "approved",
-        },
-        { transaction }
-      );
-
-      const newAvailableQty = availableQty - qty;
-      const newAvailableWeight = availableWeight - weight;
-      const newTransitQty = transitQty + qty;
-      const newTransitWeight = transitWeight + weight;
-
-      await fromStock.update(
-        {
-          available_qty: newAvailableQty,
-          available_weight: newAvailableWeight,
-          transit_qty: newTransitQty,
-          transit_weight: newTransitWeight,
-        },
-        { transaction }
-      );
-
-      await createMovement({
-        organization_id: user.organization_id,
-        item_id,
-        movement_type: "dispatch",
-        reference_type: "stock_transfer",
-        reference_id: transfer.id,
-        qty,
-        weight,
-        stockBefore: {
-          available_qty: availableQty,
-          reserved_qty: reservedQty,
-          transit_qty: transitQty,
-          damaged_qty: damagedQty,
-          available_weight: availableWeight,
-          reserved_weight: reservedWeight,
-          transit_weight: transitWeight,
-          damaged_weight: damagedWeight,
-        },
-        stockAfter: {
-          available_qty: newAvailableQty,
-          reserved_qty: reservedQty,
-          transit_qty: newTransitQty,
-          damaged_qty: damagedQty,
-          available_weight: newAvailableWeight,
-          reserved_weight: reservedWeight,
-          transit_weight: newTransitWeight,
-          damaged_weight: damagedWeight,
-        },
-        remarks: `Dispatched via ${transfer.transfer_no}`,
-        created_by: user.id,
-        transaction,
-      });
-
-      const childBatch = await InventoryTrackingService.distributeBatch(
-        {
-          parent_batch_id,
-          to_organization_id: request.from_organization_id,
-
-          quantity: qty,
-          weight,
-
-          reference_type: "STOCK_TRANSFER",
-          reference_id: transfer.id,
-
-          remarks: `Dispatched via ${transfer.transfer_no}`,
-          handled_by: user.id,
-
-          batch_status: "in_transit",
-        },
-        { transaction }
-      );
-
-      await transferItem.update(
-        {
-          child_batch_id: childBatch.id,
-        },
-        { transaction }
-      );
-
-      dispatchedBatches.push({
-        item_id,
-        parent_batch_id,
-        parent_batch_no: parentBatch.batch_no,
-        child_batch_id: childBatch.id,
-        child_batch_no: childBatch.batch_no,
-        dispatched_qty: Number(childBatch.total_qty || 0),
-        dispatched_weight: Number(childBatch.total_weight || 0),
-        status: childBatch.status,
-      });
-
-      challanItems.push({
-        item_id,
-        item_name: itemDetails.item_name,
-        product_code: itemDetails.article_code || itemDetails.sku_code,
-        hsn_code: itemDetails.hsn_code,
-        purity: itemDetails.purity,
-        qty,
-        weight,
-        rate,
-        making_charge: itemDetails.making_charge || 0,
-        huid_code: itemDetails.huid_code || "-",
-        base_value: weight > 0 ? weight * rate : qty * rate,
-      });
-    }
-
-    let finalStatus = "approved";
-
-    if (approvedItemsCount === 0) {
-      finalStatus = "rejected";
-    } else if (totalApproved < totalRequested) {
-      finalStatus = "partially_approved";
-    }
-
-    await request.update(
-      {
-        status: finalStatus,
-        approved_by: user.id,
-        approved_at: new Date(),
-      },
-      { transaction }
-    );
-
-    await Task.update(
-      { status: finalStatus },
-      {
-        where: {
-          reference_id: request.id,
-          task_type: {
-            [Op.in]: [
-              "stock_request_approval",
-              "district_to_head_stock_request",
-              "district_to_retail_stock_request",
-              "head_to_district_stock_request",
-              "head_to_retail_stock_request",
-              "retail_to_district_stock_request",
-            ],
-          },
-        },
-        transaction,
-      }
-    );
-
-    await SystemActivity.create(
-      {
-        title:
-          finalStatus === "approved"
-            ? "Stock request approved and dispatched"
-            : finalStatus === "partially_approved"
-            ? "Stock request partially approved and dispatched"
-            : "Stock request rejected",
-        description:
-          finalStatus === "rejected"
-            ? `Request ${request.request_no} was rejected by receiving organization`
-            : `Request ${request.request_no} processed via ${transfer.transfer_no}`,
-        activity_type: "stock_request_dispatch",
-        module_name: "stock_transfer",
-        reference_id: transfer.id,
-        reference_no: transfer.transfer_no,
-        district_code: request.to_district_code || null,
-        store_code: request.from_store_code || null,
-        store_name: request.from_store_name || null,
-        created_by: user.id,
-        created_at: new Date(),
-      },
-      { transaction }
-    );
-
-    await createActivity({
-      user_id: user.id,
-      action: "stock_request_dispatch",
-      title:
-        finalStatus === "approved"
-          ? "Stock request approved and dispatched"
-          : finalStatus === "partially_approved"
-          ? "Stock request partially approved and dispatched"
-          : "Stock request rejected",
-      description:
-        finalStatus === "rejected"
-          ? `Request ${request.request_no} rejected`
-          : `Request ${request.request_no} dispatched via ${transfer.transfer_no}`,
-      meta: {
-        request_id: request.id,
-        request_no: request.request_no,
-        transfer_id: transfer.id,
-        transfer_no: transfer.transfer_no,
-        final_status: finalStatus,
-        driver_photo_url,
-        dispatch_image_urls,
-        dispatch_video_url,
-        e_way_bill_url,
-        dispatched_batches: dispatchedBatches,
-      },
-      transaction,
-    });
-
-    const fromStore = await Store.findOne({
-      where: { id: user.organization_id },
-      transaction,
-    });
-
-    const toStore = await Store.findOne({
-      where: { id: request.from_organization_id },
-      transaction,
-    });
-
-    const challanPdf =
-      finalStatus === "rejected"
-        ? null
-        : await generateDeliveryChallanPdf({
-            transfer,
-            request,
-            fromStore,
-            toStore,
-            challanItems,
-            driver: {
-              driver_name,
-              driver_phone,
-              vehicle_number,
-              pickup_address,
-              delivery_address,
-            },
-          });
-
-    if (challanPdf) {
-      await transfer.update(
-        {
-          delivery_challan_url: challanPdf.publicPath,
-          delivery_challan_file: challanPdf.fileName,
-        },
-        { transaction }
-      );
-    }
-
-    await transaction.commit();
-
-    for (const filePath of uploadedLocalPaths) {
-      safeUnlink(filePath);
-    }
-
-    if (challanPdf && String(req.query.download_challan || "") === "true") {
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${challanPdf.fileName}"`
-      );
-
-      return res.sendFile(challanPdf.filePath);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message:
-        finalStatus === "rejected"
-          ? "Request rejected successfully"
-          : "Request approved and stock dispatched successfully",
-      data: {
-        transfer: {
-          ...transfer.toJSON(),
-          dispatch_image_url: dispatch_image_urls,
-          e_way_bill_url,
-          delivery_challan_url: challanPdf?.publicPath || null,
-          delivery_challan_file: challanPdf?.fileName || null,
-        },
-        delivery_challan: challanPdf
-          ? {
-              file_name: challanPdf.fileName,
-              url: challanPdf.publicPath,
-              download_url: challanPdf.publicPath,
-            }
-          : null,
-        dispatched_batches: dispatchedBatches,
-        uploaded_files: {
-          driver_photo_url,
-          dispatch_image_urls,
-          dispatch_video_url,
-          e_way_bill_url,
-        },
-        summary: {
-          request_id: request.id,
-          request_no: request.request_no,
-          total_requested: totalRequested,
-          total_approved: totalApproved,
-          total_weight: totalWeight,
-          estimated_value: estimatedValue,
-          final_status: finalStatus,
-        },
-      },
-    });
-  } catch (error) {
-    await transaction.rollback();
-
-    for (const filePath of uploadedLocalPaths) {
-      safeUnlink(filePath);
-    }
-
-    console.error("approveAndDispatchRequest error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to approve and dispatch request",
-      error: error.message,
-    });
-  }
-};
-
-// ==========================================
-// PARENT ORG -> APPROVE & DISPATCH for district
-// ==========================================
-export const approveAndDispatchRequest = async (req, res) => {
-  const transaction = await sequelize.transaction();
-  const uploadedLocalPaths = [];
-  let challanPdf = null;
-
-  try {
-    const { requestId } = req.params;
-
-    const {
-      remarks,
-      driver_name,
-      driver_phone,
-      vehicle_number,
-      tracking_number,
-      pickup_address,
-      delivery_address,
-      expected_delivery_date,
-      expected_delivery_time,
-      additional_notes,
-    } = req.body;
-
-    const user = req.user;
-    const parsedItems = parseItemsFromBody(req.body);
-
-    console.log(
-      "approveAndDispatchRequest req.body keys:",
-      Object.keys(req.body || {})
-    );
-    console.log("approveAndDispatchRequest raw items:", req.body?.items);
-    console.log("approveAndDispatchRequest parsedItems:", parsedItems);
-    console.log("approveAndDispatchRequest files:", {
-      driver_photo: req.files?.driver_photo?.length || 0,
-      dispatch_images: req.files?.dispatch_images?.length || 0,
-      dispatch_video: req.files?.dispatch_video?.length || 0,
-      e_way_bill: req.files?.e_way_bill?.length || 0,
-    });
-
-    if (!Array.isArray(parsedItems) || parsedItems.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message:
-          "Approved items are required. Send items as JSON string or items[0][item_id], items[0][qty] format.",
-      });
-    }
-
-    if (!driver_name || !driver_phone || !vehicle_number) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Driver name, driver phone, and vehicle number are required",
-      });
-    }
-
-    const approvedRows = parsedItems.filter((row) => Number(row.qty || 0) > 0);
-
-    if (approvedRows.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "At least one item must have qty greater than 0 for approval",
-      });
-    }
-
-    if (!pickup_address || !delivery_address) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Pickup and delivery address are required",
-      });
-    }
-
-    if (!expected_delivery_date || !expected_delivery_time) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Expected delivery date and time are required",
-      });
-    }
-
-    const driverPhotoFile = req.files?.driver_photo?.[0] || null;
-    const dispatchImageFiles = req.files?.dispatch_images || [];
-    const dispatchVideoFile = req.files?.dispatch_video?.[0] || null;
-    const eWayBillFile = req.files?.e_way_bill?.[0] || null;
-
-    if (dispatchImageFiles.length > 3) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Maximum 3 dispatch images allowed",
-      });
-    }
-
-    if (driverPhotoFile?.path) uploadedLocalPaths.push(driverPhotoFile.path);
-
-    for (const file of dispatchImageFiles) {
-      if (file?.path) uploadedLocalPaths.push(file.path);
-    }
-
-    if (dispatchVideoFile?.path) uploadedLocalPaths.push(dispatchVideoFile.path);
-    if (eWayBillFile?.path) uploadedLocalPaths.push(eWayBillFile.path);
-
-    const request = await StockRequest.findByPk(requestId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (!request) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Stock request not found",
-      });
-    }
-
-    const requestItems = await StockRequestItem.findAll({
-      where: { request_id: request.id },
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (Number(request.to_organization_id) !== Number(user.organization_id)) {
-      await transaction.rollback();
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to approve this request",
-      });
-    }
-
-    if (request.status !== "pending") {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Only pending request can be approved",
-      });
-    }
-
-    const existingTransfer = await StockTransfer.findOne({
-      where: { request_id: request.id },
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
-
-    if (existingTransfer) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Transfer already created for this request",
-      });
-    }
-
-    const requestItemMap = new Map(
-      requestItems.map((x) => [Number(x.item_id), x])
-    );
-
-    for (const row of parsedItems) {
-      const item_id = toNumber(row.item_id);
-      const qty = toNumber(row.qty);
-      const parent_batch_id = toNumber(row.parent_batch_id || row.batch_id);
-
-      if (!item_id || qty < 0) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: "Each item must have valid item_id and qty",
-        });
-      }
-
-      if (qty > 0 && !parent_batch_id) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `parent_batch_id is required for item ${item_id}`,
-        });
-      }
-
-      const requestItem = requestItemMap.get(item_id);
-
-      if (!requestItem) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Requested item not found for item_id ${item_id}`,
-        });
-      }
-
-      const requestedQty = toNumber(requestItem.request_qty);
-
-      if (qty > requestedQty) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Approved qty cannot exceed requested qty for item ${item_id}`,
-        });
-      }
-    }
-
-    let driver_photo_url = null;
-    let dispatch_image_urls = [];
-    let dispatch_video_url = null;
-    let e_way_bill_url = null;
-
-    if (driverPhotoFile?.path) {
-      const uploadedDriverPhoto = await uploadToCloudinary(
-        driverPhotoFile.path,
-        "stock-transfer/driver-photo",
-        "image"
-      );
-      driver_photo_url = uploadedDriverPhoto.secure_url;
-    }
-
-    if (dispatchImageFiles.length > 0) {
-      for (const file of dispatchImageFiles) {
-        const uploadedImage = await uploadToCloudinary(
-          file.path,
-          "stock-transfer/dispatch-images",
-          "image"
-        );
-        dispatch_image_urls.push(uploadedImage.secure_url);
-      }
-    }
-
-    if (dispatchVideoFile?.path) {
-      const uploadedVideo = await uploadToCloudinary(
-        dispatchVideoFile.path,
-        "stock-transfer/dispatch-video",
-        "video"
-      );
-      dispatch_video_url = uploadedVideo.secure_url;
-    }
-
-    if (eWayBillFile?.path) {
-      const isPdf =
-        eWayBillFile.mimetype === "application/pdf" ||
-        eWayBillFile.originalname?.toLowerCase().endsWith(".pdf");
-
-      const uploadedEWayBill = await uploadToCloudinary(
-        eWayBillFile.path,
-        "stock-transfer/e-way-bills",
-        isPdf ? "raw" : "image"
-      );
-
-      e_way_bill_url = uploadedEWayBill.secure_url;
-    }
-
-    const transfer = await StockTransfer.create(
-      {
-        transfer_no: generateTransferNo(),
-        request_id: request.id,
-        from_organization_id: user.organization_id,
-        to_organization_id: request.from_organization_id,
-        transfer_date: new Date(),
-        dispatch_date: new Date(),
-        status: "in_transit",
-        approved_by: user.id,
-        dispatched_by: user.id,
-        created_by: user.id,
-        remarks: remarks || null,
-        driver_name: driver_name || null,
-        driver_phone: driver_phone || null,
-        vehicle_number: vehicle_number || null,
-        tracking_number: tracking_number || null,
-        driver_photo_url: driver_photo_url || null,
-        dispatch_image_url:
-          dispatch_image_urls.length > 0
-            ? JSON.stringify(dispatch_image_urls)
-            : null,
-        dispatch_video_url: dispatch_video_url || null,
-        e_way_bill_url: e_way_bill_url || null,
-        pickup_address: pickup_address || null,
-        delivery_address: delivery_address || null,
-        expected_delivery_date: expected_delivery_date || null,
-        expected_delivery_time: expected_delivery_time || null,
-        additional_notes: additional_notes || null,
-      },
-      { transaction }
-    );
-
-    let totalRequested = 0;
-    let totalApproved = 0;
-    let totalWeight = 0;
-    let estimatedValue = 0;
-    let approvedItemsCount = 0;
-
-    const challanItems = [];
-    const dispatchedBatches = [];
-
-    for (const row of parsedItems) {
-      const item_id = toNumber(row.item_id);
-      const qty = toNumber(row.qty);
-      const weight = toNumber(row.weight);
-      const rate = toNumber(row.rate);
-      const parent_batch_id = toNumber(row.parent_batch_id || row.batch_id);
-
-      const requestItem = requestItemMap.get(item_id);
-      const requestedQty = toNumber(requestItem.request_qty);
-
-      totalRequested += requestedQty;
-      totalApproved += qty;
-
-      if (qty === 0) {
-        await requestItem.update(
-          {
-            approved_qty: 0,
-            approved_weight: 0,
-            status: "rejected",
-          },
-          { transaction }
-        );
-        continue;
-      }
-
-      const itemDetails = await Item.findOne({
-        where: {
-          id: item_id,
-          organization_id: user.organization_id,
-          is_active: true,
-        },
-        transaction,
-        lock: transaction.LOCK.UPDATE,
-      });
-
-      if (!itemDetails) {
-        await transaction.rollback();
-        return res.status(404).json({
-          success: false,
-          message: `Item not found for item_id ${item_id}`,
-        });
-      }
-
-      const batchRows = await sequelize.query(
-        `
-        SELECT
-          id,
-          batch_no,
-          item_id,
-          organization_id,
-          current_organization_id,
-          available_qty,
-          available_weight,
-          status
-        FROM public.inventory_batches
-        WHERE id = :parent_batch_id
-        FOR UPDATE
-        `,
-        {
-          replacements: { parent_batch_id },
-          type: QueryTypes.SELECT,
-          transaction,
-        }
-      );
-
-      const parentBatch = batchRows?.[0];
-
-      if (!parentBatch) {
-        await transaction.rollback();
-        return res.status(404).json({
-          success: false,
-          message: `Parent batch not found for item ${item_id}`,
-        });
-      }
-
-      if (Number(parentBatch.item_id) !== Number(item_id)) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Parent batch ${parent_batch_id} does not belong to item ${item_id}`,
-        });
-      }
-
-      const parentBatchOrgId = Number(
-        parentBatch.current_organization_id || parentBatch.organization_id || 0
-      );
-
-      if (parentBatchOrgId !== Number(user.organization_id)) {
-        await transaction.rollback();
-        return res.status(403).json({
-          success: false,
-          message: `Parent batch ${parent_batch_id} does not belong to your organization`,
-        });
-      }
-
-      if (
-        ["sold", "damaged", "dead"].includes(
-          String(parentBatch.status || "").toLowerCase()
-        )
-      ) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: `Parent batch ${parent_batch_id} is already ${parentBatch.status}`,
-        });
-      }
-
-      if (Number(parentBatch.available_qty || 0) < qty) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: `Insufficient batch qty for item ${item_id}`,
-        });
-      }
-
-      if (weight > 0 && Number(parentBatch.available_weight || 0) < weight) {
-        await transaction.rollback();
-        return res.status(409).json({
-          success: false,
-          message: `Insufficient batch weight for item ${item_id}`,
-        });
-      }
-
-      approvedItemsCount += 1;
-      totalWeight += weight;
-      estimatedValue += weight * rate;
-
-      const fromStock = await getOrCreateStock(
-        user.organization_id,
-        item_id,
-        transaction
-      );
-
-      const availableQty = toNumber(fromStock.available_qty);
-      const availableWeight = toNumber(fromStock.available_weight);
-      const reservedQty = toNumber(fromStock.reserved_qty);
-      const reservedWeight = toNumber(fromStock.reserved_weight);
-      const transitQty = toNumber(fromStock.transit_qty);
-      const transitWeight = toNumber(fromStock.transit_weight);
-      const damagedQty = toNumber(fromStock.damaged_qty);
-      const damagedWeight = toNumber(fromStock.damaged_weight);
-
-      if (availableQty < qty) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient available qty for item ${item_id}`,
-        });
-      }
-
-      if (weight > 0 && availableWeight < weight) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient available weight for item ${item_id}`,
-        });
-      }
-
-      await StockTransferItem.create(
-        {
-          transfer_id: transfer.id,
-          item_id,
-          qty,
-          weight,
-          rate,
-          remarks: row.remarks || null,
-        },
-        { transaction }
-      );
-
-      await requestItem.update(
-        {
-          approved_qty: qty,
-          approved_weight: weight,
-          status: qty < requestedQty ? "partially_approved" : "approved",
-        },
-        { transaction }
-      );
-
-      const newAvailableQty = availableQty - qty;
-      const newAvailableWeight = availableWeight - weight;
-      const newTransitQty = transitQty + qty;
-      const newTransitWeight = transitWeight + weight;
-
-      await fromStock.update(
-        {
-          available_qty: newAvailableQty,
-          available_weight: newAvailableWeight,
-          transit_qty: newTransitQty,
-          transit_weight: newTransitWeight,
-        },
-        { transaction }
-      );
-
-      await createMovement({
-        organization_id: user.organization_id,
-        item_id,
-        movement_type: "dispatch",
-        reference_type: "stock_transfer",
-        reference_id: transfer.id,
-        qty,
-        weight,
-        stockBefore: {
-          available_qty: availableQty,
-          reserved_qty: reservedQty,
-          transit_qty: transitQty,
-          damaged_qty: damagedQty,
-          available_weight: availableWeight,
-          reserved_weight: reservedWeight,
-          transit_weight: transitWeight,
-          damaged_weight: damagedWeight,
-        },
-        stockAfter: {
-          available_qty: newAvailableQty,
-          reserved_qty: reservedQty,
-          transit_qty: newTransitQty,
-          damaged_qty: damagedQty,
-          available_weight: newAvailableWeight,
-          reserved_weight: reservedWeight,
-          transit_weight: newTransitWeight,
-          damaged_weight: damagedWeight,
-        },
-        remarks: `Dispatched via ${transfer.transfer_no}`,
-        created_by: user.id,
-        transaction,
-      });
-
-      const childBatch = await InventoryTrackingService.distributeBatch(
-        {
-          parent_batch_id,
-          to_organization_id: request.from_organization_id,
-          quantity: qty,
-          weight,
-          reference_type: "STOCK_TRANSFER",
-          reference_id: transfer.id,
-          remarks: `Dispatched via ${transfer.transfer_no}`,
-          handled_by: user.id,
-          batch_status: "in_transit",
-        },
-        { transaction }
-      );
-
-      dispatchedBatches.push({
-        item_id,
-        parent_batch_id,
-        parent_batch_no: parentBatch.batch_no,
-        child_batch_id: childBatch.id,
-        child_batch_no: childBatch.batch_no,
-        dispatched_qty: Number(childBatch.total_qty || 0),
-        dispatched_weight: Number(childBatch.total_weight || 0),
-        status: childBatch.status,
-      });
-
-      challanItems.push({
-        item_id,
-        item_name: itemDetails.item_name,
-        product_code: itemDetails.article_code || itemDetails.sku_code,
-        hsn_code: itemDetails.hsn_code,
-        purity: itemDetails.purity,
-        qty,
-        weight,
-        rate,
-        making_charge: itemDetails.making_charge || 0,
-        huid_code: itemDetails.huid_code || "-",
-        base_value: weight > 0 ? weight * rate : qty * rate,
-      });
-    }
-
-    let finalStatus = "approved";
-
-    if (approvedItemsCount === 0) {
-      finalStatus = "rejected";
-    } else if (totalApproved < totalRequested) {
-      finalStatus = "partially_approved";
-    }
-
-    await request.update(
-      {
-        status: finalStatus,
-        approved_by: user.id,
-        approved_at: new Date(),
-      },
-      { transaction }
-    );
-
-    await Task.update(
-      { status: finalStatus },
-      {
-        where: {
-          task_type: "stock_request_approval",
-          reference_id: request.id,
-        },
-        transaction,
-      }
-    );
-
-    await SystemActivity.create(
-      {
-        title:
-          finalStatus === "approved"
-            ? "Stock request approved and dispatched"
-            : finalStatus === "partially_approved"
-            ? "Stock request partially approved and dispatched"
-            : "Stock request rejected",
-        description:
-          finalStatus === "rejected"
-            ? `Request ${request.request_no} was rejected by receiving organization`
-            : `Request ${request.request_no} processed via ${transfer.transfer_no}`,
-        activity_type: "stock_request_dispatch",
-        module_name: "stock_transfer",
-        reference_id: transfer.id,
-        reference_no: transfer.transfer_no,
-        district_code: request.to_district_code || null,
-        store_code: request.from_store_code || null,
-        store_name: request.from_store_name || null,
-        created_by: user.id,
-        created_at: new Date(),
-      },
-      { transaction }
-    );
-
-    await createActivity({
-      user_id: user.id,
-      action: "stock_request_dispatch",
-      title:
-        finalStatus === "approved"
-          ? "Stock request approved and dispatched"
-          : finalStatus === "partially_approved"
-          ? "Stock request partially approved and dispatched"
-          : "Stock request rejected",
-      description:
-        finalStatus === "rejected"
-          ? `Request ${request.request_no} rejected`
-          : `Request ${request.request_no} dispatched via ${transfer.transfer_no}`,
-      meta: {
-        request_id: request.id,
-        request_no: request.request_no,
-        transfer_id: transfer.id,
-        transfer_no: transfer.transfer_no,
-        final_status: finalStatus,
-        driver_photo_url,
-        dispatch_image_urls,
-        dispatch_video_url,
-        e_way_bill_url,
-        dispatched_batches: dispatchedBatches,
-      },
-      transaction,
-    });
-
-    if (finalStatus !== "rejected") {
-      const fromStore = await Store.findOne({
-        where: { id: user.organization_id },
-        transaction,
-      });
-
-      const toStore = await Store.findOne({
-        where: { id: request.from_organization_id },
-        transaction,
-      });
-
-      challanPdf = await generateDeliveryChallanPdf({
-        transfer,
-        request,
-        fromStore,
-        toStore,
-        challanItems,
-        driver: {
-          driver_name,
-          driver_phone,
-          vehicle_number,
-          pickup_address,
-          delivery_address,
-        },
-      });
-    }
-
-    await transaction.commit();
-
-    for (const filePath of uploadedLocalPaths) {
-      safeUnlink(filePath);
-    }
-
-    if (challanPdf && String(req.query.download_challan || "") === "true") {
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${challanPdf.fileName}"`
-      );
-
-      return res.sendFile(challanPdf.filePath);
-    }
-
-    return res.status(200).json({
-      success: true,
-      message:
-        finalStatus === "rejected"
-          ? "Request rejected successfully"
-          : "Request approved and stock dispatched successfully",
-      data: {
-        transfer: {
-          ...transfer.toJSON(),
-          dispatch_image_url: dispatch_image_urls,
-          e_way_bill_url,
-        },
-        uploaded_files: {
-          driver_photo_url,
-          dispatch_image_urls,
-          dispatch_video_url,
-          e_way_bill_url,
-        },
-        summary: {
-          request_id: request.id,
-          request_no: request.request_no,
-          total_requested: totalRequested,
-          total_approved: totalApproved,
-          total_weight: totalWeight,
-          estimated_value: estimatedValue,
-          final_status: finalStatus,
-        },
-      },
-    });
-  } catch (error) {
-    await transaction.rollback();
-
-    for (const filePath of uploadedLocalPaths) {
-      safeUnlink(filePath);
-    }
-
-    console.error("approveAndDispatchRequest error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to approve and dispatch request",
-      error: error.message,
-    });
-  }
-};
-
-
-
-
-// ==========================================
-// STORE -> RECEIVE TRANSFER
-// ==========================================
-
-export const receiveTransfer = async (req, res) => {
-
-  const transaction = await sequelize.transaction();
-
-
-
-  try {
-
     const { transferId } = req.params;
 
-    const { remarks } = req.body;
+  const {
+  complaint_type = COMPLAINT_TYPES.QUANTITY_SHORTAGE,
+  description,
+} = req.body;
+
+const normalizedComplaintType =
+  normalizeComplaintType(
+    complaint_type
+  );
+
+if (
+  !ALLOWED_COMPLAINT_TYPES.includes(
+    normalizedComplaintType
+  )
+) {
+  await transaction.rollback();
+
+  return res.status(400).json({
+    success: false,
+    message: "Invalid complaint type",
+    allowed_complaint_types:
+      ALLOWED_COMPLAINT_TYPES,
+  });
+}
 
     const user = req.user;
 
-
+    // =====================================================
+    // USER VALIDATION
+    // =====================================================
 
     if (!user?.id || !user?.organization_id) {
-
       await transaction.rollback();
-
-
 
       return res.status(401).json({
-
         success: false,
-
         message: "Unauthorized user",
-
       });
-
     }
-
-
 
     const receiverStoreCode = String(
-
       user.store_code || user.storeCode || ""
-
     )
-
       .trim()
-
       .toUpperCase();
 
-
-
     if (!receiverStoreCode) {
-
       await transaction.rollback();
 
-
-
       return res.status(400).json({
-
         success: false,
-
         message: "Receiver store code is missing",
-
       });
-
     }
 
-
-
+    // =====================================================
+    // TRANSFER ID VALIDATION
     // =====================================================
 
-    // FETCH AND LOCK TRANSFER
+    const parsedTransferId = Number(transferId);
+
+    if (
+      !parsedTransferId ||
+      !Number.isInteger(parsedTransferId) ||
+      parsedTransferId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Valid transferId is required",
+      });
+    }
 
     // =====================================================
+    // ITEMS PARSE
+    //
+    // Multipart form-data me items JSON string aayega.
+    // =====================================================
 
+    const requestedItems = parseComplaintItems(req.body.items);
 
+    if (!requestedItems.length) {
+      await transaction.rollback();
 
-    const transfer = await StockTransfer.findByPk(transferId, {
+      return res.status(400).json({
+        success: false,
+        message: "At least one complaint item is required",
+      });
+    }
 
-      transaction,
+    // =====================================================
+    // FILE VALIDATION
+    //
+    // Expected fields:
+    // images = exactly 2 files
+    // video  = exactly 1 file
+    // =====================================================
 
-      lock: transaction.LOCK.UPDATE,
+    const images = Array.isArray(req.files?.images)
+      ? req.files.images
+      : [];
 
-    });
+    const videos = Array.isArray(req.files?.video)
+      ? req.files.video
+      : [];
 
+    if (images.length !== 2) {
+      await transaction.rollback();
 
+      return res.status(400).json({
+        success: false,
+        message: "Exactly 2 complaint images are required",
+      });
+    }
+
+    if (videos.length !== 1) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Exactly 1 complaint video is required",
+      });
+    }
+
+    // =====================================================
+    // FILE TYPE VALIDATION
+    // =====================================================
+
+    const validImageTypes = [
+      "image/jpeg",
+      "image/jpg",
+      "image/png",
+      "image/webp",
+    ];
+
+    const validVideoTypes = [
+      "video/mp4",
+      "video/mpeg",
+      "video/quicktime",
+      "video/webm",
+    ];
+
+    for (const image of images) {
+      if (!validImageTypes.includes(image.mimetype)) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Only JPG, JPEG, PNG and WEBP images are allowed",
+        });
+      }
+    }
+
+    if (!validVideoTypes.includes(videos[0].mimetype)) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Only MP4, MPEG, MOV and WEBM videos are allowed",
+      });
+    }
+
+    // =====================================================
+    // FETCH TRANSFER
+    // =====================================================
+
+    const transfer = await StockTransfer.findByPk(
+      parsedTransferId,
+      {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      }
+    );
 
     if (!transfer) {
-
       await transaction.rollback();
-
-
 
       return res.status(404).json({
-
         success: false,
-
         message: "Transfer not found",
-
       });
-
     }
 
-
-
     // =====================================================
-
-    // RECEIVER VALIDATION
-
+    // RECEIVER AUTHORIZATION
     // =====================================================
-
-
 
     if (
-
       Number(transfer.to_organization_id) !==
-
       Number(user.organization_id)
-
     ) {
-
       await transaction.rollback();
-
-
 
       return res.status(403).json({
-
         success: false,
-
-        message: "You are not allowed to receive this transfer",
-
+        message:
+          "You cannot raise complaint for this transfer",
       });
-
     }
 
+    // =====================================================
+    // TRANSFER STATUS VALIDATION
+    //
+    // Transfer complaint ke baad bhi in_transit hi rahega,
+    // taaki remaining items receive ho sakein.
+    // =====================================================
 
+    const transferStatus = String(transfer.status || "")
+      .trim()
+      .toLowerCase();
 
-    if (
-
-      String(transfer.status || "").toLowerCase() !==
-
-      "in_transit"
-
-    ) {
-
+    if (transferStatus !== "in_transit") {
       await transaction.rollback();
 
-
-
       return res.status(400).json({
-
         success: false,
-
-        message: "Only in_transit transfer can be received",
-
+        message:
+          "Complaint can only be raised for an in-transit transfer",
       });
-
     }
 
-
-
+    // =====================================================
+    // DUPLICATE ACTIVE COMPLAINT CHECK
     // =====================================================
 
+    const existingComplaint =
+      await StockTransferComplaint.findOne({
+        where: {
+          transfer_id: transfer.id,
+
+          status: {
+            [Op.in]: ["open", "under_review"],
+          },
+        },
+
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+    if (existingComplaint) {
+      await transaction.rollback();
+
+      return res.status(409).json({
+        success: false,
+
+        message:
+          "An active complaint already exists for this transfer",
+
+        data: {
+          complaint_id: existingComplaint.id,
+          complaint_no: existingComplaint.complaint_no,
+          status: existingComplaint.status,
+        },
+      });
+    }
+
+    // =====================================================
     // FETCH TRANSFER ITEMS
-
     // =====================================================
-
-
 
     const transferItems = await StockTransferItem.findAll({
-
       where: {
-
         transfer_id: transfer.id,
-
       },
 
       transaction,
-
       lock: transaction.LOCK.UPDATE,
-
     });
 
-
-
     if (!transferItems.length) {
-
       await transaction.rollback();
 
-
-
       return res.status(400).json({
-
         success: false,
-
         message: "No items found in this transfer",
-
       });
-
     }
 
+    const transferItemMap = new Map();
 
-
-    const receivedItems = [];
-
-
+    for (const transferItem of transferItems) {
+      transferItemMap.set(
+        Number(transferItem.id),
+        transferItem
+      );
+    }
 
     // =====================================================
-
-    // PROCESS EACH TRANSFER ITEM
-
+    // VALIDATE DUPLICATE TRANSFER ITEMS IN PAYLOAD
     // =====================================================
 
+    const requestedTransferItemIds = new Set();
 
-
-    for (const trItem of transferItems) {
-
-      const itemId = Number(trItem.item_id);
-
-      const qty = toNumber(trItem.qty);
-
-      const weight = toNumber(trItem.weight);
-
-
-
-      if (!itemId) {
-
-        throw new Error(
-
-          `Invalid item_id found in transfer item ${trItem.id}`
-
-        );
-
-      }
-
-
-
-      if (qty <= 0 && weight <= 0) {
-
-        throw new Error(
-
-          `Invalid transfer quantity for item ${itemId}`
-
-        );
-
-      }
-
-
-
-      // ===================================================
-
-      // VERIFY ITEM
-
-      // ===================================================
-
-
-
-      const item = await Item.findByPk(itemId, {
-
-        transaction,
-
-        lock: transaction.LOCK.UPDATE,
-
-      });
-
-
-
-      if (!item) {
-
-        throw new Error(`Item not found for item_id ${itemId}`);
-
-      }
-
-
-
-      // ===================================================
-
-      // SOURCE STOCK
-
-      // Source ki transit quantity clear hogi
-
-      // ===================================================
-
-
-
-      const sourceStock = await getOrCreateStock(
-
-        transfer.from_organization_id,
-
-        itemId,
-
-        transaction
-
+    for (const requestedItem of requestedItems) {
+      const transferItemId = Number(
+        requestedItem.transfer_item_id
       );
-
-
-
-      const sourceTransitQty = toNumber(
-
-        sourceStock.transit_qty
-
-      );
-
-
-
-      const sourceTransitWeight = toNumber(
-
-        sourceStock.transit_weight
-
-      );
-
-
-
-      if (sourceTransitQty < qty) {
-
-        throw new Error(
-
-          `Insufficient transit quantity for item ${itemId}. ` +
-
-            `Transit: ${sourceTransitQty}, Receiving: ${qty}`
-
-        );
-
-      }
-
-
 
       if (
-
-        weight > 0 &&
-
-        sourceTransitWeight < weight
-
+        transferItemId &&
+        requestedTransferItemIds.has(transferItemId)
       ) {
+        await transaction.rollback();
 
-        throw new Error(
-
-          `Insufficient transit weight for item ${itemId}. ` +
-
-            `Transit weight: ${sourceTransitWeight}, Receiving: ${weight}`
-
-        );
-
+        return res.status(400).json({
+          success: false,
+          message:
+            `Duplicate transfer_item_id ${transferItemId} found in complaint items`,
+        });
       }
 
+      if (transferItemId) {
+        requestedTransferItemIds.add(transferItemId);
+      }
+    }
 
+    // =====================================================
+    // VALIDATE AND PREPARE COMPLAINT ITEMS JSON
+    // =====================================================
 
-      const sourceBefore = {
+   
 
-        available_qty: toNumber(
+const complaintItems = [];
 
-          sourceStock.available_qty
+for (const requestedItem of requestedItems) {
+  const transferItemId = Number(
+    requestedItem.transfer_item_id
+  );
 
-        ),
+  if (
+    !transferItemId ||
+    !Number.isInteger(transferItemId) ||
+    transferItemId <= 0
+  ) {
+    await transaction.rollback();
 
+    return res.status(400).json({
+      success: false,
+      message:
+        "Valid transfer_item_id is required for every item",
+    });
+  }
 
+  const transferItem =
+    transferItemMap.get(transferItemId);
 
-        reserved_qty: toNumber(
+  if (!transferItem) {
+    await transaction.rollback();
 
-          sourceStock.reserved_qty
+    return res.status(400).json({
+      success: false,
+      message:
+        `Transfer item ${transferItemId} does not belong to this transfer`,
+    });
+  }
 
-        ),
+  // Sent quantity aur weight database se lenge.
+  const sentQty = toNumber(
+    transferItem.qty
+  );
 
+  const sentWeight = toNumber(
+    transferItem.weight
+  );
 
+  const receivedQty = toNumber(
+    requestedItem.received_qty
+  );
 
-        transit_qty: sourceTransitQty,
+  const receivedWeight = toNumber(
+    requestedItem.received_weight
+  );
 
+  // Sirf missing_item complaint me use hoga.
+  const missingQty = toNumber(
+    requestedItem.missing_qty
+  );
+  const wrongItemId = Number(
+  requestedItem.wrong_item_id
+);
 
+const wrongItemCode = String(
+  requestedItem.wrong_item_code || ""
+).trim();
+  // ===================================================
+  // BASIC QUANTITY VALIDATION
+  // ===================================================
 
-        damaged_qty: toNumber(
+  if (receivedQty < 0) {
+    await transaction.rollback();
 
-          sourceStock.damaged_qty
+    return res.status(400).json({
+      success: false,
+      message:
+        `Received quantity cannot be negative for transfer item ${transferItemId}`,
+    });
+  }
 
-        ),
+  if (receivedQty > sentQty) {
+    await transaction.rollback();
 
+    return res.status(400).json({
+      success: false,
+      message:
+        `Received quantity cannot exceed sent quantity for transfer item ${transferItemId}`,
+      sent_qty: sentQty,
+      received_qty: receivedQty,
+    });
+  }
 
+  // ===================================================
+  // QUANTITY SHORTAGE VALIDATION
+  //
+  // Ye validation sirf quantity_shortage ke liye chalegi.
+  // Damaged, wrong aur other complaint ko block nahi karegi.
+  // ===================================================
 
-        available_weight: toNumber(
+  if (
+    normalizedComplaintType ===
+      COMPLAINT_TYPES.QUANTITY_SHORTAGE &&
+    receivedQty >= sentQty
+  ) {
+    await transaction.rollback();
 
-          sourceStock.available_weight
+    return res.status(400).json({
+      success: false,
+      message:
+        `Complaint cannot be raised because no quantity shortage exists for transfer item ${transferItemId}`,
+      sent_qty: sentQty,
+      received_qty: receivedQty,
+    });
+  }
 
-        ),
+  // ===================================================
+  // MISSING ITEM VALIDATION
+  //
+  // Formula:
+  // missing_qty = sent_qty - received_qty
+  // ===================================================
 
+  if (
+    normalizedComplaintType ===
+    COMPLAINT_TYPES.MISSING_ITEM
+  ) {
+    const missingQtyProvided =
+      requestedItem.missing_qty !== undefined &&
+      requestedItem.missing_qty !== null &&
+      String(
+        requestedItem.missing_qty
+      ).trim() !== "";
 
+    if (!missingQtyProvided) {
+      await transaction.rollback();
 
-        reserved_weight: toNumber(
-
-          sourceStock.reserved_weight
-
-        ),
-
-
-
-        transit_weight: sourceTransitWeight,
-
-
-
-        damaged_weight: toNumber(
-
-          sourceStock.damaged_weight
-
-        ),
-
-      };
-
-
-
-      await sourceStock.update(
-
-        {
-
-          transit_qty: Math.max(
-
-            0,
-
-            sourceTransitQty - qty
-
-          ),
-
-
-
-          transit_weight: Math.max(
-
-            0,
-
-            sourceTransitWeight - weight
-
-          ),
-
-        },
-
-        {
-
-          transaction,
-
-        }
-
-      );
-
-
-
-      await sourceStock.reload({
-
-        transaction,
-
+      return res.status(400).json({
+        success: false,
+        message:
+          `missing_qty is required for transfer item ${transferItemId}`,
       });
-
-
-
-      const sourceAfter = {
-
-        available_qty: toNumber(
-
-          sourceStock.available_qty
-
-        ),
-
-
-
-        reserved_qty: toNumber(
-
-          sourceStock.reserved_qty
-
-        ),
-
-
-
-        transit_qty: toNumber(
-
-          sourceStock.transit_qty
-
-        ),
-
-
-
-        damaged_qty: toNumber(
-
-          sourceStock.damaged_qty
-
-        ),
-
-
-
-        available_weight: toNumber(
-
-          sourceStock.available_weight
-
-        ),
-
-
-
-        reserved_weight: toNumber(
-
-          sourceStock.reserved_weight
-
-        ),
-
-
-
-        transit_weight: toNumber(
-
-          sourceStock.transit_weight
-
-        ),
-
-
-
-        damaged_weight: toNumber(
-
-          sourceStock.damaged_weight
-
-        ),
-
-      };
-
-
-
-      await createMovement({
-
-        organization_id:
-
-          transfer.from_organization_id,
-
-
-
-        item_id: itemId,
-
-
-
-        movement_type: "dispatch",
-
-
-
-        reference_type:
-
-          "stock_transfer_transit_clear",
-
-
-
-        reference_id: transfer.id,
-
-
-
-        qty: 0,
-
-
-
-        weight: 0,
-
-
-
-        stockBefore: sourceBefore,
-
-
-
-        stockAfter: sourceAfter,
-
-
-
-        remarks:
-
-          `Transit cleared after receive for ` +
-
-          `${transfer.transfer_no}`,
-
-
+    }
+
+    if (missingQty <= 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          `missing_qty must be greater than 0 for transfer item ${transferItemId}`,
+        missing_qty: missingQty,
+      });
+    }
+
+    if (missingQty > sentQty) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          `Missing quantity cannot exceed sent quantity for transfer item ${transferItemId}`,
+        sent_qty: sentQty,
+        missing_qty: missingQty,
+      });
+    }
+
+    const expectedMissingQty = Number(
+      Math.max(
+        0,
+        sentQty - receivedQty
+      ).toFixed(3)
+    );
+
+    if (
+      Number(missingQty.toFixed(3)) !==
+      expectedMissingQty
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          `Missing quantity does not match sent and received quantity for transfer item ${transferItemId}`,
+        sent_qty: sentQty,
+        received_qty: receivedQty,
+        expected_missing_qty:
+          expectedMissingQty,
+        provided_missing_qty:
+          missingQty,
+      });
+    }
+  }
+// ===================================================
+// WRONG ITEM VALIDATION
+// ===================================================
+
+if (
+  normalizedComplaintType ===
+  COMPLAINT_TYPES.WRONG_ITEM
+) {
+  const wrongItemIdProvided =
+    requestedItem.wrong_item_id !== undefined &&
+    requestedItem.wrong_item_id !== null &&
+    String(
+      requestedItem.wrong_item_id
+    ).trim() !== "";
+
+  if (!wrongItemIdProvided) {
+    await transaction.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message:
+        `wrong_item_id is required for transfer item ${transferItemId}`,
+    });
+  }
+
+  if (
+    !wrongItemId ||
+    !Number.isInteger(wrongItemId) ||
+    wrongItemId <= 0
+  ) {
+    await transaction.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message:
+        `Valid wrong_item_id is required for transfer item ${transferItemId}`,
+    });
+  }
+
+  if (
+    wrongItemId ===
+    Number(transferItem.item_id)
+  ) {
+    await transaction.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message:
+        `Wrong item cannot be the same as expected item for transfer item ${transferItemId}`,
+      expected_item_id:
+        Number(transferItem.item_id),
+      wrong_item_id:
+        wrongItemId,
+    });
+  }
+
+  const wrongItemExists =
+    await Item.findByPk(
+      wrongItemId,
+      {
+        transaction,
+      }
+    );
+
+  if (!wrongItemExists) {
+    await transaction.rollback();
+
+    return res.status(404).json({
+      success: false,
+      message:
+        `Wrong item with item_id ${wrongItemId} was not found`,
+    });
+  }
+
+  if (!wrongItemCode) {
+    await transaction.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message:
+        `wrong_item_code is required for transfer item ${transferItemId}`,
+    });
+  }
+
+  const databaseWrongItemCode = String(
+    wrongItemExists.sku_code ||
+      wrongItemExists.article_code ||
+      wrongItemExists.item_code ||
+      ""
+  ).trim();
+
+  if (
+  databaseWrongItemCode &&
+  databaseWrongItemCode.toUpperCase() !==
+    wrongItemCode.toUpperCase()
+) {
+  await transaction.rollback();
+
+  return res.status(400).json({
+    success: false,
+    message:
+      `wrong_item_code does not match wrong_item_id for transfer item ${transferItemId}`,
+    provided_wrong_item_code:
+      wrongItemCode,
+    expected_wrong_item_code:
+      databaseWrongItemCode,
+  });
+}
+}
+  // ===================================================
+  // WEIGHT VALIDATION
+  // ===================================================
+
+  if (receivedWeight < 0) {
+    await transaction.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message:
+        `Received weight cannot be negative for transfer item ${transferItemId}`,
+    });
+  }
+
+  if (
+    sentWeight > 0 &&
+    receivedWeight > sentWeight
+  ) {
+    await transaction.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message:
+        `Received weight cannot exceed sent weight for transfer item ${transferItemId}`,
+      sent_weight: sentWeight,
+      received_weight:
+        receivedWeight,
+    });
+  }
+
+  // ===================================================
+  // SHORTAGE CALCULATION
+  // ===================================================
+
+  const shortageQty = Number(
+    Math.max(
+      0,
+      sentQty - receivedQty
+    ).toFixed(3)
+  );
+
+  const shortageWeight = Number(
+    Math.max(
+      0,
+      sentWeight - receivedWeight
+    ).toFixed(3)
+  );
+
+  // ===================================================
+  // PREPARE COMPLAINT ITEM
+  // ===================================================
+
+  complaintItems.push({
+    transfer_item_id:
+      transferItem.id,
+
+    item_id:
+      transferItem.item_id,
+
+    sent_qty:
+      sentQty,
+
+    received_qty:
+      receivedQty,
+
+    shortage_qty:
+      shortageQty,
+
+    // Missing item complaint me missing quantity save hogi.
+    // Baaki complaint types me null save hoga.
+    missing_qty:
+      normalizedComplaintType ===
+      COMPLAINT_TYPES.MISSING_ITEM
+        ? missingQty
+        : null,
+    wrong_item_id:
+  normalizedComplaintType ===
+  COMPLAINT_TYPES.WRONG_ITEM
+    ? wrongItemId
+    : null,
+
+wrong_item_code:
+  normalizedComplaintType ===
+  COMPLAINT_TYPES.WRONG_ITEM
+    ? wrongItemCode
+    : null,
+    sent_weight:
+      sentWeight,
+
+    received_weight:
+      receivedWeight,
+
+    shortage_weight:
+      shortageWeight,
+
+    note:
+      requestedItem.note || null,
+  });
+}
+
+    // =====================================================
+    // UPLOAD 2 IMAGES AND 1 VIDEO
+    // =====================================================
+
+    const image1Upload = await uploadToCloudinary(
+      images[0].path,
+      "stock-transfer-complaints/images",
+      "image"
+    );
+
+    const image2Upload = await uploadToCloudinary(
+      images[1].path,
+      "stock-transfer-complaints/images",
+      "image"
+    );
+
+    const videoUpload = await uploadToCloudinary(
+      videos[0].path,
+      "stock-transfer-complaints/videos",
+      "video"
+    );
+
+    const image1Url =
+      image1Upload?.secure_url ||
+      image1Upload?.url ||
+      null;
+
+    const image2Url =
+      image2Upload?.secure_url ||
+      image2Upload?.url ||
+      null;
+
+    const videoUrl =
+      videoUpload?.secure_url ||
+      videoUpload?.url ||
+      null;
+
+    if (!image1Url || !image2Url || !videoUrl) {
+      throw new Error(
+        "Failed to upload complaint evidence"
+      );
+    }
+
+    // =====================================================
+    // CREATE COMPLAINT
+    // =====================================================
+
+    const complaintNo = generateComplaintNo(
+      transfer.transfer_no,
+      transfer.id
+    );
+
+   const complaint =
+  await StockTransferComplaint.create(
+    {
+      complaint_no:
+        complaintNo,
+
+      transfer_id:
+        transfer.id,
+
+      from_organization_id:
+        transfer.from_organization_id,
+
+      to_organization_id:
+        transfer.to_organization_id,
+
+      complaint_type:
+        normalizedComplaintType,
+
+      description:
+        description || null,
+
+      items:
+        complaintItems,
+
+      image_1_url:
+        image1Url,
+
+      image_2_url:
+        image2Url,
+
+      video_url:
+        videoUrl,
+
+      status:
+        "open",
+
+      raised_by:
+        user.id,
+    },
+    {
+      transaction,
+    }
+  );
+
+    // =====================================================
+    // IMPORTANT CHANGE
+    //
+    // Transfer ka status "complaint_raised" nahi karenge.
+    // Transfer "in_transit" hi rahega.
+    //
+    // Isse:
+    // 1. Transfer card list me visible rahega.
+    // 2. Remaining items receive ho sakenge.
+    // 3. Complaint items separately track honge.
+    //
+    // Sirf remarks me complaint details save kar rahe hain.
+    // =====================================================
+
+    const oldRemarks = String(
+      transfer.remarks || ""
+    ).trim();
+
+    const complaintRemark =
+      description ||
+      `Complaint ${complaintNo} raised due to quantity shortage`;
+
+    const updatedRemarks = oldRemarks
+      ? `${oldRemarks}\n${complaintRemark}`
+      : complaintRemark;
+
+    await transfer.update(
+      {
+        remarks: updatedRemarks,
+
+        // Status intentionally unchanged.
+        // Current status "in_transit" hi rahega.
+      },
+      {
+        transaction,
+      }
+    );
+
+    // =====================================================
+    // IMPORTANT CHANGE
+    //
+    // StockRequest ka status bhi change nahi hoga.
+    //
+    // Pehle request status complaint_raised ho raha tha,
+    // jiski wajah se request/card frontend list se disappear
+    // ho raha tha.
+    //
+    // Ab StockRequest ko touch nahi karenge.
+    // =====================================================
+
+    // No StockRequest status update here.
+
+    // =====================================================
+    // SYSTEM ACTIVITY
+    // =====================================================
+
+    await SystemActivity.create(
+      {
+        title: "Stock transfer complaint raised",
+
+        description:
+          `Complaint ${complaintNo} raised against transfer ${transfer.transfer_no}. Transfer remains in transit for remaining items.`,
+
+        activity_type:
+          "stock_transfer_complaint_raised",
+
+        module_name:
+          "stock_transfer_complaint",
+
+        reference_id: complaint.id,
+        reference_no: complaintNo,
+
+        district_code:
+          user.district_code || null,
+
+        store_code: receiverStoreCode,
+        store_name: user.store_name || null,
 
         created_by: user.id,
-
-
-
+        created_at: new Date(),
+      },
+      {
         transaction,
+      }
+    );
 
-      });
+    // =====================================================
+    // ACTIVITY LOG
+    // =====================================================
 
-      // ===================================================
+    await ActivityLog.create(
+      {
+        organization_id: user.organization_id,
 
-      // DESTINATION STOCK
+        user_id: user.id,
 
-      //
+        action:
+          "stock_transfer_complaint_raised",
 
-      // Important:
+        module_name:
+          "stock_transfer_complaint",
 
-      // Same item_id destination stock me use hoga.
+        reference_id: complaint.id,
+        reference_no: complaintNo,
 
-      // Inventory visibility stocks.store_code se hogi.
+        title:
+          "Stock transfer complaint raised",
 
-      // ===================================================
+        description:
+          `Complaint ${complaintNo} raised against transfer ${transfer.transfer_no}. Remaining items can still be received.`,
 
+        meta: {
+          complaint_id: complaint.id,
+          complaint_no: complaintNo,
 
+          transfer_id: transfer.id,
+          transfer_no: transfer.transfer_no,
 
-      const destinationStock =
+          from_organization_id:
+            transfer.from_organization_id,
 
-        await getOrCreateStock(
-
-          transfer.to_organization_id,
-
-          itemId,
-
-          transaction,
-
-          receiverStoreCode
-
-        );
-
-
-
-      const destinationBefore = {
-
-        available_qty: toNumber(
-
-          destinationStock.available_qty
-
-        ),
-
-
-
-        reserved_qty: toNumber(
-
-          destinationStock.reserved_qty
-
-        ),
-
-
-
-        transit_qty: toNumber(
-
-          destinationStock.transit_qty
-
-        ),
-
-
-
-        damaged_qty: toNumber(
-
-          destinationStock.damaged_qty
-
-        ),
-
-
-
-        available_weight: toNumber(
-
-          destinationStock.available_weight
-
-        ),
-
-
-
-        reserved_weight: toNumber(
-
-          destinationStock.reserved_weight
-
-        ),
-
-
-
-        transit_weight: toNumber(
-
-          destinationStock.transit_weight
-
-        ),
-
-
-
-        damaged_weight: toNumber(
-
-          destinationStock.damaged_weight
-
-        ),
-
-      };
-
-
-
-      await destinationStock.update(
-
-        {
-
-          available_qty:
-
-            toNumber(
-
-              destinationStock.available_qty
-
-            ) + qty,
-
-
-
-          available_weight:
-
-            toNumber(
-
-              destinationStock.available_weight
-
-            ) + weight,
-
-
+          to_organization_id:
+            transfer.to_organization_id,
 
           store_code: receiverStoreCode,
 
-
-
-          organization_id:
-
-            transfer.to_organization_id,
-
-        },
-
-        {
-
-          transaction,
-
-        }
-
-      );
-
-
-
-      await destinationStock.reload({
-
-        transaction,
-
-      });
-
-
-
-      const destinationAfter = {
-
-        available_qty: toNumber(
-
-          destinationStock.available_qty
-
-        ),
-
-
-
-        reserved_qty: toNumber(
-
-          destinationStock.reserved_qty
-
-        ),
-
-
-
-        transit_qty: toNumber(
-
-          destinationStock.transit_qty
-
-        ),
-
-
-
-        damaged_qty: toNumber(
-
-          destinationStock.damaged_qty
-
-        ),
-
-
-
-        available_weight: toNumber(
-
-          destinationStock.available_weight
-
-        ),
-
-
-
-        reserved_weight: toNumber(
-
-          destinationStock.reserved_weight
-
-        ),
-
-
-
-        transit_weight: toNumber(
-
-          destinationStock.transit_weight
-
-        ),
-
-
-
-        damaged_weight: toNumber(
-
-          destinationStock.damaged_weight
-
-        ),
-
-      };
-
-
-
-      // ===================================================
-
-      // IMPORTANT ITEM FIX
-
-      //
-
-      // organization_id aur storeCode change nahi karenge.
-
-      // Ek item multiple stores ke stock me ho sakta hai.
-
-      // Store ownership stocks table decide karegi.
-
-      // ===================================================
-
-
-
-      const totalItemStockResult =
-
-        await Stock.findAll({
-
-          where: {
-
-            item_id: itemId,
-
-          },
-
-
-
-          attributes: [
-
-            "available_qty",
-
-            "reserved_qty",
-
-            "transit_qty",
-
-          ],
-
-
-
-          transaction,
-
-        });
-
-
-
-      const totalAvailableQty =
-
-        totalItemStockResult.reduce(
-
-          (sum, stock) =>
-
-            sum +
-
-            toNumber(stock.available_qty),
-
-          0
-
-        );
-
-
-
-      const totalReservedQty =
-
-        totalItemStockResult.reduce(
-
-          (sum, stock) =>
-
-            sum +
-
-            toNumber(stock.reserved_qty),
-
-          0
-
-        );
-
-
-
-      const totalTransitQty =
-
-        totalItemStockResult.reduce(
-
-          (sum, stock) =>
-
-            sum +
-
-            toNumber(stock.transit_qty),
-
-          0
-
-        );
-
-
-
-      const totalActiveQty =
-
-        totalAvailableQty +
-
-        totalReservedQty +
-
-        totalTransitQty;
-
-
-
-      await item.update(
-
-        {
-
-          current_status:
-
-            totalActiveQty > 0
-
-              ? "in_stock"
-
-              : "sold",
-
-        },
-
-        {
-
-          transaction,
-
-        }
-
-      );
-
-
-
-      // ===================================================
-
-      // BATCH UPDATE
-
-      //
-
-      // Sirf transferred batch update karna best hai.
-
-      // Agar transfer item me batch_id available hai to wahi use hoga.
-
-      // ===================================================
-
-
-
-      const transferBatchId =
-
-        trItem.batch_id ||
-
-        trItem.inventory_batch_id ||
-
-        null;
-
-
-
-      if (transferBatchId) {
-
-        await InventoryBatch.update(
-
-          {
-
-            current_organization_id:
-
-              transfer.to_organization_id,
-
-
-
-            status: "delivered",
-
-          },
-
-          {
-
-            where: {
-
-              id: transferBatchId,
-
-              item_id: itemId,
-
-            },
-
-            transaction,
-
-          }
-
-        );
-
-      } else {
-
-        /*
-
-         * Fallback:
-
-         * Agar transfer item me batch_id store nahi ho raha,
-
-         * to active in_transit batch update hoga.
-
-         *
-
-         * Sabhi batches ko item_id se update nahi karna,
-
-         * warna source ke purane batches bhi destination me shift ho jayenge.
-
-         */
-
-
-
-        const inTransitBatch =
-
-          await InventoryBatch.findOne({
-
-            where: {
-
-              item_id: itemId,
-
-              status: "in_transit",
-
-            },
-
-
-
-            order: [["id", "DESC"]],
-
-
-
-            transaction,
-
-            lock: transaction.LOCK.UPDATE,
-
-          });
-
-
-
-        if (inTransitBatch) {
-
-          await inTransitBatch.update(
-
-            {
-
-              current_organization_id:
-
-                transfer.to_organization_id,
-
-
-
-              status: "delivered",
-
-            },
-
-            {
-
-              transaction,
-
-            }
-
-          );
-
-        }
-
-      }
-
-      // ===================================================
-
-      // DESTINATION MOVEMENT
-
-      // ===================================================
-
-
-
-      await createMovement({
-
-        organization_id:
-
-          transfer.to_organization_id,
-
-
-
-        item_id: itemId,
-
-
-
-        movement_type: "receive",
-
-
-
-        reference_type: "stock_transfer",
-
-
-
-        reference_id: transfer.id,
-
-
-
-        qty,
-
-
-
-        weight,
-
-
-
-        stockBefore: destinationBefore,
-
-
-
-        stockAfter: destinationAfter,
-
-
-
-        remarks:
-
-          `Received via ${transfer.transfer_no}`,
-
-
-
-        created_by: user.id,
-
-
-
-        transaction,
-
-      });
-
-
-
-      receivedItems.push({
-
-        transfer_item_id: trItem.id,
-
-        item_id: itemId,
-
-        item_name: item.item_name,
-
-        article_code: item.article_code,
-
-        sku_code: item.sku_code,
-
-        received_qty: qty,
-
-        received_weight: weight,
-
-        destination_available_qty:
-
-          destinationAfter.available_qty,
-
-        destination_available_weight:
-
-          destinationAfter.available_weight,
-
-        store_code: receiverStoreCode,
-
-      });
-
-    }
-
-
-
-    // =====================================================
-
-    // UPDATE TRANSFER
-
-    // =====================================================
-
-
-
-    await transfer.update(
-
-      {
-
-        receive_date: new Date(),
-
-
-
-        status: "received",
-
-
-
-        received_by: user.id,
-
-
-
-        remarks:
-
-          remarks || transfer.remarks,
-
-      },
-
-      {
-
-        transaction,
-
-      }
-
-    );
-
-
-
-    // =====================================================
-
-    // UPDATE REQUEST
-
-    // =====================================================
-
-
-
-    if (transfer.request_id) {
-
-      const request =
-
-        await StockRequest.findByPk(
-
-          transfer.request_id,
-
-          {
-
-            transaction,
-
-            lock: transaction.LOCK.UPDATE,
-
-          }
-
-        );
-
-
-
-      if (request) {
-
-        await request.update(
-
-          {
-
-            status: "completed",
-
-          },
-
-          {
-
-            transaction,
-
-          }
-
-        );
-
-      }
-
-    }
-
-
-
-    // =====================================================
-
-    // SYSTEM ACTIVITY
-
-    // =====================================================
-
-
-
-    await SystemActivity.create(
-
-      {
-
-        title: "Stock transfer received",
-
-
-
-        description:
-
-          `Transfer ${transfer.transfer_no} ` +
-
-          `received successfully`,
-
-
-
-        activity_type:
-
-          "stock_transfer_received",
-
-
-
-        module_name: "stock_transfer",
-
-
-
-        reference_id: transfer.id,
-
-
-
-        reference_no:
-
-          transfer.transfer_no,
-
-
-
-        district_code:
-
-          user.district_code || null,
-
-
-
-        store_code:
-
-          receiverStoreCode,
-
-
-
-        store_name:
-
-          user.store_name || null,
-
-
-
-        created_by: user.id,
-
-
-
-        created_at: new Date(),
-
-      },
-
-      {
-
-        transaction,
-
-      }
-
-    );
-
-
-
-    // =====================================================
-
-    // ACTIVITY LOG
-
-    // =====================================================
-
-
-
-    await ActivityLog.create(
-
-      {
-
-        organization_id:
-
-          user.organization_id || null,
-
-
-
-        user_id: user.id,
-
-
-
-        action:
-
-          "stock_transfer_received",
-
-
-
-        module_name: "stock_transfer",
-
-
-
-        reference_id: transfer.id,
-
-
-
-        reference_no:
-
-          transfer.transfer_no,
-
-
-
-        title: "Stock transfer received",
-
-
-
-        description:
-
-          `Transfer ${transfer.transfer_no} ` +
-
-          `received successfully`,
-
-
-
-        meta: {
-
-          transfer_id: transfer.id,
-
-
-
-          transfer_no:
-
-            transfer.transfer_no,
-
-
-
-          from_organization_id:
-
-            transfer.from_organization_id,
-
-
-
-          to_organization_id:
-
-            transfer.to_organization_id,
-
-
-
-          store_code:
-
-            receiverStoreCode,
-
-
-
-          status: "received",
-
-
-
-          remarks: remarks || null,
-
-
-
-          received_items:
-
-            receivedItems,
-
-        },
-
-
-
-        icon: "activity",
-
-
-
-        color: "green",
-
-      },
-
-      {
-
-        transaction,
-
-      }
-
-    );
-
-    await transaction.commit();
-
-
-
-    // Updated transfer response
-
-    const updatedTransfer =
-
-      await StockTransfer.findByPk(
-
-        transfer.id,
-
-        {
-
-          include: [
-
-            {
-
-              model: StockTransferItem,
-
-              as: "items",
-
-              required: false,
-
-            },
-
-          ],
-
-        }
-
-      );
-
-
-
-    return res.status(200).json({
-
-      success: true,
-
-
-
-      message:
-
-        "Stock received successfully",
-
-
-
-      data: {
-
-        transfer: updatedTransfer,
-
-        received_items: receivedItems,
-
-      },
-
-    });
-
-  } catch (error) {
-
-    if (
-
-      transaction &&
-
-      !transaction.finished
-
-    ) {
-
-      await transaction.rollback();
-
-    }
-
-
-
-    console.error(
-
-      "receiveTransfer error:",
-
-      error
-
-    );
-
-
-
-    return res.status(500).json({
-
-      success: false,
-
-
-
-      message:
-
-        "Failed to receive transfer",
-
-
-
-      error: error.message,
-
-    });
-
-  }
-
-};
-
-
-const pickStoreName = (store) => {
-  if (!store) return null;
-
-  return (
-    store.store_name ||
-    store.storeName ||
-    store.organization_name ||
-    store.organizationName ||
-    store.district_name ||
-    store.districtName ||
-    store.name ||
-    store.store_code ||
-    store.storeCode ||
-    null
-  );
-};
-
-const pickUserName = (user) => {
-  if (!user) return null;
-
-  return (
-    user.username ||
-    user.name ||
-    user.full_name ||
-    user.fullName ||
-    user.email ||
-    null
-  );
-};
-
-const buildDeliveryDetails = (plain, storeMap) => {
-  const toStore = storeMap?.get(
-    Number(plain.to_organization_id)
-  );
-
-  const lat =
-    plain.delivery_latitude ||
-    toStore?.latitude ||
-    null;
-
-  const lng =
-    plain.delivery_longitude ||
-    toStore?.longitude ||
-    null;
-
-  return {
-    delivery_address:
-      plain.delivery_address ||
-      toStore?.address ||
-      toStore?.store_address ||
-      null,
-
-    latitude: lat,
-    longitude: lng,
-
-    destination_name:
-      toStore?.store_name ||
-      toStore?.organization_name ||
-      null,
-
-    google_map_url:
-      lat && lng
-        ? `https://www.google.com/maps?q=${lat},${lng}`
-        : null,
-  };
-};
-
-const buildTransferResponse = (
-  transfers,
-  storeMap,
-  userMap,
-  complaintMap = new Map()
-) => {
-  return transfers.map((t) => {
-    const plain =
-      typeof t.toJSON === "function"
-        ? t.toJSON()
-        : t;
-
-    const complaint =
-      complaintMap.get(Number(plain.id)) ||
-      null;
-let replacementInfo = null;
-
-if (
-  Array.isArray(plain.transfer_items) &&
-  plain.transfer_items.length
-) {
-  const item =
-    plain.transfer_items.find(
-      (x) => x.external_item_data
-    );
-
-  if (item?.external_item_data) {
-    let meta = item.external_item_data;
-
-    if (typeof meta === "string") {
-      try {
-        meta = JSON.parse(meta);
-      } catch {
-        meta = null;
-      }
-    }
-
-    replacementInfo = meta;
-  }
-}
-    return {
-      id: plain.id,
-
-      transfer_no: plain.transfer_no,
-
-      tracking_number:
-        plain.tracking_number ||
-        plain.transfer_no,
-      replacement_for: replacementInfo
-  ? {
-      complaint_id:
-        replacementInfo.complaint_id,
-
-      complaint_no:
-        replacementInfo.complaint_no,
-
-      original_transfer_id:
-        replacementInfo.original_transfer_id,
-
-      original_transfer_no:
-        replacementInfo.original_transfer_no,
-    }
-  : null,
-      request_id:
-        plain.request_id,
-
-      from_organization_id:
-        plain.from_organization_id,
-
-      from_organization_name:
-        pickStoreName(
-          storeMap.get(
-            Number(
-              plain.from_organization_id
-            )
-          )
-        ) || null,
-
-      to_organization_id:
-        plain.to_organization_id,
-
-      to_organization_name:
-        pickStoreName(
-          storeMap.get(
-            Number(
-              plain.to_organization_id
-            )
-          )
-        ) || null,
-
-      delivery_details:
-        buildDeliveryDetails(
-          plain,
-          storeMap
-        ),
-
-      transfer_date:
-        plain.transfer_date,
-
-      dispatch_date:
-        plain.dispatch_date,
-
-      receive_date:
-        plain.receive_date,
-
-      expected_delivery_date:
-        plain.expected_delivery_date ||
-        null,
-
-      expected_delivery_time:
-        plain.expected_delivery_time ||
-        null,
-
-      status:
-        plain.status,
-
-      remarks:
-        plain.remarks,
-
-      approved_by:
-        plain.approved_by,
-
-      approved_by_name:
-        pickUserName(
-          userMap.get(
-            Number(
-              plain.approved_by
-            )
-          )
-        ) || null,
-
-      dispatched_by:
-        plain.dispatched_by,
-
-      dispatched_by_name:
-        pickUserName(
-          userMap.get(
-            Number(
-              plain.dispatched_by
-            )
-          )
-        ) || null,
-
-      received_by:
-        plain.received_by,
-
-      received_by_name:
-        pickUserName(
-          userMap.get(
-            Number(
-              plain.received_by
-            )
-          )
-        ) || null,
-
-      created_by:
-        plain.created_by,
-
-      created_by_name:
-        pickUserName(
-          userMap.get(
-            Number(
-              plain.created_by
-            )
-          )
-        ) || null,
-
-      driver_details: {
-        driver_name:
-          plain.driver_name ||
-          null,
-
-        driver_phone:
-          plain.driver_phone ||
-          null,
-
-        vehicle_number:
-          plain.vehicle_number ||
-          null,
-
-        tracking_number:
-          plain.tracking_number ||
-          null,
-
-        driver_photo_url:
-          plain.driver_photo_url ||
-          null,
-      },
-
-      media: {
-        dispatch_image_url:
-          plain.dispatch_image_url ||
-          null,
-
-        dispatch_video_url:
-          plain.dispatch_video_url ||
-          null,
-
-        receive_image_url:
-          plain.receive_image_url ||
-          null,
-
-        e_way_bill_url:
-          plain.e_way_bill_url ||
-          null,
-      },
-
-      // ===================================================
-      // COMPLAINT DETAILS
-      // ===================================================
-
-      complaint: complaint
-        ? {
-            complaint_exists: true,
-
-            complaint_id:
-              complaint.id,
-
-            complaint_no:
-              complaint.complaint_no,
-
-            complaint_type:
-              complaint.complaint_type,
-
-            complaint_status:
-              complaint.status,
-
-            complaint_created_at:
-              complaint.created_at,
-          }
-        : {
-            complaint_exists:
-              false,
-
-            complaint_id:
-              null,
-
-            complaint_no:
-              null,
-
-            complaint_type:
-              null,
-
-            complaint_status:
-              null,
-
-            complaint_created_at:
-              null,
-          },
-
-      created_at:
-        plain.created_at,
-
-      updated_at:
-        plain.updated_at,
-
-      transfer_items:
-        plain.transfer_items ||
-        [],
-    };
-  });
-};
-
-const buildTransferSummary = (transfers = []) => {
-  let inTransit = 0;
-  let shipments = 0;
-  let goodsReceipt = 0;
-
-  for (const row of transfers) {
-    const status = String(row.status || "").toLowerCase();
-
-    if (["approved", "dispatched", "in_transit"].includes(status)) {
-      inTransit += 1;
-    }
-
-    if (["approved", "dispatched", "in_transit", "received"].includes(status)) {
-      shipments += 1;
-    }
-
-    if (status === "received") {
-      goodsReceipt += 1;
-    }
-  }
-
-  return {
-    in_transit: inTransit,
-    shipments,
-    goods_receipt: goodsReceipt,
-  };
-};
-
-const loadTransferMeta = async (transfers = []) => {
-  const orgIds = [
-    ...new Set(
-      transfers
-        .flatMap((t) => [
-          Number(t.from_organization_id || 0),
-          Number(t.to_organization_id || 0),
-        ])
-        .filter(Boolean)
-    ),
-  ];
-
-  const userIds = [
-    ...new Set(
-      transfers
-        .flatMap((t) => [
-          Number(t.created_by || 0),
-          Number(t.approved_by || 0),
-          Number(t.dispatched_by || 0),
-          Number(t.received_by || 0),
-        ])
-        .filter(Boolean)
-    ),
-  ];
-
-  const stores = orgIds.length
-    ? await Store.findAll({
-        where: { id: { [Op.in]: orgIds } },
-      })
-    : [];
-
-  const users = userIds.length
-    ? await User.findAll({
-        where: { id: { [Op.in]: userIds } },
-        attributes: ["id", "username", "email"],
-      })
-    : [];
-
-  return {
-    storeMap: new Map(stores.map((s) => [Number(s.id), s])),
-    userMap: new Map(users.map((u) => [Number(u.id), u])),
-  };
-};
-
-// ==========================================
-// INCOMING TRANSFERS
-
-
-/* =====================================================
-   COMMON HELPERS
-===================================================== */
-
-const normalizeRole = (role = "") =>
-  String(role || "").trim().toLowerCase();
-
-const normalizeLevel = (level = "") =>
-  String(level || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-
-const normalizeStatus = (status = "") =>
-  String(status || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-
-const TRANSFER_STATUS = Object.freeze({
-  APPROVED: "approved",
-  DISPATCHED: "dispatched",
-  IN_TRANSIT: "in_transit",
-  RECEIVED: "received",
-});
-
-const ACTIVE_TRANSFER_STATUSES = Object.freeze([
-  TRANSFER_STATUS.APPROVED,
-  TRANSFER_STATUS.DISPATCHED,
-  TRANSFER_STATUS.IN_TRANSIT,
-  TRANSFER_STATUS.RECEIVED,
-]);
-
-const SHIPMENT_STATUSES = Object.freeze([
-  TRANSFER_STATUS.APPROVED,
-  TRANSFER_STATUS.DISPATCHED,
-]);
-
-const IN_TRANSIT_STATUSES = Object.freeze([
-  TRANSFER_STATUS.IN_TRANSIT,
-]);
-
-const GOODS_RECEIPT_STATUSES = Object.freeze([
-  TRANSFER_STATUS.RECEIVED,
-]);
-
-const RECEIVED_STATUSES = Object.freeze([
-  TRANSFER_STATUS.RECEIVED,
-]);
-
-const getCurrentOrganizationId = (user) => {
-  const id =
-    user?.organization_id ||
-    user?.organizationId;
-
-  const parsed = Number(id);
-
-  return Number.isFinite(parsed) &&
-    parsed > 0
-    ? parsed
-    : null;
-};
-
-const getPositiveNumber = (value) => {
-  const parsed = Number(value);
-
-  return Number.isFinite(parsed) &&
-    parsed > 0
-    ? parsed
-    : null;
-};
-
-/* =====================================================
-   ACCESS HELPERS
-===================================================== */
-
-/**
- * ONLY SUPER ADMIN SHOULD HAVE GLOBAL ACCESS
- */
-const isGlobalUser = (user) => {
-  const role = normalizeRole(user?.role);
-
-  return ["super_admin"].includes(role);
-};
-
-const isHeadUser = (user) => {
-  const level = normalizeLevel(
-    user?.organization_level
-  );
-
-  return [
-    "head",
-    "head_office",
-    "corporate",
-  ].includes(level);
-};
-
-const isDistrictUser = (user) => {
-  const level = normalizeLevel(
-    user?.organization_level
-  );
-
-  return [
-    "district",
-    "district_office",
-    "district_admin",
-  ].includes(level);
-};
-
-const isRetailUser = (user) => {
-  const level = normalizeLevel(
-    user?.organization_level
-  );
-
-  return [
-    "retail",
-    "store",
-    "store_admin",
-    "branch",
-  ].includes(level);
-};
-
-const getRequestedStoreId = (
-  query = {},
-  direction = "incoming"
-) => {
-  if (direction === "outgoing") {
-    return (
-      getPositiveNumber(query.store_id) ||
-      getPositiveNumber(
-        query.organization_id
-      ) ||
-      getPositiveNumber(
-        query.from_organization_id
-      )
-    );
-  }
-
-  return (
-    getPositiveNumber(query.store_id) ||
-    getPositiveNumber(
-      query.organization_id
-    ) ||
-    getPositiveNumber(
-      query.to_organization_id
-    )
-  );
-};
-
-/* =====================================================
-   SUMMARY BUILDER
-===================================================== */
-
-const buildCardSummary = (
-  transfers = [],
-  totalKey = "incoming"
-) => {
-  const summary = {
-    [totalKey]: 0,
-
-    in_transit: 0,
-    shipment: 0,
-    goods_receipt: 0,
-
-    pending_receive: 0,
-    received: 0,
-
-    totalIncoming: 0,
-    totalOutgoing: 0,
-    inTransit: 0,
-    shipments: 0,
-    goodsReceipt: 0,
-    pendingReceive: 0,
-    receivedTransfers: 0,
-  };
-
-  for (const transfer of transfers) {
-    const status = normalizeStatus(
-      transfer?.status
-    );
-
-    if (
-      !ACTIVE_TRANSFER_STATUSES.includes(
-        status
-      )
-    ) {
-      continue;
-    }
-
-    summary[totalKey] += 1;
-
-    if (
-      IN_TRANSIT_STATUSES.includes(status)
-    ) {
-      summary.in_transit += 1;
-    }
-
-    if (
-      SHIPMENT_STATUSES.includes(status)
-    ) {
-      summary.shipment += 1;
-    }
-
-    if (
-      GOODS_RECEIPT_STATUSES.includes(
-        status
-      )
-    ) {
-      summary.goods_receipt += 1;
-      summary.received += 1;
-    }
-
-    if (
-      !RECEIVED_STATUSES.includes(status)
-    ) {
-      summary.pending_receive += 1;
-    }
-  }
-
-  summary.totalIncoming =
-    totalKey === "incoming"
-      ? summary.incoming
-      : 0;
-
-  summary.totalOutgoing =
-    totalKey === "outgoing"
-      ? summary.outgoing
-      : 0;
-
-  summary.inTransit =
-    summary.in_transit;
-
-  summary.shipments =
-    summary.shipment;
-
-  summary.goodsReceipt =
-    summary.goods_receipt;
-
-  summary.pendingReceive =
-    summary.pending_receive;
-
-  summary.receivedTransfers =
-    summary.received;
-
-  return summary;
-};
-
-/* =====================================================
-   INCOMING HELPERS
-===================================================== */
-
-const getIncomingTransferWhereCondition = (
-  user,
-  query = {}
-) => {
-  const loginOrganizationId =
-    getCurrentOrganizationId(user);
-
-  const requestedStoreId =
-    getRequestedStoreId(
-      query,
-      "incoming"
-    );
-
-  if (
-    !loginOrganizationId &&
-    !isGlobalUser(user)
-  ) {
-    return { id: null };
-  }
-
-  const where = {};
-
-  /**
-   * SUPER ADMIN
-   * Can see everything
-   */
-  if (isGlobalUser(user)) {
-    if (requestedStoreId) {
-      where.to_organization_id =
-        requestedStoreId;
-    }
-
-    return where;
-  }
-
-  /**
-   * HEAD OFFICE
-   * Can see all
-   * Optional filter support
-   */
-  if (isHeadUser(user)) {
-    if (requestedStoreId) {
-      where.to_organization_id =
-        requestedStoreId;
-    }
-
-    return where;
-  }
-
-  /**
-   * DISTRICT USER
-   * Only own organization
-   */
-  if (isDistrictUser(user)) {
-    where.to_organization_id =
-      loginOrganizationId;
-
-    /**
-     * Prevent URL tampering
-     */
-    if (
-      requestedStoreId &&
-      requestedStoreId !==
-        loginOrganizationId
-    ) {
-      return { id: null };
-    }
-
-    return where;
-  }
-
-  /**
-   * RETAIL USER
-   * Only own organization
-   */
-  if (isRetailUser(user)) {
-    where.to_organization_id =
-      loginOrganizationId;
-
-    /**
-     * Prevent URL tampering
-     */
-    if (
-      requestedStoreId &&
-      requestedStoreId !==
-        loginOrganizationId
-    ) {
-      return { id: null };
-    }
-
-    return where;
-  }
-
-  /**
-   * Fallback security
-   */
-  where.to_organization_id =
-    loginOrganizationId;
-
-  return where;
-};
-
-const getIncomingListWhereCondition = (
-  user,
-  query = {}
-) => {
-  const where =
-    getIncomingTransferWhereCondition(
-      user,
-      query
-    );
-
-  const status = normalizeStatus(
-    query?.status
-  );
-
-  if (status) {
-    where.status = status;
-  } else {
-    where.status = {
-      [Op.in]:
-        ACTIVE_TRANSFER_STATUSES,
-    };
-  }
-
-  return where;
-};
-
-/* =====================================================
-   OUTGOING HELPERS
-===================================================== */
-
-const getOutgoingTransferWhereCondition = (
-  user,
-  query = {}
-) => {
-  const loginOrganizationId =
-    getCurrentOrganizationId(user);
-
-  const requestedStoreId =
-    getRequestedStoreId(
-      query,
-      "outgoing"
-    );
-
-  if (
-    !loginOrganizationId &&
-    !isGlobalUser(user)
-  ) {
-    return { id: null };
-  }
-
-  const where = {};
-
-  /**
-   * SUPER ADMIN
-   */
-  if (isGlobalUser(user)) {
-    if (requestedStoreId) {
-      where.from_organization_id =
-        requestedStoreId;
-    }
-
-    return where;
-  }
-
-  /**
-   * HEAD OFFICE
-   * Can see all
-   */
-  if (isHeadUser(user)) {
-    if (requestedStoreId) {
-      where.from_organization_id =
-        requestedStoreId;
-    }
-
-    return where;
-  }
-
-  /**
-   * DISTRICT USER
-   */
-  if (isDistrictUser(user)) {
-    where.from_organization_id =
-      loginOrganizationId;
-
-    if (
-      requestedStoreId &&
-      requestedStoreId !==
-        loginOrganizationId
-    ) {
-      return { id: null };
-    }
-
-    return where;
-  }
-
-  /**
-   * RETAIL USER
-   */
-  if (isRetailUser(user)) {
-    where.from_organization_id =
-      loginOrganizationId;
-
-    if (
-      requestedStoreId &&
-      requestedStoreId !==
-        loginOrganizationId
-    ) {
-      return { id: null };
-    }
-
-    return where;
-  }
-
-  /**
-   * Fallback security
-   */
-  where.from_organization_id =
-    loginOrganizationId;
-
-  return where;
-};
-
-const getOutgoingListWhereCondition = (
-  user,
-  query = {}
-) => {
-  const where =
-    getOutgoingTransferWhereCondition(
-      user,
-      query
-    );
-
-  const status = normalizeStatus(
-    query?.status
-  );
-
-  if (status) {
-    where.status = status;
-  } else {
-    where.status = {
-      [Op.in]:
-        ACTIVE_TRANSFER_STATUSES,
-    };
-  }
-
-  return where;
-};
-/* =====================================================
-   INCOMING TRANSFERS
-===================================================== */
-
-export const getIncomingTransfers = async (
-  req,
-  res
-) => {
-  try {
-    const user = req.user;
-
-    // =====================================================
-    // AUTHORIZATION
-    // =====================================================
-
-    if (
-      !user?.organization_id &&
-      !user?.organizationId &&
-      !isGlobalUser(user)
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "Unauthorized user",
-      });
-    }
-
-    // =====================================================
-    // FILTERS
-    // =====================================================
-
-    const listWhere =
-      getIncomingListWhereCondition(
-        user,
-        req.query
-      );
-
-    const summaryWhere =
-      getIncomingTransferWhereCondition(
-        user,
-        req.query
-      );
-
-    summaryWhere.status = {
-      [Op.in]:
-        ACTIVE_TRANSFER_STATUSES,
-    };
-
-    // =====================================================
-    // FETCH TRANSFERS
-    // =====================================================
-
-    const [
-      transfers,
-      summaryTransfers,
-    ] = await Promise.all([
-      StockTransfer.findAll({
-        where: listWhere,
-
-        include: [
-          {
-            model: StockTransferItem,
-            as: "transfer_items",
-            required: false,
-          },
-        ],
-
-        order: [
-          ["created_at", "DESC"],
-        ],
-      }),
-
-      StockTransfer.findAll({
-        where: summaryWhere,
-
-        attributes: [
-          "id",
-          "status",
-          "from_organization_id",
-          "to_organization_id",
-          "created_at",
-        ],
-
-        order: [
-          ["created_at", "DESC"],
-        ],
-      }),
-    ]);
-
-    // =====================================================
-    // LOAD STORE & USER META
-    // =====================================================
-
-    const { storeMap, userMap } =
-      await loadTransferMeta(
-        transfers
-      );
-
-    // =====================================================
-    // LOAD COMPLAINTS
-    // =====================================================
-
-    const transferIds =
-      transfers
-        .map((transfer) =>
-          Number(transfer.id)
-        )
-        .filter(Boolean);
-
-    let complaintMap =
-      new Map();
-
-    if (transferIds.length) {
-      const complaints =
-        await StockTransferComplaint.findAll(
-          {
-            where: {
-              transfer_id: {
-                [Op.in]:
-                  transferIds,
-              },
-            },
-
-            attributes: [
-              "id",
-              "transfer_id",
-              "complaint_no",
-              "complaint_type",
-              "status",
-              "created_at",
-            ],
-
-            order: [
-              [
-                "created_at",
-                "DESC",
-              ],
-            ],
-
-            raw: true,
-          }
-        );
-
-      complaintMap =
-        new Map();
-
-      for (const complaint of complaints) {
-        const transferId =
-          Number(
-            complaint.transfer_id
-          );
-
-        /**
-         * Agar multiple complaints hain
-         * toh latest complaint hi lenge.
-         */
-
-        if (
-          !complaintMap.has(
-            transferId
-          )
-        ) {
-          complaintMap.set(
-            transferId,
-            complaint
-          );
-        }
-      }
-    }
-
-    // =====================================================
-    // BUILD RESPONSE
-    // =====================================================
-
-    const responseData =
-      buildTransferResponse(
-        transfers,
-        storeMap,
-        userMap,
-        complaintMap
-      );
-
-    // =====================================================
-    // ADD DIRECTION
-    // =====================================================
-
-    const data =
-      addTransferDirection(
-        responseData,
-        user
-      );
-
-    // =====================================================
-    // SUMMARY
-    // =====================================================
-
-    const summary =
-      buildCardSummary(
-        summaryTransfers,
-        "incoming"
-      );
-
-    // =====================================================
-    // RESPONSE
-    // =====================================================
-
-    return res.status(200).json({
-      success: true,
-
-      summary,
-
-      count:
-        summary.incoming,
-
-      data,
-    });
-  } catch (error) {
-    console.error(
-      "getIncomingTransfers error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-
-      message:
-        "Failed to fetch incoming transfers",
-
-      error:
-        error.message,
-    });
-  }
-};
-
-/* =====================================================
-   OUTGOING TRANSFERS
-===================================================== */
-
-export const getOutgoingTransfers = async (
-  req,
-  res
-) => {
-  try {
-    const user = req.user;
-
-    // =====================================================
-    // AUTHORIZATION
-    // =====================================================
-
-    if (
-      !user?.organization_id &&
-      !user?.organizationId &&
-      !isGlobalUser(user)
-    ) {
-      return res.status(401).json({
-        success: false,
-        message: "Unauthorized user",
-      });
-    }
-
-    // =====================================================
-    // FILTERS
-    // =====================================================
-
-    const listWhere =
-      getOutgoingListWhereCondition(
-        user,
-        req.query
-      );
-
-    const summaryWhere =
-      getOutgoingTransferWhereCondition(
-        user,
-        req.query
-      );
-
-    summaryWhere.status = {
-      [Op.in]:
-        ACTIVE_TRANSFER_STATUSES,
-    };
-
-    // =====================================================
-    // FETCH TRANSFERS
-    // =====================================================
-
-    const [
-      transfers,
-      summaryTransfers,
-    ] = await Promise.all([
-      StockTransfer.findAll({
-        where: listWhere,
-
-     include: [
-  {
-    model: StockTransferItem,
-    as: "transfer_items",
-    required: false,
-    attributes: [
-      "id",
-      "transfer_id",
-      "item_id",
-      "qty",
-      "weight",
-      "rate",
-      "remarks",
-      "external_item_data",
-    ],
-  },
-],
-
-        order: [
-          ["created_at", "DESC"],
-        ],
-      }),
-
-      StockTransfer.findAll({
-        where: summaryWhere,
-
-        attributes: [
-          "id",
-          "status",
-          "from_organization_id",
-          "to_organization_id",
-          "created_at",
-        ],
-
-        order: [
-          ["created_at", "DESC"],
-        ],
-      }),
-    ]);
-
-    // =====================================================
-    // LOAD STORE & USER META
-    // =====================================================
-
-    const { storeMap, userMap } =
-      await loadTransferMeta(
-        transfers
-      );
-
-    // =====================================================
-    // LOAD COMPLAINTS
-    // =====================================================
-
-    const transferIds =
-      transfers
-        .map((transfer) =>
-          Number(transfer.id)
-        )
-        .filter(Boolean);
-
-    let complaintMap =
-      new Map();
-
-    if (transferIds.length) {
-      const complaints =
-        await StockTransferComplaint.findAll({
-          where: {
-            transfer_id: {
-              [Op.in]:
-                transferIds,
-            },
-          },
-
-          attributes: [
-            "id",
-            "transfer_id",
-            "complaint_no",
-            "complaint_type",
-            "status",
-            "created_at",
-          ],
-
-          order: [
-            [
-              "created_at",
-              "DESC",
-            ],
-          ],
-
-          raw: true,
-        });
-
-      complaintMap =
-        new Map();
-
-      for (const complaint of complaints) {
-        const transferId =
-          Number(
-            complaint.transfer_id
-          );
-
-        // Keep latest complaint only
-        if (
-          !complaintMap.has(
-            transferId
-          )
-        ) {
-          complaintMap.set(
-            transferId,
-            complaint
-          );
-        }
-      }
-    }
-
-    // =====================================================
-    // BUILD RESPONSE
-    // =====================================================
-
-    const responseData =
-      buildTransferResponse(
-        transfers,
-        storeMap,
-        userMap,
-        complaintMap
-      );
-
-    // =====================================================
-    // ADD DIRECTION
-    // =====================================================
-
-    const data =
-      addTransferDirection(
-        responseData,
-        user
-      );
-
-    // =====================================================
-    // SUMMARY
-    // =====================================================
-
-    const summary =
-      buildCardSummary(
-        summaryTransfers,
-        "outgoing"
-      );
-
-    // =====================================================
-    // RESPONSE
-    // =====================================================
-
-    return res.status(200).json({
-      success: true,
-      summary,
-      count: summary.outgoing,
-      data,
-    });
-  } catch (error) {
-    console.error(
-      "getOutgoingTransfers error:",
-      error
-    );
-
-    return res.status(500).json({
-      success: false,
-      message:
-        "Failed to fetch outgoing transfers",
-      error: error.message,
-    });
-  }
-};
-// ==========================================
-// SINGLE TRANSFER DETAILS
-// ==========================================
-export const getTransferDetails = async (req, res) => {
-
-  try {
-
-    const { id } = req.params;
-
-    const user = req.user;
-
-
-
-    const transfer = await StockTransfer.findByPk(id, {
-
-      include: [
-
-        {
-
-          model: StockTransferItem,
-
-          as: "transfer_items",
-
-          include: [
-
-            {
-
-              model: Item,
-
-              as: "item",
-
-              attributes: [
-
-                "id",
-
-                "item_name",
-
-                "article_code",
-
-                "category",
-
-                "sale_rate",
-
-                "gross_weight",
-
-                "net_weight",
-
-              ],
-
-            },
-
-          ],
-
-        },
-
-      ],
-
-    });
-
-
-
-    if (!transfer) {
-
-      return res.status(404).json({
-
-        success: false,
-
-        message: "Transfer not found",
-
-      });
-
-    }
-
-
-
-    const plainTransfer = transfer.get({ plain: true });
-
-
-
-    if (
-
-      Number(user.organization_id) !==
-
-        Number(plainTransfer.from_organization_id) &&
-
-      Number(user.organization_id) !==
-
-        Number(plainTransfer.to_organization_id) &&
-
-      String(user.role || "").toLowerCase() !== "super_admin"
-
-    ) {
-
-      return res.status(403).json({
-
-        success: false,
-
-        message: "You are not allowed to view this transfer",
-
-      });
-
-    }
-
-
-
-    // =====================================================
-
-    // FETCH STORES
-
-    // =====================================================
-
-
-
-    const stores = await Store.findAll({
-
-      where: {
-
-        id: {
-
-          [Op.in]: [
-
-            Number(plainTransfer.from_organization_id),
-
-            Number(plainTransfer.to_organization_id),
-
-          ],
-
-        },
-
-      },
-
-    });
-
-
-
-    const storeMap = new Map(
-
-      stores.map((store) => [Number(store.id), store])
-
-    );
-
-
-
-    // =====================================================
-
-    // FETCH USERS
-
-    // =====================================================
-
-
-
-    const userIds = [
-
-      Number(plainTransfer.created_by || 0),
-
-      Number(plainTransfer.approved_by || 0),
-
-      Number(plainTransfer.dispatched_by || 0),
-
-      Number(plainTransfer.received_by || 0),
-
-    ].filter(Boolean);
-
-
-
-    const users = userIds.length
-
-      ? await User.findAll({
-
-          where: {
-
-            id: {
-
-              [Op.in]: userIds,
-
-            },
-
-          },
-
-          attributes: ["id", "username", "email"],
-
-        })
-
-      : [];
-
-
-
-    const userMap = new Map(
-
-      users.map((user) => [Number(user.id), user])
-
-    );
-
-
-
-    // =====================================================
-
-    // FETCH COMPLAINTS FOR THIS TRANSFER
-
-    // =====================================================
-
-
-
-    const complaints = await StockTransferComplaint.findAll({
-
-      where: {
-
-        transfer_id: plainTransfer.id,
-
-      },
-
-      order: [["created_at", "DESC"]],
-
-    });
-
-
-
-    /**
-
-     * Key:
-
-     * transfer_item_id
-
-     *
-
-     * Value:
-
-     * Complaint Details
-
-     */
-
-
-
-    const complaintMap = new Map();
-
-
-
-    for (const complaint of complaints) {
-
-      const complaintItems = Array.isArray(complaint.items)
-
-        ? complaint.items
-
-        : [];
-
-
-
-      for (const item of complaintItems) {
-
-        complaintMap.set(Number(item.transfer_item_id), {
-
-          complaint_exists: true,
-
-
-
-          complaint_id: complaint.id,
-
-          complaint_no: complaint.complaint_no,
-
-
-
-          complaint_status: complaint.status,
-
-
-
-          complaint_type: complaint.complaint_type,
-
-
-
-          description: complaint.description,
-
-
-
-          resolution_note: complaint.resolution_note,
-
-
-
-          raised_by: complaint.raised_by,
-
-
-
-          created_at: complaint.created_at,
-
-
-
-          updated_at: complaint.updated_at,
-
-
-
-          sent_qty: Number(item.sent_qty || 0),
-
-
-
-          received_qty: Number(item.received_qty || 0),
-
-
-
-          shortage_qty: Number(item.shortage_qty || 0),
-
-
-
-          sent_weight: Number(item.sent_weight || 0),
-
-
-
-          received_weight: Number(item.received_weight || 0),
-
-
-
-          shortage_weight: Number(item.shortage_weight || 0),
-
-
-
-          note: item.note || null,
-
-        });
-
-      }
-
-    }
-
-
-
-    // =====================================================
-
-    // RESPONSE DATA
-
-    // =====================================================
-
-
-
-    const data = {
-
-      id: plainTransfer.id,
-
-
-
-      transfer_no: plainTransfer.transfer_no,
-
-
-
-      tracking_number:
-
-        plainTransfer.tracking_number || plainTransfer.transfer_no,
-
-
-
-      status: plainTransfer.status,
-
-
-
-      remarks: plainTransfer.remarks,
-
-
-
-      from_organization_id: plainTransfer.from_organization_id,
-
-
-
-      from_organization_name: pickStoreName(
-
-        storeMap.get(Number(plainTransfer.from_organization_id))
-
-      ),
-
-
-
-      to_organization_id: plainTransfer.to_organization_id,
-
-
-
-      to_organization_name: pickStoreName(
-
-        storeMap.get(Number(plainTransfer.to_organization_id))
-
-      ),
-
-
-
-      transfer_date: plainTransfer.transfer_date,
-
-
-
-      dispatch_date: plainTransfer.dispatch_date,
-
-
-
-      receive_date: plainTransfer.receive_date,
-
-
-
-      expected_delivery_date:
-
-        plainTransfer.expected_delivery_date || null,
-
-
-
-      expected_delivery_time:
-
-        plainTransfer.expected_delivery_time || null,
-
-
-
-      e_way_bill_url:
-
-        plainTransfer.e_way_bill_url || null,
-
-
-
-      driver_details: {
-
-        driver_name:
-
-          plainTransfer.driver_name || null,
-
-
-
-        driver_phone:
-
-          plainTransfer.driver_phone || null,
-
-
-
-        vehicle_number:
-
-          plainTransfer.vehicle_number || null,
-
-
-
-        tracking_number:
-
-          plainTransfer.tracking_number || null,
-
-
-
-        driver_photo_url:
-
-          plainTransfer.driver_photo_url || null,
-
-      },
-
-
-
-      media: {
-
-        dispatch_image_url:
-
-          plainTransfer.dispatch_image_url || null,
-
-
-
-        dispatch_video_url:
-
-          plainTransfer.dispatch_video_url || null,
-
-
-
-        receive_image_url:
-
-          plainTransfer.receive_image_url || null,
-
-
-
-        e_way_bill_url:
-
-          plainTransfer.e_way_bill_url || null,
-
-      },
-
-
-
-      created_by: {
-
-        id: plainTransfer.created_by,
-
-
-
-        name: pickUserName(
-
-          userMap.get(Number(plainTransfer.created_by))
-
-        ),
-
-      },
-
-
-
-      approved_by: {
-
-        id: plainTransfer.approved_by,
-
-
-
-        name: pickUserName(
-
-          userMap.get(Number(plainTransfer.approved_by))
-
-        ),
-
-      },
-
-
-
-      dispatched_by: {
-
-        id: plainTransfer.dispatched_by,
-
-
-
-        name: pickUserName(
-
-          userMap.get(Number(plainTransfer.dispatched_by))
-
-        ),
-
-      },
-
-
-
-      received_by: {
-
-        id: plainTransfer.received_by,
-
-
-
-        name: pickUserName(
-
-          userMap.get(Number(plainTransfer.received_by))
-
-        ),
-
-      },
-
-
-
-    products: (plainTransfer.transfer_items || []).map((row) => {
-
-  const complaint =
-
-    complaintMap.get(Number(row.id)) || null;
-
-
-
-  return {
-
-    id: row.id,
-
-
-
-    item_id: row.item_id,
-
-
-
-    // Requested Quantity
-
-    requested_qty: Number(row.qty || 0),
-
-
-
-    // Actual Transfer Quantity
-
-    qty: Number(row.qty || 0),
-
-
-
-    weight: Number(row.weight || 0),
-
-
-
-    remarks: row.remarks || null,
-
-
-
-    item_name: row.item?.item_name || null,
-
-
-
-    article_code: row.item?.article_code || null,
-
-
-
-    category: row.item?.category || null,
-
-
-
-    rate: Number(row.item?.sale_rate || 0),
-
-
-
-    gross_weight: Number(
-
-      row.item?.gross_weight || 0
-
-    ),
-
-
-
-    net_weight: Number(
-
-      row.item?.net_weight || 0
-
-    ),
-
-
-
-    complaint: complaint
-
-      ? {
-
-          complaint_exists: true,
-
-
-
-          complaint_id: complaint.complaint_id,
-
-
-
-          complaint_no: complaint.complaint_no,
-
-
-
-          complaint_status:
-
-            complaint.complaint_status,
-
-
-
           complaint_type:
-
             complaint.complaint_type,
 
+          items: complaintItems,
 
+          image_1_url: image1Url,
+          image_2_url: image2Url,
+          video_url: videoUrl,
 
-          description:
+          complaint_status: "open",
 
-            complaint.description,
+          transfer_status:
+            transfer.status,
 
+          transfer_status_changed: false,
 
-
-          resolution_note:
-
-            complaint.resolution_note,
-
-
-
-          raised_by:
-
-            complaint.raised_by,
-
-
-
-          created_at:
-
-            complaint.created_at,
-
-
-
-          updated_at:
-
-            complaint.updated_at,
-
-
-
-          sent_qty:
-
-            complaint.sent_qty,
-
-
-
-          received_qty:
-
-            complaint.received_qty,
-
-
-
-          shortage_qty:
-
-            complaint.shortage_qty,
-
-
-
-          sent_weight:
-
-            complaint.sent_weight,
-
-
-
-          received_weight:
-
-            complaint.received_weight,
-
-
-
-          shortage_weight:
-
-            complaint.shortage_weight,
-
-
-
-          note:
-
-            complaint.note,
-
-        }
-
-      : {
-
-          complaint_exists: false,
-
-
-
-          complaint_id: null,
-
-
-
-          complaint_no: null,
-
-
-
-          complaint_status: null,
-
-
-
-          complaint_type: null,
-
-
-
-          description: null,
-
-
-
-          resolution_note: null,
-
-
-
-          raised_by: null,
-
-
-
-          created_at: null,
-
-
-
-          updated_at: null,
-
-
-
-          sent_qty: 0,
-
-
-
-          received_qty: 0,
-
-
-
-          shortage_qty: 0,
-
-
-
-          sent_weight: 0,
-
-
-
-          received_weight: 0,
-
-
-
-          shortage_weight: 0,
-
-
-
-          note: null,
-
+          remaining_items_receivable: true,
         },
 
-  };
-
-}),
-
-    };
-
-
-
-    return res.status(200).json({
-
-      success: true,
-
-      message: "Transfer details fetched successfully",
-
-      data,
-
-    });
-
-  } catch (error) {
-
-    console.error("getTransferDetails error:", error);
-
-
-
-    return res.status(500).json({
-
-      success: false,
-
-      message: "Failed to fetch transfer details",
-
-      error: error.message,
-
-    });
-
-  }
-
-};
-
-export const getEWayBillByTransferId = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!id || isNaN(Number(id))) {
-      return res.status(400).json({
-        success: false,
-        message: "Valid transfer id is required",
-      });
-    }
-
-    const user = req.user;
-
-    const transfer = await StockTransfer.findOne({
-      where: { id: Number(id) },
-    });
-
-    if (!transfer) {
-      return res.status(404).json({
-        success: false,
-        message: `Transfer not found for id ${id}`,
-      });
-    }
-
-    if (
-      Number(user.organization_id) !== Number(transfer.from_organization_id) &&
-      Number(user.organization_id) !== Number(transfer.to_organization_id) &&
-      String(user.role || "").toLowerCase() !== "super_admin"
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to view this e-way bill",
-      });
-    }
-
-    if (!transfer.e_way_bill_url) {
-      return res.status(404).json({
-        success: false,
-        message: "E-way bill not uploaded",
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "E-way bill fetched successfully",
-      data: {
-        transfer_id: transfer.id,
-        transfer_no: transfer.transfer_no,
-        e_way_bill_url: transfer.e_way_bill_url,
+        icon: "complaint",
+        color: "red",
       },
-    });
-  } catch (error) {
-    console.error("getEWayBillByTransferId error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to fetch e-way bill",
-      error: error.message,
-    });
-  }
-};
-
-
-
-
-export const estimateDispatchRequestValue = async (req, res) => {
-  try {
-    const { requestId } = req.params;
-    const user = req.user;
-    const parsedItems = parseItemsFromBody(req.body);
-
-    if (!Array.isArray(parsedItems) || parsedItems.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Items are required",
-      });
-    }
-
-    const request = await StockRequest.findByPk(requestId);
-
-    if (!request) {
-      return res.status(404).json({
-        success: false,
-        message: "Stock request not found",
-      });
-    }
-
-    if (Number(request.to_organization_id) !== Number(user.organization_id)) {
-      return res.status(403).json({
-        success: false,
-        message: "You are not allowed to estimate this request",
-      });
-    }
-
-    const requestItems = await StockRequestItem.findAll({
-      where: { request_id: request.id },
-      raw: true,
-    });
-
-    const requestItemMap = new Map(
-      requestItems.map((x) => [Number(x.item_id), x])
-    );
-
-    let totalRequested = 0;
-    let totalSelectedQty = 0;
-    let totalWeight = 0;
-    let estimatedValue = 0;
-
-    const items = [];
-
-    for (const row of parsedItems) {
-      const itemId = toNumber(row.item_id);
-      const qty = toNumber(row.qty);
-
-      if (!itemId || qty < 0) {
-        return res.status(400).json({
-          success: false,
-          message: "Each item must have valid item_id and qty",
-        });
-      }
-
-      const requestItem = requestItemMap.get(itemId);
-
-      if (!requestItem) {
-        return res.status(400).json({
-          success: false,
-          message: `Requested item not found for item_id ${itemId}`,
-        });
-      }
-
-      const requestedQty = toNumber(requestItem.request_qty);
-
-      if (qty > requestedQty) {
-        return res.status(400).json({
-          success: false,
-          message: `Qty cannot exceed requested qty for item ${itemId}`,
-        });
-      }
-
-      const [itemData] = await sequelize.query(
-        `
-        SELECT 
-          i.id,
-          i.item_name,
-          i.article_code,
-          i.sku_code,
-          i.category,
-          i.metal_type,
-          i.purity,
-          i.unit,
-          COALESCE(i.gross_weight, 0) AS gross_weight,
-          COALESCE(i.net_weight, i.gross_weight, 0) AS net_weight,
-          COALESCE(i.net_weight, i.gross_weight, 0) AS per_item_weight,
-          COALESCE(i.sale_rate, i.purchase_rate, 0) AS rate
-        FROM items i
-        WHERE i.id = :itemId
-        LIMIT 1
-        `,
-        {
-          replacements: { itemId },
-          type: QueryTypes.SELECT,
-        }
-      );
-
-      if (!itemData) {
-        return res.status(404).json({
-          success: false,
-          message: `Item not found for item_id ${itemId}`,
-        });
-      }
-
-      const [stock] = await sequelize.query(
-        `
-        SELECT 
-          COALESCE(available_qty, 0) AS available_qty,
-          COALESCE(available_weight, 0) AS available_weight
-        FROM stocks
-        WHERE organization_id = :organizationId
-          AND item_id = :itemId
-        LIMIT 1
-        `,
-        {
-          replacements: {
-            organizationId: user.organization_id,
-            itemId,
-          },
-          type: QueryTypes.SELECT,
-        }
-      );
-
-      const availableQty = toNumber(stock?.available_qty);
-      const availableWeight = toNumber(stock?.available_weight);
-
-      const perItemWeight = toNumber(itemData.per_item_weight);
-      const rate = toNumber(itemData.rate);
-
-      const totalItemWeight = qty * perItemWeight;
-      const itemEstimatedValue = totalItemWeight * rate;
-
-      const isAvailable =
-        availableQty >= qty &&
-        (totalItemWeight <= 0 || availableWeight >= totalItemWeight);
-
-      totalRequested += requestedQty;
-      totalSelectedQty += qty;
-      totalWeight += totalItemWeight;
-      estimatedValue += itemEstimatedValue;
-
-      items.push({
-        item_id: itemId,
-        item_name: itemData.item_name,
-        article_code: itemData.article_code,
-        sku_code: itemData.sku_code,
-        category: itemData.category,
-        metal_type: itemData.metal_type,
-        purity: itemData.purity,
-        unit: itemData.unit,
-
-        requested_qty: requestedQty,
-        selected_qty: qty,
-
-        available_qty: availableQty,
-        available_weight: availableWeight,
-
-        gross_weight: toNumber(itemData.gross_weight),
-        net_weight: toNumber(itemData.net_weight),
-        per_item_weight: perItemWeight,
-        total_weight: Number(totalItemWeight.toFixed(3)),
-
-        rate,
-        estimated_value: Number(itemEstimatedValue.toFixed(2)),
-
-        is_available: isAvailable,
-      });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Dispatch estimate calculated successfully",
-      data: {
-        request_id: request.id,
-        request_no: request.request_no,
-        total_requested: totalRequested,
-        total_selected_qty: totalSelectedQty,
-        total_weight: Number(totalWeight.toFixed(3)),
-        estimated_value: Number(estimatedValue.toFixed(2)),
-        items,
-      },
-    });
-  } catch (error) {
-    console.error("estimateDispatchRequestValue error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: "Failed to calculate dispatch estimate",
-      error: error.message,
-    });
-  }
-};
-
-const orgLevelTextLike = (level) =>
-  where(cast(col("organization_level"), "TEXT"), {
-    [Op.iLike]: `%${level}%`,
-  });
-
-
-
-
-
-
-
-
-
-
-
-
-// district create request 
-export const createDistrictStockRequest = async (req, res) => {
-  const transaction = await sequelize.transaction();
-
-  try {
-    const user = req.user;
-
-    const {
-      target_type, // "head" OR "retail"
-      to_store_id,
-      to_store_code,
-      items,
-      priority,
-      category,
-      notes,
-    } = req.body;
-
-    const userLevel = String(user.organization_level || "").toLowerCase();
-
-    if (userLevel !== "district") {
-      await transaction.rollback();
-      return res.status(403).json({
-        success: false,
-        message: "Only district can create this stock request",
-      });
-    }
-
-    const receiverType = String(target_type || "").toLowerCase();
-
-    if (!["head", "retail"].includes(receiverType)) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "target_type must be head or retail",
-      });
-    }
-
-    if (!to_store_code) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "to_store_code is required",
-      });
-    }
-
-    if (!Array.isArray(items) || items.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "items are required",
-      });
-    }
-
-    let districtStore = await Store.findOne({
-      where: {
-        store_code: String(user.store_code || "").trim(),
-        is_active: true,
-        [Op.and]: [orgLevelTextLike("district")],
-      },
-      transaction,
-    });
-
-    if (!districtStore && user.district_code) {
-      districtStore = await Store.findOne({
-        where: {
-          store_code: String(user.district_code).trim(),
-          is_active: true,
-          [Op.and]: [orgLevelTextLike("district")],
-        },
+      {
         transaction,
-      });
-    }
-
-    if (!districtStore && user.organization_id) {
-      districtStore = await Store.findOne({
-        where: {
-          id: Number(user.organization_id),
-          is_active: true,
-          [Op.and]: [orgLevelTextLike("district")],
-        },
-        transaction,
-      });
-    }
-
-    if (!districtStore) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message:
-          "District store not found. Token organization_id/store_code is not mapped to a District store",
-        debug: {
-          token_organization_id: user.organization_id,
-          token_store_code: user.store_code,
-          token_district_code: user.district_code || null,
-        },
-      });
-    }
-
-    let receiverWhere;
-
-    if (receiverType === "head") {
-      receiverWhere = {
-        store_code: String(to_store_code).trim(),
-        is_active: true,
-        [Op.and]: [orgLevelTextLike("head")],
-      };
-    } else {
-      //  retail ka existing flow same rakha hai
-      receiverWhere = {
-        store_code: String(to_store_code).trim(),
-        organization_level: "Retail",
-        is_active: true,
-        district_id: districtStore.id,
-      };
-    }
-
-    if (to_store_id) {
-      receiverWhere.id = Number(to_store_id);
-    }
-
-    const receiverStore = await Store.findOne({
-      where: receiverWhere,
-      transaction,
-    });
-
-    if (!receiverStore) {
-      await transaction.rollback();
-      return res.status(404).json({
-        success: false,
-        message:
-          receiverType === "head"
-            ? "Head store not found"
-            : "Retail store not found under this district",
-        debug: {
-          district_id: districtStore.id,
-          district_store_code: districtStore.store_code,
-          to_store_id: to_store_id || null,
-          to_store_code,
-        },
-      });
-    }
-
-    const validItems = items
-      .filter((i) => i.item_id && Number(i.request_qty) > 0)
-      .map((i) => ({
-        item_id: Number(i.item_id),
-        request_qty: Number(i.request_qty),
-        approved_qty: 0,
-        status: "pending",
-      }));
-
-    if (validItems.length === 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "No valid items found",
-      });
-    }
-
-    const itemIds = validItems.map((i) => i.item_id);
-
-    const receiverStocks = await Stock.findAll({
-      where: {
-        organization_id: receiverStore.id,
-        item_id: { [Op.in]: itemIds },
-      },
-      attributes: ["item_id", "available_qty"],
-      transaction,
-    });
-
-    const stockMap = new Map();
-
-    receiverStocks.forEach((stock) => {
-      stockMap.set(Number(stock.item_id), Number(stock.available_qty || 0));
-    });
-
-    const unavailableItems = validItems
-      .map((item) => {
-        const availableQty = stockMap.get(item.item_id) || 0;
-
-        if (availableQty < item.request_qty) {
-          return {
-            item_id: item.item_id,
-            requested_qty: item.request_qty,
-            available_qty: availableQty,
-          };
-        }
-
-        return null;
-      })
-      .filter(Boolean);
-    if(target_type=="retail"){
-    if (unavailableItems.length > 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Selected store does not have enough stock for requested items",
-        unavailable_items: unavailableItems,
-      });
-    }
-  }
-    const request_no = `REQ-DIST-${districtStore.id}-${Date.now()}`;
-
-    const stockRequest = await StockRequest.create(
-      {
-        request_no,
-
-        from_organization_id: districtStore.id,
-        from_store_code: districtStore.store_code,
-        from_store_name: districtStore.store_name,
-
-        to_organization_id: receiverStore.id,
-        to_store_code: receiverStore.store_code,
-        to_store_name: receiverStore.store_name,
-
-       to_district_code:
-  receiverType === "retail"
-    ? districtStore.store_code
-    : receiverStore.store_code,
-
-to_district_name:
-  receiverType === "retail"
-    ? districtStore.store_name
-    : receiverStore.store_name,
-
-        priority: priority || "medium",
-        category: category || null,
-        notes: notes || null,
-        status: "pending",
-        created_by: user.id,
-      },
-      { transaction }
-    );
-
-    const requestItemsPayload = validItems.map((item) => ({
-      request_id: stockRequest.id,
-      item_id: item.item_id,
-      request_qty: item.request_qty,
-      approved_qty: 0,
-      status: "pending",
-    }));
-
-    await StockRequestItem.bulkCreate(requestItemsPayload, { transaction });
-
-    await Task.create(
-      {
-        title: "Stock request approval required",
-        description: `${districtStore.store_name} submitted stock request ${stockRequest.request_no} to ${receiverStore.store_name}`,
-        priority: priority || "medium",
-        status: "pending",
-        task_type:
-          receiverType === "head"
-            ? "district_to_head_stock_request"
-            : "district_to_retail_stock_request",
-
-        reference_id: stockRequest.id,
-        reference_no: stockRequest.request_no,
-
-        district_code: districtStore.store_code,
-        store_code: receiverStore.store_code,
-        store_name: receiverStore.store_name,
-
-        assigned_to: null,
-        created_by: user.id,
-      },
-      { transaction }
-    );
-
-    await ActivityLog.create(
-      {
-        organization_id: districtStore.id,
-        user_id: user.id,
-        action: "stock_request_created",
-        module_name: "stock_request",
-        reference_id: stockRequest.id,
-        reference_no: stockRequest.request_no,
-        title: "Stock request created",
-        description: `You created stock request ${stockRequest.request_no} for ${receiverStore.store_name}`,
-        meta: {
-          total_items: requestItemsPayload.length,
-          from_store_name: districtStore.store_name,
-          from_store_code: districtStore.store_code,
-          to_store_name: receiverStore.store_name,
-          to_store_code: receiverStore.store_code,
-          target_type: receiverType,
-        },
-        icon: "request",
-        color: "blue",
-      },
-      { transaction }
-    );
-
-    await SystemActivity.create(
-      {
-        title: "New district stock request submitted",
-        description: `${districtStore.store_name} submitted request ${stockRequest.request_no} to ${receiverStore.store_name}`,
-        activity_type: "stock_request_created",
-        module_name: "stock_request",
-        reference_id: stockRequest.id,
-        reference_no: stockRequest.request_no,
-        district_code: districtStore.store_code,
-        store_code: receiverStore.store_code,
-        store_name: receiverStore.store_name,
-        created_by: user.id,
-        created_at: new Date(),
-      },
-      { transaction }
+      }
     );
 
     await transaction.commit();
+
+    // =====================================================
+    // SUCCESS RESPONSE
+    // =====================================================
 
     return res.status(201).json({
       success: true,
-      message: "Stock request created successfully",
+
+      message:
+        "Transfer complaint raised successfully. Transfer card will remain visible and remaining items can still be received.",
+
       data: {
-        request_id: stockRequest.id,
-        request_no: stockRequest.request_no,
-        total_items: requestItemsPayload.length,
+        id: complaint.id,
+
+        complaint_no:
+          complaint.complaint_no,
+
+        transfer_id:
+          complaint.transfer_id,
+
+        transfer_no:
+          transfer.transfer_no,
+
+        transfer_status:
+          transfer.status,
+
+        transfer_status_changed: false,
+
+        card_should_remain_visible: true,
+
+        remaining_items_receivable: true,
+
+        complaint_type:
+          complaint.complaint_type,
+
+        description:
+          complaint.description,
+
+        items: complaint.items,
+
+        evidence: {
+          image_1_url:
+            complaint.image_1_url,
+
+          image_2_url:
+            complaint.image_2_url,
+
+          video_url:
+            complaint.video_url,
+        },
+
+        status: complaint.status,
+
+        raised_by:
+          complaint.raised_by,
+
+        created_at:
+          complaint.created_at,
       },
     });
   } catch (error) {
-    await transaction.rollback();
-    console.error("createDistrictStockRequest error:", error);
+    if (
+      transaction &&
+      !transaction.finished
+    ) {
+      await transaction.rollback();
+    }
+
+    console.error(
+      "raiseTransferComplaint error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
+      message:
+        "Failed to raise transfer complaint",
       error: error.message,
     });
   }
 };
 
 
-export const getHeadStore = async (req, res) => {
+/**
+ * =========================================================
+ * GET COMPLAINTS RAISED AGAINST LOGGED-IN STORE
+ * =========================================================
+ *
+ * Logged-in store sirf wahi complaints dekh payega jahan:
+ *
+ * complaint.from_organization_id === user.organization_id
+ *
+ * Matlab:
+ * Source/Sender store ke against receiver ne complaint raise ki hai.
+ *
+ * Supported query parameters:
+ *
+ * page
+ * limit
+ * status
+ * complaint_type
+ * search
+ * date_from
+ * date_to
+ *
+ * Example:
+ *
+ * GET /api/stock-transfer-complaints/store
+ *
+ * GET /api/stock-transfer-complaints/store?page=1&limit=10
+ *
+ * GET /api/stock-transfer-complaints/store?status=open
+ *
+ * GET /api/stock-transfer-complaints/store?complaint_type=quantity_shortage
+ *
+ * GET /api/stock-transfer-complaints/store?search=CMP
+ */
+export const getStoreComplaints = async (req, res) => {
   try {
-    const data = await Store.findOne({
-      where: {
-        organization_level: "Head",
-        is_active: true,
-      },
-      attributes: ["id", "store_name", "store_code"],
-    });
+    const user = req.user;
 
-    if (!data) {
-      return res.status(404).json({
+    // =====================================================
+    // USER VALIDATION
+    // =====================================================
+
+    if (!user?.id || !user?.organization_id) {
+      return res.status(401).json({
         success: false,
-        message: "Head store not found",
+        message: "Unauthorized user",
       });
     }
 
+    const storeOrganizationId = Number(
+      user.organization_id
+    );
+
+    if (
+      !storeOrganizationId ||
+      !Number.isInteger(storeOrganizationId) ||
+      storeOrganizationId <= 0
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid store organization is required",
+      });
+    }
+
+    // =====================================================
+    // QUERY PARAMETERS
+    // =====================================================
+const {
+  page = 1,
+  limit = 10,
+  status,
+  complaint_type,
+  search,
+  from_store_code,
+  to_store_code,
+  date_from,
+  date_to,
+} = req.query;
+
+    const pageNo = Math.max(
+      Number(page) || 1,
+      1
+    );
+
+    const limitNo = Math.min(
+      Math.max(Number(limit) || 10, 1),
+      100
+    );
+
+    const offset = (pageNo - 1) * limitNo;
+
+    // =====================================================
+    // COMPLAINT WHERE CONDITION
+    // =====================================================
+
+    const complaintWhere = {
+      /*
+       * Complaint logged-in store ke against
+       * raise hui honi chahiye.
+       */
+      from_organization_id:
+        storeOrganizationId,
+    };
+
+    // =====================================================
+    // STATUS FILTER
+    // =====================================================
+
+    if (
+      status &&
+      String(status).trim().toLowerCase() !==
+        "all"
+    ) {
+      complaintWhere.status = String(status)
+        .trim()
+        .toLowerCase();
+    }
+
+    // =====================================================
+    // COMPLAINT TYPE FILTER
+    // =====================================================
+
+    if (
+      complaint_type &&
+      String(complaint_type)
+        .trim()
+        .toLowerCase() !== "all"
+    ) {
+      complaintWhere.complaint_type = String(
+        complaint_type
+      )
+        .trim()
+        .toLowerCase();
+    }
+
+    // =====================================================
+    // DATE FILTER
+    // =====================================================
+
+    if (date_from || date_to) {
+      complaintWhere.created_at = {};
+
+      if (date_from) {
+        const fromDate = new Date(
+          `${date_from}T00:00:00.000Z`
+        );
+
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid date_from. Use YYYY-MM-DD format",
+          });
+        }
+
+        complaintWhere.created_at[Op.gte] =
+          fromDate;
+      }
+
+      if (date_to) {
+        const toDate = new Date(
+          `${date_to}T23:59:59.999Z`
+        );
+
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid date_to. Use YYYY-MM-DD format",
+          });
+        }
+
+        complaintWhere.created_at[Op.lte] =
+          toDate;
+      }
+    }
+    // =====================================================
+// STORE CODE FILTERS
+// =====================================================
+
+if (from_store_code) {
+  const cleanFromStoreCode = String(
+    from_store_code
+  )
+    .trim()
+    .toUpperCase();
+
+  const fromStore = await Store.findOne({
+    where: {
+      store_code: {
+        [Op.iLike]: cleanFromStoreCode,
+      },
+    },
+
+    attributes: [
+      "id",
+      "store_code",
+      "store_name",
+    ],
+
+    raw: true,
+  });
+
+  if (!fromStore) {
     return res.status(200).json({
       success: true,
-      data,
+      message:
+        "No complaints found for given from_store_code",
+
+      summary: {
+        total_complaints: 0,
+        open_complaints: 0,
+        under_review_complaints: 0,
+        resolved_complaints: 0,
+        rejected_complaints: 0,
+        closed_complaints: 0,
+      },
+
+      pagination: {
+        current_page: pageNo,
+        per_page: limitNo,
+        total_records: 0,
+        total_pages: 0,
+        has_next_page: false,
+        has_previous_page: false,
+      },
+
+      data: [],
     });
-  } catch (err) {
+  }
+
+  complaintWhere.from_organization_id =
+    Number(fromStore.id);
+}
+
+if (to_store_code) {
+  const cleanToStoreCode = String(
+    to_store_code
+  )
+    .trim()
+    .toUpperCase();
+
+  const toStore = await Store.findOne({
+    where: {
+      store_code: {
+        [Op.iLike]: cleanToStoreCode,
+      },
+    },
+
+    attributes: [
+      "id",
+      "store_code",
+      "store_name",
+    ],
+
+    raw: true,
+  });
+
+  if (!toStore) {
+    return res.status(200).json({
+      success: true,
+      message:
+        "No complaints found for given to_store_code",
+
+      summary: {
+        total_complaints: 0,
+        open_complaints: 0,
+        under_review_complaints: 0,
+        resolved_complaints: 0,
+        rejected_complaints: 0,
+        closed_complaints: 0,
+      },
+
+      pagination: {
+        current_page: pageNo,
+        per_page: limitNo,
+        total_records: 0,
+        total_pages: 0,
+        has_next_page: false,
+        has_previous_page: false,
+      },
+
+      data: [],
+    });
+  }
+
+  complaintWhere.to_organization_id =
+    Number(toStore.id);
+}
+
+    // =====================================================
+// SEARCH FILTER
+//
+// Search complaint number, description,
+// complaint type and transfer number.
+// =====================================================
+
+const normalizedSearch = String(
+  search || ""
+).trim();
+
+if (normalizedSearch) {
+  /*
+   * Transfer number StockTransfer table me hai.
+   * Pehle matching transfer IDs nikalenge.
+   */
+
+  const matchingTransfers =
+    await StockTransfer.findAll({
+      where: {
+        from_organization_id:
+          storeOrganizationId,
+
+        transfer_no: {
+          [Op.iLike]:
+            `%${normalizedSearch}%`,
+        },
+      },
+
+      attributes: ["id"],
+
+      raw: true,
+    });
+
+  const matchingTransferIds =
+    matchingTransfers
+      .map((transfer) =>
+        Number(transfer.id)
+      )
+      .filter(Boolean);
+
+  const searchConditions = [
+    {
+      complaint_no: {
+        [Op.iLike]:
+          `%${normalizedSearch}%`,
+      },
+    },
+    {
+      description: {
+        [Op.iLike]:
+          `%${normalizedSearch}%`,
+      },
+    },
+    {
+      complaint_type: {
+        [Op.iLike]:
+          `%${normalizedSearch}%`,
+      },
+    },
+  ];
+
+  if (matchingTransferIds.length > 0) {
+    searchConditions.push({
+      transfer_id: {
+        [Op.in]:
+          matchingTransferIds,
+      },
+    });
+  }
+
+  complaintWhere[Op.or] =
+    searchConditions;
+}
+    // =====================================================
+    // FETCH COMPLAINTS
+    // =====================================================
+
+    const { count, rows: complaints } =
+      await StockTransferComplaint.findAndCountAll(
+        {
+          where: complaintWhere,
+
+          order: [
+            ["created_at", "DESC"],
+            ["id", "DESC"],
+          ],
+
+          limit: limitNo,
+          offset,
+
+          distinct: true,
+        }
+      );
+
+    // =====================================================
+    // NO COMPLAINTS
+    // =====================================================
+
+    if (!complaints.length) {
+      return res.status(200).json({
+        success: true,
+
+        message:
+          "No complaints found against this store",
+
+        summary: {
+          total_complaints: count,
+          open_complaints: 0,
+          under_review_complaints: 0,
+          resolved_complaints: 0,
+          rejected_complaints: 0,
+        },
+
+        pagination: {
+          current_page: pageNo,
+          per_page: limitNo,
+          total_records: count,
+          total_pages: Math.ceil(
+            count / limitNo
+          ),
+        },
+
+        data: [],
+      });
+    }
+
+    // =====================================================
+    // FETCH RELATED TRANSFERS
+    // =====================================================
+
+    const transferIds = [
+      ...new Set(
+        complaints
+          .map((complaint) =>
+            Number(complaint.transfer_id)
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+    const transfers =
+      transferIds.length > 0
+        ? await StockTransfer.findAll({
+            where: {
+              id: {
+                [Op.in]: transferIds,
+              },
+
+              /*
+               * Additional security:
+               * Related transfer bhi logged-in
+               * store ka hona chahiye.
+               */
+              from_organization_id:
+                storeOrganizationId,
+            },
+
+            raw: true,
+          })
+        : [];
+
+    const transferMap = new Map();
+
+    for (const transfer of transfers) {
+      transferMap.set(
+        Number(transfer.id),
+        transfer
+      );
+    }
+    // =====================================================
+// FETCH RELATED STORES
+// =====================================================
+
+const organizationIds = [
+  ...new Set(
+    complaints
+      .flatMap((complaint) => [
+        Number(complaint.from_organization_id),
+        Number(complaint.to_organization_id),
+      ])
+      .filter(Boolean),
+  ),
+];
+
+const stores =
+  organizationIds.length > 0
+    ? await Store.findAll({
+        where: {
+          id: {
+            [Op.in]: organizationIds,
+          },
+        },
+
+        attributes: [
+          "id",
+          "store_code",
+          "store_name",
+          "organization_level",
+          "district_id",
+          "address",
+          "is_active",
+        ],
+
+        raw: true,
+      })
+    : [];
+
+const storeMap = new Map();
+
+for (const store of stores) {
+  storeMap.set(Number(store.id), store);
+}
+
+    // =====================================================
+    // FORMAT COMPLAINT RESPONSE
+    // =====================================================
+
+    const formattedComplaints =
+      complaints.map((complaintModel) => {
+        const complaint =
+          complaintModel.toJSON();
+
+        const transfer =
+  transferMap.get(
+    Number(complaint.transfer_id)
+  ) || null;
+
+const fromStore =
+  storeMap.get(
+    Number(
+      complaint.from_organization_id
+    )
+  ) || null;
+
+const toStore =
+  storeMap.get(
+    Number(
+      complaint.to_organization_id
+    )
+  ) || null;
+
+const complaintItems =
+  Array.isArray(complaint.items)
+    ? complaint.items
+    : [];
+        const totalSentQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.sent_qty || 0),
+            0
+          );
+
+        const totalReceivedQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.received_qty || 0
+              ),
+            0
+          );
+
+        const totalShortageQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.shortage_qty || 0
+              ),
+            0
+          );
+
+        const totalSentWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.sent_weight || 0
+              ),
+            0
+          );
+
+        const totalReceivedWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.received_weight || 0
+              ),
+            0
+          );
+
+        const totalShortageWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.shortage_weight || 0
+              ),
+            0
+          );
+
+        return {
+          complaint_id: complaint.id,
+
+          complaint_no:
+            complaint.complaint_no,
+
+          complaint_type:
+            complaint.complaint_type,
+
+          description:
+            complaint.description,
+
+         status:
+  complaint.status,
+
+complaint_status:
+  complaint.status,
+
+status_label: String(
+  complaint.status || ""
+)
+  .replace(/_/g, " ")
+  .replace(/\b\w/g, (letter) =>
+    letter.toUpperCase()
+  ),
+
+          /*
+           * Kis transfer ke against
+           * complaint raise hui hai.
+           */
+          transfer: transfer
+  ? {
+      transfer_id:
+        transfer.id,
+
+      transfer_no:
+        transfer.transfer_no,
+
+      request_id:
+        transfer.request_id ||
+        null,
+
+      status:
+        transfer.status,
+
+      dispatch_date:
+        transfer.dispatch_date ||
+        transfer.dispatched_at ||
+        null,
+
+      received_date:
+        transfer.received_date ||
+        transfer.received_at ||
+        null,
+
+      remarks:
+        transfer.remarks ||
+        null,
+    }
+  : {
+      transfer_id:
+        complaint.transfer_id,
+
+      transfer_no:
+        null,
+    },
+
+against_store: {
+  organization_id:
+    complaint.from_organization_id,
+
+  store_code:
+    fromStore?.store_code || null,
+
+  store_name:
+    fromStore?.store_name || null,
+
+  organization_level:
+    fromStore?.organization_level ||
+    null,
+
+  district_id:
+    fromStore?.district_id || null,
+
+  address:
+    fromStore?.address || null,
+},
+
+raised_by_store: {
+  organization_id:
+    complaint.to_organization_id,
+
+  store_code:
+    toStore?.store_code || null,
+
+  store_name:
+    toStore?.store_name || null,
+
+  organization_level:
+    toStore?.organization_level ||
+    null,
+
+  district_id:
+    toStore?.district_id || null,
+
+  address:
+    toStore?.address || null,
+},
+          from_organization_id:
+            complaint.from_organization_id,
+
+          to_organization_id:
+            complaint.to_organization_id,
+
+          /*
+           * Complaint items.
+           */
+          items: complaintItems,
+
+          item_summary: {
+            total_complaint_items:
+              complaintItems.length,
+
+            total_sent_qty: Number(
+              totalSentQty.toFixed(3)
+            ),
+
+            total_received_qty: Number(
+              totalReceivedQty.toFixed(3)
+            ),
+
+            total_shortage_qty: Number(
+              totalShortageQty.toFixed(3)
+            ),
+
+            total_sent_weight: Number(
+              totalSentWeight.toFixed(3)
+            ),
+
+            total_received_weight:
+              Number(
+                totalReceivedWeight.toFixed(
+                  3
+                )
+              ),
+
+            total_shortage_weight:
+              Number(
+                totalShortageWeight.toFixed(
+                  3
+                )
+              ),
+          },
+
+          evidence: {
+            image_1_url:
+              complaint.image_1_url ||
+              null,
+
+            image_2_url:
+              complaint.image_2_url ||
+              null,
+
+            video_url:
+              complaint.video_url ||
+              null,
+          },
+
+          raised_by:
+            complaint.raised_by,
+
+          resolved_by:
+            complaint.resolved_by ||
+            null,
+
+          resolution_note:
+            complaint.resolution_note ||
+            null,
+
+         reviewed_by:
+  complaint.reviewed_by || null,
+
+reviewed_at:
+  complaint.reviewed_at || null,
+
+resolved_at:
+  complaint.resolved_at || null,
+
+rejected_at:
+  complaint.rejected_at || null,
+
+closed_at:
+  complaint.closed_at || null,
+
+created_at:
+  complaint.created_at ||
+  complaint.createdAt ||
+  null,
+
+updated_at:
+  complaint.updated_at ||
+  complaint.updatedAt ||
+  null,
+        };
+      });
+
+   // =====================================================
+// STATUS-WISE SUMMARY
+// =====================================================
+
+const summaryWhere = {
+  ...complaintWhere,
+};
+
+/*
+ * Status filter summary par apply nahi hoga
+ * taaki cards me saare status counts dikhein.
+ */
+delete summaryWhere.status;
+
+const summaryRows =
+  await StockTransferComplaint.findAll({
+    where: summaryWhere,
+
+    attributes: ["status"],
+
+    raw: true,
+  });
+
+const summary = {
+  total_complaints:
+    summaryRows.length,
+
+  open_complaints: 0,
+
+  under_review_complaints: 0,
+
+  resolved_complaints: 0,
+
+  rejected_complaints: 0,
+
+  closed_complaints: 0,
+
+  other_complaints: 0,
+};
+
+for (const row of summaryRows) {
+  const currentStatus = String(
+    row.status || ""
+  )
+    .trim()
+    .toLowerCase();
+
+  if (currentStatus === "open") {
+    summary.open_complaints += 1;
+  } else if (
+    currentStatus === "under_review"
+  ) {
+    summary.under_review_complaints += 1;
+  } else if (
+    currentStatus === "resolved"
+  ) {
+    summary.resolved_complaints += 1;
+  } else if (
+    currentStatus === "rejected"
+  ) {
+    summary.rejected_complaints += 1;
+  } else if (
+    currentStatus === "closed"
+  ) {
+    summary.closed_complaints += 1;
+  } else {
+    summary.other_complaints += 1;
+  }
+}
+    // =====================================================
+    // FINAL RESPONSE
+    // =====================================================
+
+    return res.status(200).json({
+      success: true,
+
+      message:
+        "Store complaints fetched successfully",
+
+      store: {
+        organization_id:
+          storeOrganizationId,
+
+        store_code:
+          user.store_code ||
+          user.storeCode ||
+          null,
+
+        store_name:
+          user.store_name || null,
+      },
+
+      summary,
+       applied_filters: {
+    status:
+      status || "all",
+
+    complaint_type:
+      complaint_type || "all",
+
+    search:
+      search || null,
+
+    from_store_code:
+      from_store_code || null,
+
+    to_store_code:
+      to_store_code || null,
+
+    date_from:
+      date_from || null,
+
+    date_to:
+      date_to || null,
+  },
+      pagination: {
+        current_page: pageNo,
+        per_page: limitNo,
+        total_records: count,
+        total_pages: Math.ceil(
+          count / limitNo
+        ),
+        has_next_page:
+          pageNo <
+          Math.ceil(count / limitNo),
+        has_previous_page:
+          pageNo > 1,
+      },
+
+      data: formattedComplaints,
+    });
+  } catch (error) {
+    console.error(
+      "getStoreComplaints error:",
+      error
+    );
+
     return res.status(500).json({
       success: false,
-      error: err.message,
+      message:
+        "Failed to fetch store complaints",
+      error: error.message,
     });
   }
 };
 
-// import Store from "../models/Store.js";
 
-export const getRetailStoresUnderDistrict = async (req, res) => {
+/**
+ * =========================================================
+ * UPDATE STOCK TRANSFER COMPLAINT STATUS
+ * =========================================================
+ *
+ * Route:
+ * PATCH /api/stock-transfer-complaints/:complaintId/status
+ *
+ * Body:
+ * {
+ *   "status": "under_review",
+ *   "resolution_note": "Complaint verification started"
+ * }
+ *
+ * Allowed statuses:
+ * - open
+ * - under_review
+ * - resolved
+ * - rejected
+ * - closed
+ *
+ * Important:
+ * - Sirf wahi store complaint update kar sakta hai
+ *   jiske against complaint raise hui hai.
+ *
+ * - Complaint status update hone par transfer status
+ *   automatically change nahi hoga.
+ *
+ * - Transfer card aur receiving flow alag rahega.
+ */
+export const updateTransferComplaintStatus = async (
+  req,
+  res
+) => {
+  const transaction = await sequelize.transaction();
+
   try {
+    const { complaintId } = req.params;
+
+    const {
+      status,
+      resolution_note,
+    } = req.body;
+
     const user = req.user;
 
-    if (!user) {
+    // =====================================================
+    // USER VALIDATION
+    // =====================================================
+
+    if (!user?.id || !user?.organization_id) {
+      await transaction.rollback();
+
       return res.status(401).json({
         success: false,
         message: "Unauthorized user",
@@ -7192,2582 +2151,5562 @@ export const getRetailStoresUnderDistrict = async (req, res) => {
     }
 
     const organizationId = Number(
-      user.organization_id || user.organizationId || 0
+      user.organization_id
     );
 
-    const storeCode = String(user.store_code || "")
+    if (
+      !organizationId ||
+      !Number.isInteger(organizationId) ||
+      organizationId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Valid user organization is required",
+      });
+    }
+
+    // =====================================================
+    // COMPLAINT ID VALIDATION
+    // =====================================================
+
+    const parsedComplaintId = Number(complaintId);
+
+    if (
+      !parsedComplaintId ||
+      !Number.isInteger(parsedComplaintId) ||
+      parsedComplaintId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Valid complaintId is required",
+      });
+    }
+
+    // =====================================================
+    // STATUS VALIDATION
+    // =====================================================
+
+    if (!status) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "status is required",
+      });
+    }
+
+    const normalizedStatus = String(status)
+      .trim()
+      .toLowerCase();
+
+    const allowedStatuses = [
+      "open",
+      "under_review",
+      "replacement_dispatched",
+      "resolved",
+      "rejected",
+      "closed",
+    ];
+
+    if (
+      !allowedStatuses.includes(
+        normalizedStatus
+      )
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          "Invalid complaint status",
+
+        allowed_statuses: allowedStatuses,
+      });
+    }
+
+    // =====================================================
+    // RESOLUTION NOTE VALIDATION
+    //
+    // Resolved, rejected aur closed karte waqt
+    // resolution_note required rahega.
+    // =====================================================
+
+    const normalizedResolutionNote = String(
+      resolution_note || ""
+    ).trim();
+
+    const noteRequiredStatuses = [
+      "resolved",
+      "rejected",
+      "closed",
+    ];
+
+    if (
+      noteRequiredStatuses.includes(
+        normalizedStatus
+      ) &&
+      !normalizedResolutionNote
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          `resolution_note is required when complaint status is ${normalizedStatus}`,
+      });
+    }
+
+    // =====================================================
+    // FETCH COMPLAINT
+    // =====================================================
+
+    const complaint =
+      await StockTransferComplaint.findByPk(
+        parsedComplaintId,
+        {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        }
+      );
+
+    if (!complaint) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Complaint not found",
+      });
+    }
+
+    // =====================================================
+    // STORE AUTHORIZATION
+    //
+    // Complaint jis source store ke against raise hui hai,
+    // sirf wahi store status update kar sakta hai.
+    // =====================================================
+
+    if (
+      Number(
+        complaint.from_organization_id
+      ) !== organizationId
+    ) {
+      await transaction.rollback();
+
+      return res.status(403).json({
+        success: false,
+
+        message:
+          "You are not allowed to update this complaint",
+
+        details:
+          "Only the store against which the complaint was raised can update its status",
+      });
+    }
+
+    // =====================================================
+    // CURRENT STATUS
+    // =====================================================
+
+    const oldStatus = String(
+      complaint.status || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    if (oldStatus === normalizedStatus) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          `Complaint status is already ${normalizedStatus}`,
+      });
+    }
+
+    // =====================================================
+    // STATUS TRANSITION VALIDATION
+    //
+    // open         -> under_review / resolved / rejected
+    // under_review -> resolved / rejected / open
+    // resolved     -> closed
+    // rejected     -> closed / under_review
+    // closed       -> no further status update
+    // =====================================================
+
+    const allowedTransitions = {
+      open: [
+        "under_review",
+        "resolved",
+        "rejected",
+      ],
+
+      under_review: [
+        "open",
+        "resolved",
+        "rejected",
+      ],
+
+      resolved: ["closed"],
+
+      rejected: [
+        "under_review",
+        "closed",
+      ],
+
+      closed: [],
+    };
+
+    const validNextStatuses =
+      allowedTransitions[oldStatus] || [];
+
+    if (
+      !validNextStatuses.includes(
+        normalizedStatus
+      )
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          `Complaint status cannot be changed from ${oldStatus} to ${normalizedStatus}`,
+
+        current_status: oldStatus,
+
+        allowed_next_statuses:
+          validNextStatuses,
+      });
+    }
+
+    // =====================================================
+    // FETCH RELATED TRANSFER
+    // =====================================================
+
+    const transfer = complaint.transfer_id
+      ? await StockTransfer.findByPk(
+          complaint.transfer_id,
+          {
+            transaction,
+          }
+        )
+      : null;
+
+    // =====================================================
+    // PREPARE UPDATE PAYLOAD
+    //
+    // rawAttributes check isliye use kiya hai taaki agar
+    // resolved_by, resolved_at ya resolution_note columns
+    // model me available hain tabhi update hon.
+    // =====================================================
+
+    const complaintAttributes =
+      StockTransferComplaint.rawAttributes ||
+      {};
+
+    const updatePayload = {
+      status: normalizedStatus,
+    };
+
+    if (
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "resolution_note"
+      )
+    ) {
+      updatePayload.resolution_note =
+        normalizedResolutionNote || null;
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "updated_by"
+      )
+    ) {
+      updatePayload.updated_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "under_review" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "reviewed_by"
+      )
+    ) {
+      updatePayload.reviewed_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "under_review" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "reviewed_at"
+      )
+    ) {
+      updatePayload.reviewed_at =
+        new Date();
+    }
+
+    if (
+      normalizedStatus === "resolved" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "resolved_by"
+      )
+    ) {
+      updatePayload.resolved_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "resolved" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "resolved_at"
+      )
+    ) {
+      updatePayload.resolved_at =
+        new Date();
+    }
+
+    if (
+      normalizedStatus === "rejected" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "rejected_by"
+      )
+    ) {
+      updatePayload.rejected_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "rejected" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "rejected_at"
+      )
+    ) {
+      updatePayload.rejected_at =
+        new Date();
+    }
+
+    if (
+      normalizedStatus === "closed" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "closed_by"
+      )
+    ) {
+      updatePayload.closed_by = user.id;
+    }
+
+    if (
+      normalizedStatus === "closed" &&
+      Object.prototype.hasOwnProperty.call(
+        complaintAttributes,
+        "closed_at"
+      )
+    ) {
+      updatePayload.closed_at =
+        new Date();
+    }
+
+    // =====================================================
+    // UPDATE COMPLAINT
+    // =====================================================
+
+    await complaint.update(
+      updatePayload,
+      {
+        transaction,
+      }
+    );
+
+    // =====================================================
+    // IMPORTANT
+    //
+    // Transfer ka status yahan update nahi kar rahe.
+    //
+    // Complaint status aur transfer receiving status
+    // dono separate flows hain.
+    //
+    // Isse remaining items ka Stock In continue rahega.
+    // =====================================================
+
+    // No StockTransfer status update here.
+
+    // =====================================================
+    // SYSTEM ACTIVITY
+    // =====================================================
+
+    const receiverStoreCode = String(
+      user.store_code || user.storeCode || ""
+    )
       .trim()
       .toUpperCase();
 
-    if (!organizationId && !storeCode) {
-      return res.status(400).json({
-        success: false,
-        message: "District organization_id or store_code missing in token",
-      });
-    }
+    await SystemActivity.create(
+      {
+        title:
+          "Stock transfer complaint status updated",
 
-    const districtWhere = {
-      is_active: true,
-      organization_level: "District",
-    };
+        description:
+          `Complaint ${complaint.complaint_no} status changed from ${oldStatus} to ${normalizedStatus}`,
 
-    if (organizationId) {
-      districtWhere.id = organizationId;
-    } else {
-      districtWhere.store_code = storeCode;
-    }
+        activity_type:
+          "stock_transfer_complaint_status_updated",
 
-    const districtStore = await Store.findOne({
-      where: districtWhere,
-      attributes: [
-        "id",
-        "store_code",
-        "store_name",
-        "organization_level",
-        "district_id",
-        "is_active",
-      ],
-      raw: true,
-    });
+        module_name:
+          "stock_transfer_complaint",
 
-    if (!districtStore) {
-      return res.status(404).json({
-        success: false,
-        message: "District store not found or inactive",
-        debug: {
-          token_organization_id: organizationId || null,
-          token_store_code: storeCode || null,
-          expected_organization_level: "District",
-        },
-      });
-    }
+        reference_id:
+          complaint.id,
 
-    const districtLinkIds = [];
+        reference_no:
+          complaint.complaint_no,
 
-    if (districtStore.district_id) {
-      districtLinkIds.push(Number(districtStore.district_id));
-    }
+        district_code:
+          user.district_code || null,
 
-    districtLinkIds.push(Number(districtStore.id));
+        store_code:
+          receiverStoreCode || null,
 
-    const retailStores = await Store.findAll({
-      where: {
-        is_active: true,
-        organization_level: "Retail",
-        district_id: {
-          [Op.in]: districtLinkIds,
-        },
+        store_name:
+          user.store_name || null,
+
+        created_by:
+          user.id,
+
+        created_at:
+          new Date(),
       },
-      attributes: [
-        "id",
-        "store_code",
-        "store_name",
-        "organization_level",
-        "district_id",
-        "is_active",
-      ],
-      order: [["store_name", "ASC"]],
-      raw: true,
-    });
+      {
+        transaction,
+      }
+    );
+
+    // =====================================================
+    // ACTIVITY LOG
+    // =====================================================
+
+    await ActivityLog.create(
+      {
+        organization_id:
+          organizationId,
+
+        user_id:
+          user.id,
+
+        action:
+          "stock_transfer_complaint_status_updated",
+
+        module_name:
+          "stock_transfer_complaint",
+
+        reference_id:
+          complaint.id,
+
+        reference_no:
+          complaint.complaint_no,
+
+        title:
+          "Complaint status updated",
+
+        description:
+          `Complaint ${complaint.complaint_no} status changed from ${oldStatus} to ${normalizedStatus}`,
+
+        meta: {
+          complaint_id:
+            complaint.id,
+
+          complaint_no:
+            complaint.complaint_no,
+
+          transfer_id:
+            complaint.transfer_id,
+
+          transfer_no:
+            transfer?.transfer_no || null,
+
+          from_organization_id:
+            complaint.from_organization_id,
+
+          to_organization_id:
+            complaint.to_organization_id,
+
+          old_status:
+            oldStatus,
+
+          new_status:
+            normalizedStatus,
+
+          resolution_note:
+            normalizedResolutionNote || null,
+
+          updated_by:
+            user.id,
+
+          transfer_status:
+            transfer?.status || null,
+
+          transfer_status_changed:
+            false,
+        },
+
+        icon:
+          normalizedStatus === "resolved"
+            ? "check-circle"
+            : normalizedStatus === "rejected"
+              ? "x-circle"
+              : normalizedStatus === "closed"
+                ? "lock"
+                : "complaint",
+
+        color:
+          normalizedStatus === "resolved"
+            ? "green"
+            : normalizedStatus === "rejected"
+              ? "red"
+              : normalizedStatus === "closed"
+                ? "gray"
+                : "orange",
+      },
+      {
+        transaction,
+      }
+    );
+
+    await transaction.commit();
+
+    // =====================================================
+    // RESPONSE
+    // =====================================================
 
     return res.status(200).json({
       success: true,
-      message: "Retail stores fetched successfully",
-      count: retailStores.length,
-      data: retailStores,
-      district: {
-        id: districtStore.id,
-        store_code: districtStore.store_code,
-        store_name: districtStore.store_name,
-        organization_level: districtStore.organization_level,
-        district_id: districtStore.district_id,
+
+      message:
+        `Complaint status updated successfully from ${oldStatus} to ${normalizedStatus}`,
+
+      data: {
+        complaint_id:
+          complaint.id,
+
+        complaint_no:
+          complaint.complaint_no,
+
+        transfer_id:
+          complaint.transfer_id,
+
+        transfer_no:
+          transfer?.transfer_no || null,
+
+        old_status:
+          oldStatus,
+
+        status:
+          complaint.status,
+
+        resolution_note:
+          complaint.resolution_note ||
+          normalizedResolutionNote ||
+          null,
+
+        updated_by: {
+          user_id:
+            user.id,
+
+          organization_id:
+            organizationId,
+
+          store_code:
+            user.store_code ||
+            user.storeCode ||
+            null,
+
+          store_name:
+            user.store_name || null,
+        },
+
+        transfer: {
+          status:
+            transfer?.status || null,
+
+          status_changed:
+            false,
+
+          remaining_items_receivable:
+            transfer?.status ===
+            "in_transit",
+        },
+
+        updated_at:
+          complaint.updated_at,
       },
     });
   } catch (error) {
-    console.error("getRetailStoresUnderDistrict error:", error);
+    if (
+      transaction &&
+      !transaction.finished
+    ) {
+      await transaction.rollback();
+    }
+
+    console.error(
+      "updateTransferComplaintStatus error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch retail stores",
-      error: error.message,
+
+      message:
+        "Failed to update complaint status",
+
+      error:
+        error.message,
     });
   }
 };
-
-
-
-
-
-
-const makeForwardRequestNo = (headOrgId, districtOrgId) => {
-  return `REQ-FWD-${headOrgId}-${districtOrgId}-${Date.now()}`;
-};
-
-const getStoreLevel = (store) => {
-  return String(
-    store?.organizationlevel ||
-      store?.organization_level ||
-      ""
-  ).trim();
-};
-
-const resolveDistrictStoreByCode = async ({ storeCode, transaction }) => {
-  const cleanStoreCode = String(storeCode || "").trim().toUpperCase();
-
-  if (!cleanStoreCode) return null;
-
-  /**
-   * CASE 1:
-   * Actual district store_code.
-   * Example: DST004, DST007, DST015
-   */
-  const directStore = await Store.findOne({
-    where: {
-      store_code: cleanStoreCode,
-      is_active: true,
-    },
-    raw: true,
-    transaction,
-  });
-
-  if (directStore && getStoreLevel(directStore) === "District") {
-    return directStore;
-  }
-
-  /**
-   * CASE 2:
-   * Legacy/user district code.
-   * Example: DIST-7 means districts.id = 7.
-   * Actual district store may be DST004 with district_id = 7.
-   */
-  const legacyMatch = cleanStoreCode.match(/^DIST-(\d+)$/i);
-
-  if (legacyMatch?.[1]) {
-    const legacyDistrictId = Number(legacyMatch[1]);
-
-    if (Number.isInteger(legacyDistrictId) && legacyDistrictId > 0) {
-      const mappedDistrictStore = await Store.findOne({
-        where: {
-          district_id: legacyDistrictId,
-          organizationlevel: "District",
-          is_active: true,
-        },
-        raw: true,
-        transaction,
-      });
-
-      if (mappedDistrictStore) {
-        return mappedDistrictStore;
-      }
-    }
-  }
-
-  return null;
-};
-
-const getLegacyDistrictOrgId = (districtStore) => {
-  /**
-   * Existing DB flow:
-   * stock_requests.to_organization_id uses districts.id / legacy district id.
-   *
-   * Example:
-   * districtStore.id = 44
-   * districtStore.store_code = DST004
-   * districtStore.district_id = 7
-   *
-   * Save:
-   * to_organization_id = 7
-   */
-  const legacyDistrictId = Number(districtStore?.district_id || 0);
-
-  if (Number.isInteger(legacyDistrictId) && legacyDistrictId > 0) {
-    return legacyDistrictId;
-  }
-
-  return Number(districtStore.id);
-};
-
-export const forwardRequestToDistrictDirectDelivery = async (req, res) => {
-  const t = await sequelize.transaction();
-
+/**
+ * =========================================================
+ * GET ALL STOCK TRANSFER COMPLAINTS FOR HEAD OFFICE
+ * =========================================================
+ *
+ * Head Office saare stores ki complaints dekh sakta hai.
+ *
+ * Route:
+ * GET /api/stock-transfer-complaints/head/all
+ *
+ * Query params:
+ *
+ * page
+ * limit
+ * status
+ * complaint_type
+ * search
+ * from_store_code
+ * to_store_code
+ * date_from
+ * date_to
+ *
+ * Examples:
+ *
+ * GET /api/stock-transfer-complaints/head/all
+ *
+ * GET /api/stock-transfer-complaints/head/all?status=open
+ *
+ * GET /api/stock-transfer-complaints/head/all?search=CMP
+ *
+ * GET /api/stock-transfer-complaints/head/all?from_store_code=DST500
+ *
+ * GET /api/stock-transfer-complaints/head/all?page=1&limit=10
+ */
+export const getHeadAllTransferComplaints = async (
+  req,
+  res
+) => {
   try {
     const user = req.user;
-    const { requestId } = req.params;
-    const { store_code, notes } = req.body;
 
-    if (!user?.organization_id) {
-      await t.rollback();
+    // =====================================================
+    // AUTHENTICATION
+    // =====================================================
+
+    if (!user?.id) {
       return res.status(401).json({
         success: false,
         message: "Unauthorized user",
       });
     }
 
-    if (!isHeadUser(user)) {
-      await t.rollback();
+    // =====================================================
+    // HEAD OFFICE AUTHORIZATION
+    // =====================================================
+
+    const role = String(user.role || "")
+      .trim()
+      .toLowerCase();
+
+    const organizationLevel = String(
+      user.organization_level || ""
+    )
+      .trim()
+      .toLowerCase();
+
+    const allowedRoles = [
+      "super_admin",
+      "super-admin",
+      "head_admin",
+      "head-admin",
+      "head_manager",
+      "head-manager",
+      "head_office",
+    ];
+
+    const isHeadUser =
+      allowedRoles.includes(role) ||
+      organizationLevel === "head_office" ||
+      organizationLevel === "head office" ||
+      organizationLevel === "head";
+
+    if (!isHeadUser) {
       return res.status(403).json({
         success: false,
-        message: "Only head office can transfer request to district",
-      });
-    }
-
-    const cleanRequestId = Number(requestId);
-    const selectedStoreCode = String(store_code || "").trim().toUpperCase();
-
-    if (!Number.isInteger(cleanRequestId) || cleanRequestId <= 0) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Valid requestId is required",
-      });
-    }
-
-    if (!selectedStoreCode) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Valid store_code is required",
-      });
-    }
-
-    /**
-     * Original request must be received by Head Office.
-     * Do not use include with FOR UPDATE.
-     */
-    const originalRequest = await StockRequest.findOne({
-      where: {
-        id: cleanRequestId,
-        to_organization_id: user.organization_id,
-      },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-
-    if (!originalRequest) {
-      await t.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Original request not found for this head office",
-      });
-    }
-
-    const requestItems = await StockRequestItem.findAll({
-      where: {
-        request_id: originalRequest.id,
-      },
-      include: [
-        {
-          model: Item,
-          as: "item",
-          required: false,
-        },
-      ],
-      transaction: t,
-    });
-
-    const originalStatus = String(originalRequest.status || "").toLowerCase();
-
-    if (
-      ["cancelled", "rejected", "received", "completed", "dispatched"].includes(
-        originalStatus
-      )
-    ) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `Request cannot be transferred because current status is ${originalRequest.status}`,
-      });
-    }
-
-    if (
-      String(originalRequest.request_source || "").toLowerCase() === "forwarded"
-    ) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Forwarded request cannot be transferred again",
-      });
-    }
-
-    if (!requestItems || requestItems.length === 0) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Original request has no items",
-      });
-    }
-
-    /**
-     * Selected District B.
-     *
-     * Supports:
-     * 1. Actual district store_code: DST004
-     * 2. Legacy/user district code: DIST-7
-     */
-    const selectedDistrict = await resolveDistrictStoreByCode({
-      storeCode: selectedStoreCode,
-      transaction: t,
-    });
-
-    if (!selectedDistrict) {
-      await t.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Selected district store_code not found or inactive",
-        data: {
-          received_store_code: selectedStoreCode,
-          expected_examples: ["DST004", "DST007", "DST015", "DIST-7"],
-        },
-      });
-    }
-
-    const selectedOrganizationLevel = getStoreLevel(selectedDistrict);
-
-    if (selectedOrganizationLevel !== "District") {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
-        message: `Selected store_code belongs to ${
-          selectedOrganizationLevel || "UNKNOWN"
-        }, not District`,
-        data: {
-          id: selectedDistrict.id,
-          store_code: selectedDistrict.store_code,
-          store_name: selectedDistrict.store_name,
-          organization_level: selectedOrganizationLevel || null,
-          is_active: selectedDistrict.is_active,
-        },
-      });
-    }
-
-    /**
-     * This is the important matching fix.
-     * Existing received API/user mapping expects to_organization_id = districts.id.
-     */
-    const targetDistrictOrgId = getLegacyDistrictOrgId(selectedDistrict);
-
-    /**
-     * Original requester store.
-     */
-    const requesterStore = await Store.findOne({
-      where: {
-        id: originalRequest.from_organization_id,
-      },
-      raw: true,
-      transaction: t,
-    });
-
-    if (!requesterStore) {
-      await t.rollback();
-      return res.status(404).json({
-        success: false,
-        message: "Original requester store not found",
-      });
-    }
-
-    /**
-     * Same district check must compare legacy district id also.
-     *
-     * Example:
-     * original requester from_organization_id = 7
-     * selected district store id = 44
-     * selected district district_id = 7
-     */
-    if (Number(targetDistrictOrgId) === Number(originalRequest.from_organization_id)) {
-      await t.rollback();
-      return res.status(400).json({
-        success: false,
         message:
-          "Cannot transfer request to the same district that created the original request",
+          "Only Head Office users can access all complaints",
       });
     }
 
-    if (Number(targetDistrictOrgId) === Number(user.organization_id)) {
-      await t.rollback();
+    // =====================================================
+    // QUERY PARAMETERS
+    // =====================================================
+
+    const {
+      page = 1,
+      limit = 10,
+      status,
+      complaint_type,
+      search,
+      from_store_code,
+      to_store_code,
+      date_from,
+      date_to,
+    } = req.query;
+
+    const pageNumber = Math.max(
+      Number(page) || 1,
+      1
+    );
+
+    const pageLimit = Math.min(
+      Math.max(Number(limit) || 10, 1),
+      100
+    );
+
+    const offset =
+      (pageNumber - 1) * pageLimit;
+
+    // =====================================================
+    // COMPLAINT WHERE CONDITION
+    // =====================================================
+
+    const complaintWhere = {};
+
+    // =====================================================
+    // STATUS FILTER
+    // =====================================================
+
+    if (
+      status &&
+      String(status).trim().toLowerCase() !== "all"
+    ) {
+      complaintWhere.status = String(status)
+        .trim()
+        .toLowerCase();
+    }
+
+    // =====================================================
+    // COMPLAINT TYPE FILTER
+    // =====================================================
+
+    if (
+      complaint_type &&
+      String(complaint_type)
+        .trim()
+        .toLowerCase() !== "all"
+    ) {
+      complaintWhere.complaint_type = String(
+        complaint_type
+      )
+        .trim()
+        .toLowerCase();
+    }
+
+    // =====================================================
+    // DATE FILTER
+    // =====================================================
+
+    if (date_from || date_to) {
+      complaintWhere.created_at = {};
+
+      if (date_from) {
+        const fromDate = new Date(
+          `${date_from}T00:00:00.000Z`
+        );
+
+        if (Number.isNaN(fromDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid date_from. Use YYYY-MM-DD format",
+          });
+        }
+
+        complaintWhere.created_at[Op.gte] =
+          fromDate;
+      }
+
+      if (date_to) {
+        const toDate = new Date(
+          `${date_to}T23:59:59.999Z`
+        );
+
+        if (Number.isNaN(toDate.getTime())) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Invalid date_to. Use YYYY-MM-DD format",
+          });
+        }
+
+        complaintWhere.created_at[Op.lte] =
+          toDate;
+      }
+    }
+
+    // =====================================================
+    // STORE CODE FILTERS
+    //
+    // Pehle matching stores ke IDs niklenge.
+    // =====================================================
+
+    if (from_store_code) {
+      const cleanFromStoreCode = String(
+        from_store_code
+      )
+        .trim()
+        .toUpperCase();
+
+      const fromStore = await Store.findOne({
+        where: {
+          store_code: {
+            [Op.iLike]: cleanFromStoreCode,
+          },
+        },
+
+        attributes: [
+          "id",
+          "store_code",
+          "store_name",
+        ],
+
+        raw: true,
+      });
+
+      if (!fromStore) {
+        return res.status(200).json({
+          success: true,
+          message:
+            "No complaints found for given from_store_code",
+          summary: {
+            total_complaints: 0,
+            open_complaints: 0,
+            under_review_complaints: 0,
+            resolved_complaints: 0,
+            rejected_complaints: 0,
+            closed_complaints: 0,
+          },
+          pagination: {
+            page: pageNumber,
+            limit: pageLimit,
+            total_records: 0,
+            total_pages: 0,
+            has_next_page: false,
+            has_previous_page: false,
+          },
+          data: [],
+        });
+      }
+
+      complaintWhere.from_organization_id =
+        Number(fromStore.id);
+    }
+
+    if (to_store_code) {
+      const cleanToStoreCode = String(to_store_code)
+        .trim()
+        .toUpperCase();
+
+      const toStore = await Store.findOne({
+        where: {
+          store_code: {
+            [Op.iLike]: cleanToStoreCode,
+          },
+        },
+
+        attributes: [
+          "id",
+          "store_code",
+          "store_name",
+        ],
+
+        raw: true,
+      });
+
+      if (!toStore) {
+        return res.status(200).json({
+          success: true,
+          message:
+            "No complaints found for given to_store_code",
+          summary: {
+            total_complaints: 0,
+            open_complaints: 0,
+            under_review_complaints: 0,
+            resolved_complaints: 0,
+            rejected_complaints: 0,
+            closed_complaints: 0,
+          },
+          pagination: {
+            page: pageNumber,
+            limit: pageLimit,
+            total_records: 0,
+            total_pages: 0,
+            has_next_page: false,
+            has_previous_page: false,
+          },
+          data: [],
+        });
+      }
+
+      complaintWhere.to_organization_id =
+        Number(toStore.id);
+    }
+
+    // =====================================================
+    // SEARCH FILTER
+    //
+    // Search complaint_no, description aur transfer_no.
+    // =====================================================
+
+    const cleanSearch = String(search || "").trim();
+
+    if (cleanSearch) {
+      const matchingTransfers =
+        await StockTransfer.findAll({
+          where: {
+            transfer_no: {
+              [Op.iLike]: `%${cleanSearch}%`,
+            },
+          },
+
+          attributes: ["id"],
+
+          raw: true,
+        });
+
+      const matchingTransferIds =
+        matchingTransfers
+          .map((transfer) => Number(transfer.id))
+          .filter(Boolean);
+
+      const searchConditions = [
+        {
+          complaint_no: {
+            [Op.iLike]: `%${cleanSearch}%`,
+          },
+        },
+        {
+          description: {
+            [Op.iLike]: `%${cleanSearch}%`,
+          },
+        },
+        {
+          complaint_type: {
+            [Op.iLike]: `%${cleanSearch}%`,
+          },
+        },
+      ];
+
+      if (matchingTransferIds.length > 0) {
+        searchConditions.push({
+          transfer_id: {
+            [Op.in]: matchingTransferIds,
+          },
+        });
+      }
+
+      complaintWhere[Op.or] =
+        searchConditions;
+    }
+
+    // =====================================================
+    // FETCH COMPLAINTS
+    // =====================================================
+
+    const {
+      count,
+      rows: complaintModels,
+    } =
+      await StockTransferComplaint.findAndCountAll({
+        where: complaintWhere,
+
+        order: [
+          ["created_at", "DESC"],
+          ["id", "DESC"],
+        ],
+
+        limit: pageLimit,
+        offset,
+
+        distinct: true,
+      });
+
+    // =====================================================
+    // FETCH RELATED TRANSFERS
+    // =====================================================
+
+    const complaints = complaintModels.map(
+      (complaint) => complaint.toJSON()
+    );
+
+    const transferIds = [
+      ...new Set(
+        complaints
+          .map((complaint) =>
+            Number(complaint.transfer_id)
+          )
+          .filter(Boolean)
+      ),
+    ];
+
+    const transfers =
+      transferIds.length > 0
+        ? await StockTransfer.findAll({
+            where: {
+              id: {
+                [Op.in]: transferIds,
+              },
+            },
+
+            raw: true,
+          })
+        : [];
+
+    const transferMap = new Map();
+
+    for (const transfer of transfers) {
+      transferMap.set(
+        Number(transfer.id),
+        transfer
+      );
+    }
+
+    // =====================================================
+    // FETCH RELATED STORES
+    // =====================================================
+// =====================================================
+// FETCH RELATED STORES
+// =====================================================
+
+const organizationIds = [
+  ...new Set(
+    complaints
+      .flatMap((complaint) => [
+        Number(
+          complaint.from_organization_id
+        ),
+        Number(
+          complaint.to_organization_id
+        ),
+      ])
+      .filter(Boolean)
+  ),
+];
+
+const stores =
+  organizationIds.length > 0
+    ? await Store.findAll({
+        where: {
+          id: {
+            [Op.in]: organizationIds,
+          },
+        },
+
+        attributes: [
+          "id",
+          "store_code",
+          "store_name",
+          "organization_level",
+          "district_id",
+          "address",
+          "is_active",
+        ],
+
+        raw: true,
+      })
+    : [];
+
+const storeMap = new Map();
+
+for (const store of stores) {
+  storeMap.set(Number(store.id), store);
+}
+
+    // =====================================================
+    // FORMAT COMPLAINT RESPONSE
+    // =====================================================
+
+    const formattedComplaints = complaints.map(
+      (complaint) => {
+        const transfer =
+          transferMap.get(
+            Number(complaint.transfer_id)
+          ) || null;
+
+        const fromStore =
+          storeMap.get(
+            Number(
+              complaint.from_organization_id
+            )
+          ) || null;
+
+        const toStore =
+          storeMap.get(
+            Number(
+              complaint.to_organization_id
+            )
+          ) || null;
+
+        const complaintItems =
+          Array.isArray(complaint.items)
+            ? complaint.items
+            : [];
+
+        const totalSentQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.sent_qty || 0),
+            0
+          );
+
+        const totalReceivedQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.received_qty || 0),
+            0
+          );
+
+        const totalShortageQty =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.shortage_qty || 0),
+            0
+          );
+
+        const totalSentWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(item.sent_weight || 0),
+            0
+          );
+
+        const totalReceivedWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.received_weight || 0
+              ),
+            0
+          );
+
+        const totalShortageWeight =
+          complaintItems.reduce(
+            (total, item) =>
+              total +
+              Number(
+                item.shortage_weight || 0
+              ),
+            0
+          );
+
+        return {
+          complaint_id: complaint.id,
+
+          complaint_no:
+            complaint.complaint_no,
+
+          complaint_type:
+            complaint.complaint_type,
+
+          description:
+            complaint.description,
+
+          /*
+           * Current complaint status.
+           */
+          status:
+            complaint.status,
+
+          complaint_status:
+            complaint.status,
+
+          status_label:
+            String(complaint.status || "")
+              .replace(/_/g, " ")
+              .replace(/\b\w/g, (letter) =>
+                letter.toUpperCase()
+              ),
+
+          items:
+            complaintItems,
+
+          item_summary: {
+            total_complaint_items:
+              complaintItems.length,
+
+            total_sent_qty: Number(
+              totalSentQty.toFixed(3)
+            ),
+
+            total_received_qty: Number(
+              totalReceivedQty.toFixed(3)
+            ),
+
+            total_shortage_qty: Number(
+              totalShortageQty.toFixed(3)
+            ),
+
+            total_sent_weight: Number(
+              totalSentWeight.toFixed(3)
+            ),
+
+            total_received_weight: Number(
+              totalReceivedWeight.toFixed(3)
+            ),
+
+            total_shortage_weight: Number(
+              totalShortageWeight.toFixed(3)
+            ),
+          },
+
+          transfer: transfer
+            ? {
+                transfer_id:
+                  transfer.id,
+
+                transfer_no:
+                  transfer.transfer_no,
+
+                request_id:
+                  transfer.request_id || null,
+
+                status:
+                  transfer.status,
+
+                from_organization_id:
+                  transfer.from_organization_id,
+
+                to_organization_id:
+                  transfer.to_organization_id,
+
+                remarks:
+                  transfer.remarks || null,
+
+                driver_name:
+                  transfer.driver_name || null,
+
+                driver_phone:
+                  transfer.driver_phone || null,
+
+                vehicle_number:
+                  transfer.vehicle_number || null,
+
+                expected_delivery_date:
+                  transfer.expected_delivery_date ||
+                  null,
+
+                expected_delivery_time:
+                  transfer.expected_delivery_time ||
+                  null,
+
+                created_at:
+                  transfer.created_at ||
+                  transfer.createdAt ||
+                  null,
+              }
+            : {
+                transfer_id:
+                  complaint.transfer_id,
+
+                transfer_no: null,
+                status: null,
+              },
+
+          /*
+           * Complaint kis store ke against raise hui.
+           */
+          against_store: {
+            organization_id:
+              complaint.from_organization_id,
+
+            store_code:
+              fromStore?.store_code || null,
+
+            store_name:
+              fromStore?.store_name || null,
+
+            organization_level:
+              fromStore?.organization_level ||
+              null,
+
+            district_id:
+              fromStore?.district_id || null,
+
+            address:
+              fromStore?.address || null,
+          },
+
+          /*
+           * Complaint kis receiving store ne raise ki.
+           */
+          raised_by_store: {
+            organization_id:
+              complaint.to_organization_id,
+
+            store_code:
+              toStore?.store_code || null,
+
+            store_name:
+              toStore?.store_name || null,
+
+            organization_level:
+              toStore?.organization_level ||
+              null,
+
+            district_id:
+              toStore?.district_id || null,
+
+            address:
+              toStore?.address || null,
+          },
+
+          evidence: {
+            image_1_url:
+              complaint.image_1_url || null,
+
+            image_2_url:
+              complaint.image_2_url || null,
+
+            video_url:
+              complaint.video_url || null,
+          },
+
+          raised_by:
+            complaint.raised_by || null,
+
+          resolved_by:
+            complaint.resolved_by || null,
+
+          resolution_note:
+            complaint.resolution_note || null,
+
+          reviewed_by:
+            complaint.reviewed_by || null,
+
+          reviewed_at:
+            complaint.reviewed_at || null,
+
+          resolved_at:
+            complaint.resolved_at || null,
+
+          rejected_at:
+            complaint.rejected_at || null,
+
+          closed_at:
+            complaint.closed_at || null,
+
+          created_at:
+            complaint.created_at ||
+            complaint.createdAt ||
+            null,
+
+          updated_at:
+            complaint.updated_at ||
+            complaint.updatedAt ||
+            null,
+        };
+      }
+    );
+
+    // =====================================================
+    // STATUS-WISE SUMMARY
+    //
+    // Filters apply hone ke baad matching complaints ka
+    // status-wise count return hoga.
+    // =====================================================
+
+    const summaryWhere = {
+      ...complaintWhere,
+    };
+
+    /*
+     * Status filter summary par nahi lagayenge,
+     * taaki cards me saare status counts dikh sakein.
+     */
+    delete summaryWhere.status;
+
+    const summaryRows =
+      await StockTransferComplaint.findAll({
+        where: summaryWhere,
+
+        attributes: ["status"],
+
+        raw: true,
+      });
+
+    const summary = {
+      total_complaints:
+        summaryRows.length,
+
+      open_complaints: 0,
+
+      under_review_complaints: 0,
+
+      resolved_complaints: 0,
+
+      rejected_complaints: 0,
+
+      closed_complaints: 0,
+
+      other_complaints: 0,
+    };
+
+    for (const row of summaryRows) {
+      const currentStatus = String(
+        row.status || ""
+      )
+        .trim()
+        .toLowerCase();
+
+      if (currentStatus === "open") {
+        summary.open_complaints += 1;
+      } else if (
+        currentStatus === "under_review"
+      ) {
+        summary.under_review_complaints += 1;
+      } else if (
+        currentStatus === "resolved"
+      ) {
+        summary.resolved_complaints += 1;
+      } else if (
+        currentStatus === "rejected"
+      ) {
+        summary.rejected_complaints += 1;
+      } else if (
+        currentStatus === "closed"
+      ) {
+        summary.closed_complaints += 1;
+      } else {
+        summary.other_complaints += 1;
+      }
+    }
+
+    const totalPages =
+      count > 0
+        ? Math.ceil(count / pageLimit)
+        : 0;
+
+    // =====================================================
+    // FINAL RESPONSE
+    // =====================================================
+
+    return res.status(200).json({
+      success: true,
+
+      message:
+        "All transfer complaints fetched successfully",
+
+      summary,
+
+      applied_filters: {
+        status:
+          status || "all",
+
+        complaint_type:
+          complaint_type || "all",
+
+        search:
+          search || null,
+
+        from_store_code:
+          from_store_code || null,
+
+        to_store_code:
+          to_store_code || null,
+
+        date_from:
+          date_from || null,
+
+        date_to:
+          date_to || null,
+      },
+
+      pagination: {
+        page: pageNumber,
+        limit: pageLimit,
+
+        total_records:
+          count,
+
+        total_pages:
+          totalPages,
+
+        has_next_page:
+          pageNumber < totalPages,
+
+        has_previous_page:
+          pageNumber > 1,
+      },
+
+      count:
+        formattedComplaints.length,
+
+      data:
+        formattedComplaints,
+    });
+  } catch (error) {
+    console.error(
+      "getHeadAllTransferComplaints error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+
+      message:
+        "Failed to fetch all transfer complaints",
+
+      error:
+        error.message,
+    });
+  }
+};
+
+
+/**
+ * Safely converts any value into number.
+ */
+const toComplaintNumber = (value) => {
+  const number = Number(value);
+
+  return Number.isFinite(number) ? number : 0;
+};
+
+/**
+ * Converts Sequelize model into normal object.
+ */
+const toPlainObject = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  if (typeof value.toJSON === "function") {
+    return value.toJSON();
+  }
+
+  return value;
+};
+
+/**
+ * Normalizes item resolution status.
+ */
+const normalizeResolutionStatus = (status) => {
+  return String(status || "")
+    .trim()
+    .toLowerCase();
+};
+
+/**
+ * Overall complaint status is calculated from
+ * all complaint-item statuses.
+ */
+const calculateOverallComplaintStatus = (
+  complaintItems
+) => {
+  const statuses = complaintItems.map((item) =>
+    normalizeResolutionStatus(
+      item.resolution_status || "open"
+    )
+  );
+
+  if (
+    statuses.length > 0 &&
+    statuses.every(
+      (status) => status === "closed"
+    )
+  ) {
+    return "closed";
+  }
+
+  if (
+    statuses.length > 0 &&
+    statuses.every((status) =>
+      ["resolved", "closed"].includes(status)
+    )
+  ) {
+    return "resolved";
+  }
+
+  if (
+    statuses.some(
+      (status) =>
+        status === "replacement_dispatched"
+    )
+  ) {
+    return "replacement_dispatched";
+  }
+
+  if (
+    statuses.some(
+      (status) => status === "under_review"
+    )
+  ) {
+    return "under_review";
+  }
+
+  return "open";
+};
+
+/**
+ * =========================================================
+ * UPDATE COMPLAINT STATUS PER ITEM
+ * =========================================================
+ *
+ * Route:
+ *
+ * PATCH
+ * /api/stock-transfer-complaints/:complaintId/items/:transferItemId/status
+ *
+ * Stages:
+ *
+ * open
+ * -> under_review
+ * -> replacement_dispatched
+ * -> resolved
+ * -> closed
+ *
+ * Important:
+ *
+ * 1. Source store:
+ *    open -> under_review
+ *    under_review -> replacement_dispatched
+ *
+ * 2. Receiver store:
+ *    replacement_dispatched -> resolved
+ *    resolved -> closed
+ *
+ * 3. Head Office:
+ *    Can perform any valid transition.
+ *
+ * 4. Replacement stock quantity is not directly added here.
+ *    Normal transfer receiving API will handle stock.
+ *
+ * 5. resolved will be allowed only when linked replacement
+ *    transfer has been received.
+ */
+/* =====================================================
+   STOCK TRANSFER COMPLAINT HELPERS
+===================================================== */
+
+/**
+ * Null, undefined aur extra spaces ko handle karta hai.
+ */
+const normalizeText = (value) => {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  return String(value).trim();
+};
+
+/**
+ * Status ko consistent snake_case format me convert karta hai.
+ *
+ * Example:
+ * "Under Review" -> "under_review"
+ * "REPLACEMENT-DISPATCHED" -> "replacement_dispatched"
+ */
+const normalizeStatus = (value) => {
+  return normalizeText(value)
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_")
+    .replace(/_+/g, "_");
+};
+
+/**
+ * Value ko safe number me convert karta hai.
+ */
+// const toNumber = (value, fallback = 0) => {
+//   const parsedValue = Number(value);
+
+//   return Number.isFinite(parsedValue)
+//     ? parsedValue
+//     : fallback;
+// };
+
+/**
+ * Decimal value ko fixed precision tak round karta hai.
+ */
+const roundNumber = (value, precision = 3) => {
+  const numericValue = toNumber(value, 0);
+  const multiplier = 10 ** precision;
+
+  return Math.round(
+    (numericValue + Number.EPSILON) * multiplier
+  ) / multiplier;
+};
+
+/**
+ * Sequelize transaction ko safely rollback karta hai.
+ */
+const safeRollback = async (transaction) => {
+  try {
+    if (
+      transaction &&
+      !transaction.finished
+    ) {
+      await transaction.rollback();
+    }
+  } catch (rollbackError) {
+    console.error(
+      "Transaction rollback error:",
+      rollbackError
+    );
+  }
+};
+
+/**
+ * Sequelize model me attribute available hai ya nahi check karta hai.
+ */
+const modelHasAttribute = (
+  model,
+  attributeName
+) => {
+  if (!model || !attributeName) {
+    return false;
+  }
+
+  const attributes =
+    model.rawAttributes ||
+    model.getAttributes?.() ||
+    {};
+
+  return Boolean(attributes[attributeName]);
+};
+
+/**
+ * Sirf tab object me value set karta hai jab Sequelize model
+ * me woh column/attribute exist karta ho.
+ */
+const setIfModelHasAttribute = (
+  targetObject,
+  model,
+  attributeName,
+  value
+) => {
+  if (
+    modelHasAttribute(model, attributeName)
+  ) {
+    targetObject[attributeName] = value;
+  }
+
+  return targetObject;
+};
+
+/**
+ * JSON string ya array se complaint items safely return karta hai.
+ */
+const parseComplaintStoredItems = (
+  storedItems
+) => {
+  if (Array.isArray(storedItems)) {
+    return storedItems;
+  }
+
+  if (
+    storedItems === null ||
+    storedItems === undefined ||
+    storedItems === ""
+  ) {
+    return [];
+  }
+
+  if (typeof storedItems === "object") {
+    if (Array.isArray(storedItems.items)) {
+      return storedItems.items;
+    }
+
+    return [];
+  }
+
+  if (typeof storedItems === "string") {
+    try {
+      const parsedValue =
+        JSON.parse(storedItems);
+
+      if (Array.isArray(parsedValue)) {
+        return parsedValue;
+      }
+
+      if (
+        parsedValue &&
+        Array.isArray(parsedValue.items)
+      ) {
+        return parsedValue.items;
+      }
+
+      return [];
+    } catch (parseError) {
+      console.error(
+        "Complaint items JSON parse error:",
+        parseError
+      );
+
+      return [];
+    }
+  }
+
+  return [];
+};
+
+/**
+ * Complaint item ko transfer_item_id se find karta hai.
+ */
+const findComplaintItem = (
+  complaintItems,
+  transferItemId
+) => {
+  const normalizedTransferItemId =
+    toNumber(transferItemId);
+
+  return complaintItems.find((item) => {
+    const itemTransferId = toNumber(
+      item?.transfer_item_id ??
+      item?.transferItemId ??
+      item?.stock_transfer_item_id ??
+      item?.id
+    );
+
+    return (
+      itemTransferId ===
+      normalizedTransferItemId
+    );
+  });
+};
+
+/**
+ * Complaint item ka status nikalta hai.
+ */
+const getComplaintItemStatus = (item) => {
+  if (
+    !item ||
+    typeof item !== "object"
+  ) {
+    return "open";
+  }
+
+  const status =
+    item.resolution_status ??
+    item.resolutionStatus ??
+    item.status ??
+    item.complaint_status ??
+    item.complaintStatus ??
+    "open";
+
+  return normalizeStatus(status);
+};
+/**
+ * Sabhi complaint items ko dekhkar parent complaint status decide karta hai.
+ */
+const getComplaintOverallStatus = (
+  complaintItems
+) => {
+  if (
+    !Array.isArray(complaintItems) ||
+    complaintItems.length === 0
+  ) {
+    return "open";
+  }
+
+  const statuses = complaintItems.map(
+    getComplaintItemStatus
+  );
+
+  const allClosed = statuses.every(
+    (status) => status === "closed"
+  );
+
+  if (allClosed) {
+    return "closed";
+  }
+
+  const allResolvedOrClosed =
+    statuses.every((status) =>
+      ["resolved", "closed"].includes(status)
+    );
+
+  if (allResolvedOrClosed) {
+    return "resolved";
+  }
+
+  const hasReplacementDispatched =
+    statuses.some(
+      (status) =>
+        status ===
+        "replacement_dispatched"
+    );
+
+  if (hasReplacementDispatched) {
+    return "replacement_dispatched";
+  }
+
+  const hasUnderReview = statuses.some(
+    (status) => status === "under_review"
+  );
+
+  if (hasUnderReview) {
+    return "under_review";
+  }
+
+  const hasRejected = statuses.some(
+    (status) => status === "rejected"
+  );
+
+  if (hasRejected) {
+    return "rejected";
+  }
+
+  return "open";
+};
+
+/**
+ * Complaint status transition allowed hai ya nahi check karta hai.
+ */
+const isValidComplaintStatusTransition = (
+  currentStatus,
+  nextStatus
+) => {
+  const current =
+    normalizeStatus(currentStatus);
+
+  const next = normalizeStatus(nextStatus);
+
+  const allowedTransitions = {
+    open: [
+      "under_review",
+      "rejected",
+    ],
+
+    under_review: [
+      "replacement_dispatched",
+      "resolved",
+      "rejected",
+    ],
+
+    replacement_dispatched: [
+      "resolved",
+      "closed",
+    ],
+
+    resolved: [
+      "closed",
+    ],
+
+    rejected: [],
+
+    closed: [],
+  };
+
+  if (current === next) {
+    return true;
+  }
+
+  return (
+    allowedTransitions[current]?.includes(
+      next
+    ) || false
+  );
+};
+
+/**
+ * Complaint item me supported keys ko preserve karke status update karta hai.
+ */
+const updateStoredComplaintItem = (
+  complaintItem,
+  updates = {}
+) => {
+  return {
+    ...complaintItem,
+    ...updates,
+    updated_at: new Date().toISOString(),
+  };
+};
+
+/**
+ * Date value ko safe ISO date me convert karta hai.
+ */
+const normalizeDateValue = (value) => {
+  if (!value) {
+    return null;
+  }
+
+  const parsedDate = new Date(value);
+
+  if (
+    Number.isNaN(parsedDate.getTime())
+  ) {
+    return null;
+  }
+
+  return parsedDate;
+};
+
+/**
+ * Quantity aur weight ko negative hone se rokta hai.
+ */
+const subtractSafely = (
+  currentValue,
+  subtractValue,
+  precision = 3
+) => {
+  const result =
+    toNumber(currentValue) -
+    toNumber(subtractValue);
+
+  return roundNumber(
+    Math.max(0, result),
+    precision
+  );
+};
+
+/**
+ * Quantity aur weight ko safely add karta hai.
+ */
+const addSafely = (
+  currentValue,
+  addedValue,
+  precision = 3
+) => {
+  return roundNumber(
+    toNumber(currentValue) +
+    toNumber(addedValue),
+    precision
+  );
+};
+
+/**
+ * Complaint replacement transfer number generate karta hai.
+ */
+const generateComplaintReplacementTransferNo = (
+  complaintId
+) => {
+  return `TRF-REPL-CMP-${complaintId}-${Date.now()}`;
+};
+
+/**
+ * Sequelize instance ya plain object ko plain JSON me convert karta hai.
+ */
+// const toPlainObject = (value) => {
+//   if (!value) {
+//     return null;
+//   }
+
+//   if (
+//     typeof value.get === "function"
+//   ) {
+//     return value.get({
+//       plain: true,
+//     });
+//   }
+
+//   if (
+//     typeof value.toJSON === "function"
+//   ) {
+//     return value.toJSON();
+//   }
+
+//   return {
+//     ...value,
+//   };
+// };
+const isHeadOfficeUser = (user) => {
+  if (!user) {
+    return false;
+  }
+
+  const role = normalizeText(user.role).toLowerCase();
+  const level = normalizeText(
+    user.organization_level ||
+    user.organizationType ||
+    user.organization_type
+  ).toLowerCase();
+
+  return (
+    level === "head_office" ||
+    role === "super_admin" ||
+    role === "head_admin" ||
+    role === "head_manager"
+  );
+};
+const isDistrictUser = (user) => {
+  if (!user) {
+    return false;
+  }
+
+  const level = normalizeText(
+    user.organization_level
+  ).toLowerCase();
+
+  return level === "district";
+};
+
+const isRetailUser = (user) => {
+  if (!user) {
+    return false;
+  }
+
+  const level = normalizeText(
+    user.organization_level
+  ).toLowerCase();
+
+  return level === "retail";
+};
+const createComplaintActivity = async ({
+  transaction = null,
+  user = null,
+  complaint = null,
+  complaintItem = null,
+  action = "complaint_updated",
+  title = "Complaint Updated",
+  description = "",
+  meta = {},
+}) => {
+  try {
+    if (!ActivityLog) {
+      console.warn(
+        "ActivityLog model is not available. Complaint activity skipped."
+      );
+      return null;
+    }
+
+    const complaintId =
+      complaint?.id ||
+      complaint?.complaint_id ||
+      null;
+
+    const complaintNo =
+      complaint?.complaint_no ||
+      complaint?.complaint_number ||
+      `CMP-${complaintId || Date.now()}`;
+
+    const transferItemId =
+      complaintItem?.transfer_item_id ||
+      complaintItem?.transferItemId ||
+      complaintItem?.stock_transfer_item_id ||
+      complaintItem?.id ||
+      null;
+
+    const organizationId =
+      user?.organization_id ||
+      complaint?.from_organization_id ||
+      complaint?.to_organization_id ||
+      null;
+
+    const userId =
+      user?.id ||
+      user?.user_id ||
+      null;
+
+    const activityPayload = {
+      organization_id: organizationId,
+      user_id: userId,
+      action,
+      module_name: "stock_transfer_complaint",
+      reference_id: complaintId,
+      reference_no: complaintNo,
+      title,
+      description:
+        description ||
+        `Complaint ${complaintNo} updated successfully.`,
+      meta: {
+        complaint_id: complaintId,
+        complaint_no: complaintNo,
+        transfer_id:
+          complaint?.transfer_id ||
+          null,
+        transfer_item_id: transferItemId,
+        complaint_item_status:
+          complaintItem?.status ||
+          complaintItem?.complaint_status ||
+          null,
+        performed_by: userId,
+        performed_by_role:
+          user?.role ||
+          null,
+        ...meta,
+      },
+      icon: "complaint",
+    };
+
+    const finalPayload = {};
+
+    const activityAttributes =
+      ActivityLog.rawAttributes ||
+      ActivityLog.getAttributes?.() ||
+      {};
+
+    Object.entries(activityPayload).forEach(
+      ([key, value]) => {
+        if (
+          Object.prototype.hasOwnProperty.call(
+            activityAttributes,
+            key
+          )
+        ) {
+          finalPayload[key] = value;
+        }
+      }
+    );
+
+    return await ActivityLog.create(
+      finalPayload,
+      transaction
+        ? { transaction }
+        : {}
+    );
+  } catch (activityError) {
+    console.error(
+      "createComplaintActivity error:",
+      activityError
+    );
+
+    // Activity log fail hone par main complaint API fail nahi hogi.
+    return null;
+  }
+};
+/**
+ * Error response ko consistent banata hai.
+ */
+const getErrorDetails = (error) => {
+  return {
+    message:
+      error?.message ||
+      "Something went wrong",
+
+    name:
+      error?.name ||
+      "Error",
+
+    validation_errors:
+      error?.errors?.map((item) => ({
+        field:
+          item?.path ||
+          item?.field ||
+          null,
+
+        message:
+          item?.message ||
+          "Validation error",
+
+        value:
+          item?.value ??
+          null,
+      })) || [],
+  };
+};
+export const updateComplaintItemStatus = async (req, res) => {
+  const transaction = await sequelize.transaction();
+
+  try {
+    const { complaintId, transferItemId } = req.params;
+
+    const {
+      status,
+      resolution_note,
+      replacement_transfer_id,
+    } = req.body;
+
+    const user = req.user;
+
+    if (!user?.id || !user?.organization_id) {
+      await safeRollback(transaction);
+
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user",
+      });
+    }
+
+    const parsedComplaintId = Number(complaintId);
+    const parsedTransferItemId = Number(transferItemId);
+
+    if (
+      !parsedComplaintId ||
+      !Number.isInteger(parsedComplaintId) ||
+      parsedComplaintId <= 0
+    ) {
+      await safeRollback(transaction);
+
       return res.status(400).json({
         success: false,
-        message: "Cannot transfer request to head office itself",
+        message: "Valid complaintId is required",
       });
     }
 
-    /**
-     * Avoid duplicate transfer to same district.
-     * Must use targetDistrictOrgId, not selectedDistrict.id.
-     */
-    const alreadyForwarded = await StockRequest.findOne({
-      where: {
-        parent_request_id: originalRequest.id,
-        to_organization_id: targetDistrictOrgId,
-        request_source: "forwarded",
-      },
-      transaction: t,
-    });
+    if (
+      !parsedTransferItemId ||
+      !Number.isInteger(parsedTransferItemId) ||
+      parsedTransferItemId <= 0
+    ) {
+      await safeRollback(transaction);
 
-    if (alreadyForwarded) {
-      await t.rollback();
-      return res.status(409).json({
+      return res.status(400).json({
         success: false,
-        message: "This request is already transferred to selected district",
-        data: {
-          forwarded_request_id: alreadyForwarded.id,
-          forwarded_request_no: alreadyForwarded.request_no,
-        },
+        message: "Valid transferItemId is required",
       });
     }
 
-    const headStore = await Store.findOne({
-      where: {
-        id: user.organization_id,
+    const requestedStatus = normalizeStatus(status);
+
+    const allowedStatuses = [
+      "under_review",
+      "replacement_dispatched",
+      "resolved",
+    ];
+
+    if (!allowedStatuses.includes(requestedStatus)) {
+      await safeRollback(transaction);
+
+      return res.status(400).json({
+        success: false,
+        message: "Invalid complaint item status",
+        allowed_statuses: allowedStatuses,
+        note:
+          "resolved status replacement receive hone ke baad item ko automatically closed karega",
+      });
+    }
+
+    const normalizedResolutionNote =
+      normalizeText(resolution_note);
+
+    if (
+      ["replacement_dispatched", "resolved"].includes(
+        requestedStatus
+      ) &&
+      !normalizedResolutionNote
+    ) {
+      await safeRollback(transaction);
+
+      return res.status(400).json({
+        success: false,
+        message: `resolution_note is required when status is ${requestedStatus}`,
+      });
+    }
+
+    const complaint =
+      await StockTransferComplaint.findByPk(
+        parsedComplaintId,
+        {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        }
+      );
+
+    if (!complaint) {
+      await safeRollback(transaction);
+
+      return res.status(404).json({
+        success: false,
+        message: "Complaint not found",
+      });
+    }
+
+    const originalTransfer =
+      await StockTransfer.findByPk(
+        complaint.transfer_id,
+        {
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        }
+      );
+
+    if (!originalTransfer) {
+      await safeRollback(transaction);
+
+      return res.status(404).json({
+        success: false,
+        message: "Original transfer not found",
+      });
+    }
+
+    const complaintItems =
+      parseComplaintStoredItems(complaint.items);
+
+    const complaintItemIndex =
+      complaintItems.findIndex(
+        (item) =>
+          Number(item.transfer_item_id) ===
+          parsedTransferItemId
+      );
+
+    if (complaintItemIndex === -1) {
+      await safeRollback(transaction);
+
+      return res.status(404).json({
+        success: false,
+        message: "Complaint item not found",
+      });
+    }
+
+    const complaintItem = {
+      ...complaintItems[complaintItemIndex],
+    };
+
+    const currentItemStatus =
+      getComplaintItemStatus(complaintItem);
+
+    const loggedInOrganizationId = Number(
+      user.organization_id
+    );
+
+    const sourceOrganizationId = Number(
+      complaint.from_organization_id
+    );
+
+    const receiverOrganizationId = Number(
+      complaint.to_organization_id
+    );
+
+    const headOfficeUser = isHeadOfficeUser(user);
+
+    const isSourceStore =
+      loggedInOrganizationId === sourceOrganizationId;
+
+    const isReceiverStore =
+      loggedInOrganizationId === receiverOrganizationId;
+
+    let responseMessage =
+      "Complaint item status updated successfully";
+
+    let linkedReplacementTransfer = null;
+
+    /*
+     * =====================================================
+     * OPEN -> UNDER REVIEW
+     * =====================================================
+     */
+
+    if (requestedStatus === "under_review") {
+      if (!isSourceStore && !headOfficeUser) {
+        await safeRollback(transaction);
+
+        return res.status(403).json({
+          success: false,
+          message:
+            "Only source store or Head Office can mark complaint under review",
+        });
+      }
+
+      if (currentItemStatus !== "open") {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message: `Complaint item cannot move from ${currentItemStatus} to under_review`,
+          required_current_status: "open",
+        });
+      }
+
+      complaintItem.resolution_status =
+        "under_review";
+
+      complaintItem.reviewed_by = user.id;
+
+      complaintItem.reviewed_at = new Date();
+
+      complaintItem.resolution_note =
+        normalizedResolutionNote ||
+        "Complaint verification started";
+
+      responseMessage =
+        "Complaint item marked under review successfully";
+    }
+
+    /*
+     * =====================================================
+     * UNDER REVIEW -> REPLACEMENT DISPATCHED
+     * =====================================================
+     *
+     * Is flow me pehle se created replacement transfer ko
+     * complaint item ke saath link kiya jayega.
+     */
+
+    if (
+      requestedStatus === "replacement_dispatched"
+    ) {
+      if (!isSourceStore && !headOfficeUser) {
+        await safeRollback(transaction);
+
+        return res.status(403).json({
+          success: false,
+          message:
+            "Only source store or Head Office can link replacement transfer",
+        });
+      }
+
+      if (currentItemStatus !== "under_review") {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message: `Complaint item cannot move from ${currentItemStatus} to replacement_dispatched`,
+          required_current_status: "under_review",
+        });
+      }
+
+      const parsedReplacementTransferId = Number(
+        replacement_transfer_id
+      );
+
+      if (
+        !parsedReplacementTransferId ||
+        !Number.isInteger(
+          parsedReplacementTransferId
+        ) ||
+        parsedReplacementTransferId <= 0
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Valid replacement_transfer_id is required",
+        });
+      }
+
+      linkedReplacementTransfer =
+        await StockTransfer.findByPk(
+          parsedReplacementTransferId,
+          {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          }
+        );
+
+      if (!linkedReplacementTransfer) {
+        await safeRollback(transaction);
+
+        return res.status(404).json({
+          success: false,
+          message: "Replacement transfer not found",
+        });
+      }
+
+      if (
+        Number(linkedReplacementTransfer.id) ===
+        Number(originalTransfer.id)
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Original transfer cannot be used as replacement transfer",
+        });
+      }
+
+      if (
+        Number(
+          linkedReplacementTransfer.from_organization_id
+        ) !== sourceOrganizationId
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer source organization does not match complaint source organization",
+        });
+      }
+
+      if (
+        Number(
+          linkedReplacementTransfer.to_organization_id
+        ) !== receiverOrganizationId
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer destination organization does not match complaint receiver organization",
+        });
+      }
+
+      const replacementTransferStatus =
+        normalizeStatus(
+          linkedReplacementTransfer.status
+        );
+
+      const validReplacementTransferStatuses = [
+        "approved",
+        "dispatched",
+        "in_transit",
+      ];
+
+      if (
+        !validReplacementTransferStatuses.includes(
+          replacementTransferStatus
+        )
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer must be approved, dispatched or in_transit before linking",
+          current_transfer_status:
+            linkedReplacementTransfer.status,
+          allowed_transfer_statuses:
+            validReplacementTransferStatuses,
+        });
+      }
+
+      const replacementTransferItems =
+        await StockTransferItem.findAll({
+          where: {
+            transfer_id:
+              linkedReplacementTransfer.id,
+
+            item_id:
+              complaintItem.item_id,
+          },
+
+          transaction,
+          lock: transaction.LOCK.UPDATE,
+        });
+
+      if (!replacementTransferItems.length) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer does not contain the complaint item",
+          item_id: complaintItem.item_id,
+        });
+      }
+
+      const totalReplacementQty =
+        roundNumber(
+          replacementTransferItems.reduce(
+            (total, item) =>
+              total + toNumber(item.qty),
+            0
+          )
+        );
+
+      const totalReplacementWeight =
+        roundNumber(
+          replacementTransferItems.reduce(
+            (total, item) =>
+              total + toNumber(item.weight),
+            0
+          )
+        );
+
+      const shortageQty = roundNumber(
+        complaintItem.shortage_qty
+      );
+
+      const shortageWeight = roundNumber(
+        complaintItem.shortage_weight
+      );
+
+      if (totalReplacementQty < shortageQty) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer quantity is less than complaint shortage quantity",
+          shortage_qty: shortageQty,
+          replacement_qty: totalReplacementQty,
+        });
+      }
+
+      if (
+        shortageWeight > 0 &&
+        totalReplacementWeight < shortageWeight
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer weight is less than complaint shortage weight",
+          shortage_weight: shortageWeight,
+          replacement_weight:
+            totalReplacementWeight,
+        });
+      }
+
+      complaintItem.resolution_status =
+        "replacement_dispatched";
+
+      complaintItem.replacement_transfer_id =
+        linkedReplacementTransfer.id;
+
+      complaintItem.replacement_transfer_no =
+        linkedReplacementTransfer.transfer_no;
+
+      complaintItem.replacement_transfer_item_id =
+        replacementTransferItems.length === 1
+          ? replacementTransferItems[0].id
+          : null;
+
+      complaintItem.replacement_qty =
+        totalReplacementQty;
+
+      complaintItem.replacement_weight =
+        totalReplacementWeight;
+
+      complaintItem.replacement_dispatched_by =
+        user.id;
+
+      complaintItem.replacement_dispatched_at =
+        linkedReplacementTransfer.dispatch_date ||
+        linkedReplacementTransfer.transfer_date ||
+        new Date();
+
+      complaintItem.resolution_note =
+        normalizedResolutionNote;
+
+      responseMessage =
+        "Replacement transfer linked and complaint item marked replacement dispatched";
+    }
+
+    /*
+     * =====================================================
+     * REPLACEMENT DISPATCHED -> SOLVED + CLOSED
+     * =====================================================
+     *
+     * Replacement transfer receive hone ke baad:
+     *
+     * 1. Replacement transfer status received verify hoga.
+     * 2. Complaint item solved hoga.
+     * 3. Complaint item automatically closed hoga.
+     * 4. Agar saare complaint items closed hain to complaint
+     *    ka overall status bhi closed ho jayega.
+     */
+
+    if (requestedStatus === "resolved") {
+      if (!isReceiverStore && !headOfficeUser) {
+        await safeRollback(transaction);
+
+        return res.status(403).json({
+          success: false,
+          message:
+            "Only receiver store or Head Office can solve complaint after replacement is received",
+        });
+      }
+
+      if (
+        currentItemStatus !==
+        "replacement_dispatched"
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message: `Complaint item cannot move from ${currentItemStatus} to resolved`,
+          required_current_status:
+            "replacement_dispatched",
+        });
+      }
+
+      const linkedReplacementTransferId = Number(
+        complaintItem.replacement_transfer_id
+      );
+
+      if (!linkedReplacementTransferId) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer is not linked with this complaint item",
+        });
+      }
+
+      linkedReplacementTransfer =
+        await StockTransfer.findByPk(
+          linkedReplacementTransferId,
+          {
+            transaction,
+            lock: transaction.LOCK.UPDATE,
+          }
+        );
+
+      if (!linkedReplacementTransfer) {
+        await safeRollback(transaction);
+
+        return res.status(404).json({
+          success: false,
+          message: "Replacement transfer not found",
+        });
+      }
+
+      if (
+        normalizeStatus(
+          linkedReplacementTransfer.status
+        ) !== "received"
+      ) {
+        await safeRollback(transaction);
+
+        return res.status(400).json({
+          success: false,
+          message:
+            "Replacement transfer must be received before complaint can be solved",
+
+          replacement_transfer: {
+            id: linkedReplacementTransfer.id,
+
+            transfer_no:
+              linkedReplacementTransfer.transfer_no,
+
+            current_status:
+              linkedReplacementTransfer.status,
+
+            required_status: "received",
+          },
+        });
+      }
+
+      const solvedAt = new Date();
+
+      /*
+       * Pehle resolved information save hogi.
+       */
+
+      complaintItem.resolved_by = user.id;
+
+      complaintItem.resolved_at = solvedAt;
+
+      /*
+       * Latest change:
+       * Resolved ke baad alag close API call ki zarurat nahi.
+       * Complaint item automatically closed ho jayega.
+       */
+
+      complaintItem.closed_by = user.id;
+
+      complaintItem.closed_at = solvedAt;
+
+      complaintItem.resolution_status = "closed";
+
+      complaintItem.replacement_received = true;
+
+      complaintItem.replacement_received_at =
+        linkedReplacementTransfer.received_at ||
+        linkedReplacementTransfer.receive_date ||
+        solvedAt;
+
+      complaintItem.resolution_note =
+        normalizedResolutionNote;
+
+      responseMessage =
+        "Replacement transfer received. Complaint item solved and closed automatically.";
+    }
+
+    /*
+     * Updated item ko complaint items JSON me replace karna.
+     */
+
+    complaintItems[complaintItemIndex] =
+      complaintItem;
+
+    /*
+     * Saare complaint items ke status ke hisaab se
+     * overall complaint status calculate hoga.
+     */
+
+    const overallComplaintStatus =
+      getComplaintOverallStatus(complaintItems);
+
+    const complaintUpdatePayload = {
+      items: complaintItems,
+      status: overallComplaintStatus,
+    };
+
+    /*
+     * Optional model columns exist karte hain tabhi set honge.
+     */
+
+    setIfModelHasAttribute(
+      StockTransferComplaint,
+      complaintUpdatePayload,
+      "updated_by",
+      user.id
+    );
+
+    setIfModelHasAttribute(
+      StockTransferComplaint,
+      complaintUpdatePayload,
+      "resolution_note",
+      normalizedResolutionNote ||
+        complaint.resolution_note ||
+        null
+    );
+
+    if (requestedStatus === "under_review") {
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "reviewed_by",
+        user.id
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "reviewed_at",
+        new Date()
+      );
+    }
+
+    if (overallComplaintStatus === "resolved") {
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "resolved_by",
+        user.id
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "resolved_at",
+        new Date()
+      );
+    }
+
+    if (overallComplaintStatus === "closed") {
+      const closedAt = new Date();
+
+      /*
+       * Overall complaint closed hone par resolved aur closed
+       * dono details maintain ki ja rahi hain.
+       */
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "resolved_by",
+        user.id
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "resolved_at",
+        closedAt
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "closed_by",
+        user.id
+      );
+
+      setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "closed_at",
+        closedAt
+      );
+    }
+
+    await complaint.update(
+      complaintUpdatePayload,
+      {
+        transaction,
+      }
+    );
+
+    await createComplaintActivity({
+      transaction,
+      user,
+      complaint,
+      transfer: originalTransfer,
+
+      action:
+        "stock_transfer_complaint_item_status_updated",
+
+      title:
+        "Complaint item status updated",
+
+      description:
+        requestedStatus === "resolved"
+          ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} solved and closed after replacement transfer receive`
+          : `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} changed from ${currentItemStatus} to ${complaintItem.resolution_status}`,
+
+      meta: {
+        transfer_item_id:
+          parsedTransferItemId,
+
+        item_id:
+          complaintItem.item_id,
+
+        requested_status:
+          requestedStatus,
+
+        old_item_status:
+          currentItemStatus,
+
+        new_item_status:
+          complaintItem.resolution_status,
+
+        overall_complaint_status:
+          overallComplaintStatus,
+
+        resolution_note:
+          normalizedResolutionNote || null,
+
+        replacement_transfer_id:
+          complaintItem.replacement_transfer_id ||
+          null,
+
+        replacement_transfer_no:
+          complaintItem.replacement_transfer_no ||
+          null,
+
+        replacement_received:
+          complaintItem.replacement_received ||
+          false,
+
+        auto_resolved:
+          requestedStatus === "resolved",
+
+        auto_closed:
+          requestedStatus === "resolved",
       },
-      raw: true,
-      transaction: t,
+
+      icon:
+        requestedStatus === "resolved"
+          ? "check-circle"
+          : requestedStatus ===
+              "replacement_dispatched"
+            ? "truck"
+            : "complaint",
+
+      color:
+        requestedStatus === "resolved"
+          ? "green"
+          : requestedStatus ===
+              "replacement_dispatched"
+            ? "blue"
+            : "orange",
     });
 
-    const forwardedRequest = await StockRequest.create(
-      {
-        request_no: makeForwardRequestNo(
-          user.organization_id,
-          targetDistrictOrgId
-        ),
+    await transaction.commit();
 
-        /**
-         * Head Office -> District B
-         */
-        from_organization_id: user.organization_id,
-        from_store_code: headStore?.store_code || user.store_code || null,
-        from_store_name:
-          headStore?.store_name || user.store_name || "Head Office",
-
-        /**
-         * IMPORTANT:
-         * Existing DB matched flow:
-         * to_organization_id = districts.id / district legacy id.
-         */
-        to_organization_id: targetDistrictOrgId,
-
-        /**
-         * Keep actual selected district store details here.
-         */
-        to_district_code: selectedDistrict.store_code,
-        to_district_name: selectedDistrict.store_name,
-
-        to_store_code: selectedDistrict.store_code,
-        to_store_name: selectedDistrict.store_name,
-
-        /**
-         * Parent-child relation.
-         */
-        parent_request_id: originalRequest.id,
-        request_source: "forwarded",
-
-        forwarded_by: user.id,
-        forwarded_at: new Date(),
-        forward_note: notes || null,
-
-        /**
-         * Final delivery location.
-         * District B will deliver to original requester.
-         */
-        final_to_organization_id: requesterStore.id,
-        final_to_store_code: requesterStore.store_code,
-        final_to_store_name: requesterStore.store_name,
-        final_to_address: requesterStore.address || null,
-        final_to_city: requesterStore.city || null,
-        final_to_state: requesterStore.state || null,
-        final_to_pincode: requesterStore.pincode || null,
-        final_to_latitude: requesterStore.latitude || null,
-        final_to_longitude: requesterStore.longitude || null,
-
-        priority: originalRequest.priority || "medium",
-        category: originalRequest.category || null,
-        notes:
-          notes ||
-          `Transferred by Head Office. Deliver directly to ${requesterStore.store_name}.`,
-
-        status: "pending",
-        created_by: user.id,
-      },
-      { transaction: t }
-    );
-
-    const childItems = requestItems.map((item) => ({
-      request_id: forwardedRequest.id,
-      item_id: item.item_id,
-      request_qty: item.request_qty,
-      request_weight: item.request_weight || null,
-
-      /**
-       * approved_qty cannot be null in your DB.
-       */
-      approved_qty: item.approved_qty ?? 0,
-      approved_weight: item.approved_weight ?? 0,
-
-      rate: item.rate || null,
-      remarks: item.remarks || null,
-      status: "pending",
-    }));
-
-    await StockRequestItem.bulkCreate(childItems, { transaction: t });
-
-    originalRequest.status = "forwarded";
-    originalRequest.forwarded_by = user.id;
-    originalRequest.forwarded_at = new Date();
-    originalRequest.forward_note = notes || null;
-
-    await originalRequest.save({ transaction: t });
-
-    await ActivityLog.create(
-      {
-        organization_id: user.organization_id,
-        user_id: user.id,
-        action: "HEAD_TO_DISTRICT_REQUEST_TRANSFERRED",
-        module_name: "stock_request",
-        reference_id: forwardedRequest.id,
-        reference_no: forwardedRequest.request_no,
-        title: "Request transferred to district",
-        description: `${originalRequest.request_no} transferred to ${selectedDistrict.store_name} for direct delivery to ${requesterStore.store_name}`,
-        meta: {
-          original_request_id: originalRequest.id,
-          original_request_no: originalRequest.request_no,
-          forwarded_request_id: forwardedRequest.id,
-          forwarded_request_no: forwardedRequest.request_no,
-
-          /**
-           * Keep both ids for debugging/future migration.
-           */
-          assigned_to_organization_id: targetDistrictOrgId,
-          assigned_to_actual_store_id: selectedDistrict.id,
-          assigned_to_store_code: selectedDistrict.store_code,
-
-          final_to_organization_id: requesterStore.id,
-          final_to_store_code: requesterStore.store_code,
-          total_items: childItems.length,
-        },
-        icon: "transfer",
-        color: "blue",
-      },
-      { transaction: t }
-    );
-
-    await SystemActivity.create(
-      {
-        title: "Head transferred request to district",
-        description: `Head transferred ${originalRequest.request_no} to ${selectedDistrict.store_name}. Final delivery to ${requesterStore.store_name}.`,
-        activity_type: "head_to_district_request_transferred",
-        module_name: "stock_request",
-        reference_id: forwardedRequest.id,
-        reference_no: forwardedRequest.request_no,
-        state_code: selectedDistrict.state_code || null,
-        district_code:
-          selectedDistrict.district_code ||
-          selectedDistrict.store_code ||
-          null,
-        store_code: selectedDistrict.store_code || null,
-        store_name: selectedDistrict.store_name || null,
-        created_by: user.id,
-
-        /**
-         * If your SystemActivity model has column `meta`,
-         * replace metadata with meta.
-         */
-        metadata: {
-          original_request_id: originalRequest.id,
-          original_request_no: originalRequest.request_no,
-          forwarded_request_id: forwardedRequest.id,
-          forwarded_request_no: forwardedRequest.request_no,
-
-          assigned_to_organization_id: targetDistrictOrgId,
-          assigned_to_actual_store_id: selectedDistrict.id,
-
-          final_delivery_store_id: requesterStore.id,
-          final_delivery_store_code: requesterStore.store_code,
-          final_delivery_store_name: requesterStore.store_name,
-          total_items: childItems.length,
-        },
-      },
-      { transaction: t }
-    );
-
-    await t.commit();
-
-    return res.status(201).json({
+    return res.status(200).json({
       success: true,
-      message: "Head to district request transferred successfully",
+      message: responseMessage,
+
       data: {
-        original_request: {
-          id: originalRequest.id,
-          request_no: originalRequest.request_no,
-          status: originalRequest.status,
+        complaint_id:
+          complaint.id,
+
+        complaint_no:
+          complaint.complaint_no,
+
+        transfer_id:
+          complaint.transfer_id,
+
+        transfer_no:
+          originalTransfer.transfer_no,
+
+        complaint_status:
+          overallComplaintStatus,
+
+        overall_complaint_status:
+          overallComplaintStatus,
+
+        updated_item: {
+          ...complaintItem,
+
+          requested_status:
+            requestedStatus,
+
+          status:
+            complaintItem.resolution_status,
+
+          auto_resolved:
+            requestedStatus === "resolved",
+
+          auto_closed:
+            requestedStatus === "resolved",
+
+          replacement_received:
+            complaintItem.replacement_received ||
+            false,
         },
-        forwarded_request: {
-          id: forwardedRequest.id,
-          request_no: forwardedRequest.request_no,
-          parent_request_id: forwardedRequest.parent_request_id,
-          request_source: forwardedRequest.request_source,
 
-          from_organization_id: forwardedRequest.from_organization_id,
-          from_store_code: forwardedRequest.from_store_code,
-          from_store_name: forwardedRequest.from_store_name,
+        replacement_transfer:
+          linkedReplacementTransfer
+            ? {
+                transfer_id:
+                  linkedReplacementTransfer.id,
 
-          /**
-           * This will now match old received API/user mapping.
-           * Example: North Delhi = 7
-           */
-          to_organization_id: forwardedRequest.to_organization_id,
+                transfer_no:
+                  linkedReplacementTransfer.transfer_no,
 
-          /**
-           * Actual district office details.
-           * Example: DST004 / District Office North Delhi
-           */
-          actual_district_store_id: selectedDistrict.id,
-          to_store_code:
-            forwardedRequest.to_store_code || forwardedRequest.to_district_code,
-          to_store_name:
-            forwardedRequest.to_store_name || forwardedRequest.to_district_name,
+                status:
+                  linkedReplacementTransfer.status,
+              }
+            : null,
 
-          final_to_organization_id: forwardedRequest.final_to_organization_id,
-          final_to_store_code: forwardedRequest.final_to_store_code,
-          final_to_store_name: forwardedRequest.final_to_store_name,
-          final_to_address: forwardedRequest.final_to_address,
+        flow: {
+          previous_status:
+            currentItemStatus,
 
-          status: forwardedRequest.status,
-          total_items: childItems.length,
+          requested_status:
+            requestedStatus,
+
+          final_item_status:
+            complaintItem.resolution_status,
+
+          final_complaint_status:
+            overallComplaintStatus,
         },
       },
     });
   } catch (error) {
-    await t.rollback();
+    await safeRollback(transaction);
 
-    console.error("forwardRequestToDistrictDirectDelivery error:", error);
+    console.error(
+      "updateComplaintItemStatus error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to transfer request to district",
+      message:
+        "Failed to update complaint item status",
       error: error.message,
     });
   }
 };
-
-
-
-const dtRetailForwardNo = (districtOrgId, retailOrgId) => {
-  return `REQ-DIST-FWD-${districtOrgId}-${retailOrgId}-${Date.now()}`;
-};
-
-const dtRetailStoreCode = (value) => {
-  return String(value || "").trim().toUpperCase();
-};
-
-const dtRetailClean = (value) => {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[\s-]+/g, "_");
-};
-
-const dtRetailIsDistrictUser = (user) => {
-  const level = dtRetailClean(user?.organization_level);
-  const role = dtRetailClean(user?.role);
-
-  return (
-    level === "district" ||
-    level === "district_office" ||
-    ["district_manager", "district_tl", "admin", "super_admin"].includes(role)
-  );
-};
-
-const dtRetailRollback = async (transaction, res, statusCode, payload) => {
-  await transaction.rollback();
-  return res.status(statusCode).json(payload);
-};
-
-const dtRetailIsFinalStatus = (status) => {
-  return [
-    "cancelled",
-    "rejected",
-    "received",
-    "completed",
-    "dispatched",
-    "forwarded",
-  ].includes(dtRetailClean(status));
-};
-
-export const transferDistrictRequestToRetail = async (req, res) => {
-  const t = await sequelize.transaction();
-
-  const clean = (v) =>
-    String(v || "")
-      .trim()
-      .toLowerCase()
-      .replace(/[\s-]+/g, "_");
-
-  const toInt = (v) =>
-    Number.isFinite(Number(v)) ? Number(v) : null;
-
-  const rollback = async (msg, code = 400, extra = {}) => {
-    try {
-      await t.rollback();
-    } catch {}
-
-    return res.status(code).json({
-      success: false,
-      message: msg,
-      ...extra,
-    });
-  };
+/**
+ * =========================================================
+ * SEND DIRECT REPLACEMENT AGAINST COMPLAINT
+ * =========================================================
+ *
+ * Flow:
+ *
+ * open
+ *   ↓
+ * under_review
+ *   ↓
+ * Direct replacement transfer create
+ *   ↓
+ * replacement_dispatched
+ *
+ * Route:
+ * POST /api/stock-transfer-complaints/:complaintId/items/:transferItemId/send-replacement
+ */
+export const sendReplacementAgainstComplaint = async (req, res) => {
+  const transaction = await sequelize.transaction();
 
   try {
+    // =====================================================
+    // REQUEST DATA
+    // =====================================================
+
+    const complaintId = Number(req.params.complaintId);
+    const transferItemId = Number(req.params.transferItemId);
+
+    const {
+      replacement_item_id,
+      dispatch_qty,
+      dispatch_weight,
+
+      remarks,
+      driver_name,
+      driver_phone,
+      vehicle_number,
+
+      pickup_address,
+      delivery_address,
+
+      expected_delivery_date,
+      expected_delivery_time,
+
+      additional_notes,
+    } = req.body;
+
     const user = req.user;
 
-    const requestId = toInt(req.params.requestId);
+    // =====================================================
+    // BASIC VALIDATION
+    // =====================================================
 
-    const retailStoreCode = String(req.body.retail_store_code || "")
+    if (!user?.id || !user?.organization_id) {
+      await transaction.rollback();
+
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized user",
+      });
+    }
+
+    if (!Number.isInteger(complaintId) || complaintId <= 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Valid complaintId is required",
+      });
+    }
+
+    if (!Number.isInteger(transferItemId) || transferItemId <= 0) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Valid transferItemId is required",
+      });
+    }
+
+    // =====================================================
+    // FETCH COMPLAINT
+    // =====================================================
+
+    const complaintRows = await sequelize.query(
+      `
+      SELECT
+        id,
+        complaint_no,
+        transfer_id,
+        from_organization_id,
+        to_organization_id,
+        complaint_type,
+        description,
+        items,
+        status,
+        raised_by,
+        resolution_note,
+        resolved_by,
+        resolved_at,
+        created_at,
+        updated_at
+      FROM stock_transfer_complaints
+      WHERE id = :complaintId
+      FOR UPDATE
+      `,
+      {
+        replacements: {
+          complaintId,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const complaint = complaintRows[0];
+
+    if (!complaint) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Complaint not found",
+      });
+    }
+
+    const sourceOrganizationId = Number(
+      complaint.from_organization_id
+    );
+
+    const destinationOrganizationId = Number(
+      complaint.to_organization_id
+    );
+
+    const loggedInOrganizationId = Number(
+      user.organization_id
+    );
+
+    // =====================================================
+    // AUTHORIZATION
+    // =====================================================
+
+    const normalizedRole = String(user.role || "")
       .trim()
-      .toUpperCase();
+      .toLowerCase()
+      .replaceAll("-", "_")
+      .replaceAll(" ", "_");
 
-    const notes = req.body.notes || null;
+    const allowedHeadOfficeRoles = [
+      "super_admin",
+      "head_office",
+      "head_office_admin",
+      "admin",
+    ];
 
-    // ---------------- AUTH ----------------
-    if (!user?.store_code) {
-      return rollback("Unauthorized user", 401);
-    }
-
-    if (clean(user.organization_level) !== "district") {
-      return rollback("Only district users allowed", 403);
-    }
-
-    if (!requestId) {
-      return rollback("Invalid request id", 400);
-    }
-
-    if (!retailStoreCode) {
-      return rollback("Retail store code is required", 400);
-    }
-
-    // ---------------- DISTRICT STORE ----------------
-    const districtStore = await Store.findOne({
-      where: {
-        store_code: String(user.store_code).trim().toUpperCase(),
-        is_active: true,
-      },
-      raw: true,
-      transaction: t,
-    });
-
-    if (!districtStore) {
-      return rollback("District store not found", 404);
-    }
-
-    const districtLevel = clean(
-      districtStore.organization_level ||
-        districtStore.organizationlevel
-    );
-
-    if (districtLevel !== "district") {
-      return rollback("Logged in store is not a district store", 400, {
-        district_store: {
-          id: districtStore.id,
-          store_code: districtStore.store_code,
-          store_name: districtStore.store_name,
-          organization_level:
-            districtStore.organization_level ||
-            districtStore.organizationlevel,
-          district_id: districtStore.district_id,
-        },
-      });
-    }
-
-    // ---------------- RETAIL STORE ----------------
-    const retailStore = await Store.findOne({
-      where: {
-        store_code: retailStoreCode,
-        is_active: true,
-      },
-      raw: true,
-      transaction: t,
-    });
-
-    if (!retailStore) {
-      return rollback("Retail store not found", 404);
-    }
-
-    // ---------------- RETAIL VALIDATION ----------------
-    const retailLevel = clean(
-      retailStore.organization_level ||
-        retailStore.organizationlevel
-    );
-
-    const isRetailStore =
-      retailLevel === "retail" ||
-      String(retailStore.store_code || "")
-        .toUpperCase()
-        .startsWith("STR");
-
-    if (!isRetailStore) {
-      return rollback("Selected store is not a retail store", 400, {
-        retail_store: {
-          id: retailStore.id,
-          store_code: retailStore.store_code,
-          store_name: retailStore.store_name,
-          organization_level:
-            retailStore.organization_level ||
-            retailStore.organizationlevel,
-        },
-      });
-    }
-
-    // ---------------- DISTRICT VALIDATION ----------------
-    const districtOrgId = Number(districtStore.id);
-
-    // FIXED:
-    // District store ka district_id null hona normal hai.
-    // Retail store ke district_id me district store ka id hota hai.
-    const districtMappingId = Number(districtStore.id);
-
-    const retailDistrictId = Number(retailStore.district_id || 0);
-
-    if (!retailDistrictId) {
-      return rollback("District mapping missing for retail store", 400, {
-        retail_store: {
-          id: retailStore.id,
-          store_code: retailStore.store_code,
-          store_name: retailStore.store_name,
-          organization_level:
-            retailStore.organization_level ||
-            retailStore.organizationlevel,
-          district_id: retailStore.district_id,
-        },
-      });
-    }
-
-    if (districtMappingId !== retailDistrictId) {
-      return rollback("Retail store not in same district", 400, {
-        district_mapping_id: districtMappingId,
-        retail_district_id: retailDistrictId,
-        district_store: {
-          id: districtStore.id,
-          store_code: districtStore.store_code,
-          store_name: districtStore.store_name,
-          organization_level:
-            districtStore.organization_level ||
-            districtStore.organizationlevel,
-          district_id: districtStore.district_id,
-        },
-        retail_store: {
-          id: retailStore.id,
-          store_code: retailStore.store_code,
-          store_name: retailStore.store_name,
-          organization_level:
-            retailStore.organization_level ||
-            retailStore.organizationlevel,
-          district_id: retailStore.district_id,
-        },
-      });
-    }
-
-    // ---------------- REQUEST ----------------
-    const requestOwnerIds = [
-      Number(user.organization_id || 0),
-      Number(districtStore.id || 0),
-      Number(districtMappingId || 0),
-    ].filter(Boolean);
-
-    const request = await StockRequest.findOne({
-      where: {
-        id: requestId,
-        to_organization_id: {
-          [Op.in]: requestOwnerIds,
-        },
-      },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-
-    if (!request) {
-      return rollback("Request not found for this district", 404, {
-        debug: {
-          request_id: requestId,
-          expected_to_organization_ids: requestOwnerIds,
-        },
-      });
-    }
-
-    const requestStatus = clean(request.status);
+    const isHeadOfficeUser =
+      allowedHeadOfficeRoles.includes(normalizedRole);
 
     if (
-      [
-        "cancelled",
-        "rejected",
-        "received",
-        "completed",
-        "dispatched",
-      ].includes(requestStatus)
+      loggedInOrganizationId !== sourceOrganizationId &&
+      !isHeadOfficeUser
     ) {
-      return rollback(
-        `Request cannot be forwarded because current status is ${request.status}`
+      await transaction.rollback();
+
+      return res.status(403).json({
+        success: false,
+        message:
+          "Only source organization or Head Office can send replacement",
+        source_organization_id: sourceOrganizationId,
+        logged_in_organization_id:
+          loggedInOrganizationId,
+      });
+    }
+
+    // =====================================================
+    // COMPLAINT STATUS VALIDATION
+    // =====================================================
+
+    const complaintStatus = String(
+      complaint.status || ""
+    )
+      .trim()
+      .toLowerCase()
+      .replaceAll("-", "_")
+      .replaceAll(" ", "_");
+
+    if (complaintStatus !== "under_review") {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Replacement can only be dispatched when complaint is under review",
+        current_status: complaintStatus,
+        required_status: "under_review",
+      });
+    }
+
+    // =====================================================
+    // PARSE COMPLAINT ITEMS
+    // =====================================================
+
+    let complaintItems = [];
+
+    if (Array.isArray(complaint.items)) {
+      complaintItems = complaint.items;
+    } else if (typeof complaint.items === "string") {
+      try {
+        const parsedItems = JSON.parse(complaint.items);
+
+        complaintItems = Array.isArray(parsedItems)
+          ? parsedItems
+          : [];
+      } catch {
+        complaintItems = [];
+      }
+    }
+
+    const complaintItemIndex = complaintItems.findIndex(
+      (item) =>
+        Number(item.transfer_item_id) === transferItemId
+    );
+
+    if (complaintItemIndex === -1) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "Transfer item not found inside complaint",
+        complaint_id: complaintId,
+        transfer_item_id: transferItemId,
+      });
+    }
+
+    const complaintItem = {
+      ...complaintItems[complaintItemIndex],
+    };
+
+    // =====================================================
+    // DUPLICATE REPLACEMENT CHECK
+    // =====================================================
+
+    if (
+      complaintItem.replacement_transfer_id ||
+      complaintItem.replacement_transfer_item_id
+    ) {
+      await transaction.rollback();
+
+      return res.status(409).json({
+        success: false,
+        message:
+          "Replacement has already been dispatched for this complaint item",
+        replacement_transfer_id:
+          complaintItem.replacement_transfer_id || null,
+        replacement_transfer_no:
+          complaintItem.replacement_transfer_no || null,
+      });
+    }
+        // =====================================================
+    // FETCH ORIGINAL TRANSFER
+    // =====================================================
+
+    const originalTransferRows =
+      await sequelize.query(
+        `
+       SELECT
+    id,
+    transfer_no,
+    tracking_number,
+    request_id,
+    from_organization_id,
+    to_organization_id,
+    transfer_date,
+    dispatch_date,
+    receive_date,
+    status,
+    remarks
+FROM stock_transfers
+        WHERE id = :transferId
+        FOR UPDATE
+        `,
+        {
+          replacements: {
+            transferId: Number(
+              complaint.transfer_id
+            ),
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const originalTransfer =
+      originalTransferRows[0];
+
+    if (!originalTransfer) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Original stock transfer not found",
+      });
+    }
+
+    // =====================================================
+    // FETCH ORIGINAL TRANSFER ITEM
+    // =====================================================
+
+    const originalTransferItemRows =
+      await sequelize.query(
+        `
+        SELECT
+          id,
+          transfer_id,
+          item_id,
+          qty,
+          weight,
+          rate,
+          remarks,
+          parent_batch_id,
+          child_batch_id,
+          external_item_data
+        FROM stock_transfer_items
+        WHERE id = :transferItemId
+        FOR UPDATE
+        `,
+        {
+          replacements: {
+            transferItemId,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const originalTransferItem =
+      originalTransferItemRows[0];
+
+    if (!originalTransferItem) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "Original transfer item not found",
+      });
+    }
+
+    if (
+      Number(originalTransferItem.transfer_id) !==
+      Number(originalTransfer.id)
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Transfer item does not belong to the complaint transfer",
+      });
+    }
+
+    // =====================================================
+    // ORIGINAL & REPLACEMENT ITEM
+    // =====================================================
+
+    const originalItemId = Number(
+      complaintItem.item_id ||
+        originalTransferItem.item_id
+    );
+
+    if (
+      !Number.isInteger(originalItemId) ||
+      originalItemId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Original item ID is missing or invalid",
+      });
+    }
+
+    const replacementItemId =
+      replacement_item_id === undefined ||
+      replacement_item_id === null ||
+      replacement_item_id === ""
+        ? originalItemId
+        : Number(replacement_item_id);
+
+    if (
+      !Number.isInteger(replacementItemId) ||
+      replacementItemId <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Valid replacement_item_id is required",
+      });
+    }
+
+    // =====================================================
+    // FETCH REPLACEMENT ITEM
+    // =====================================================
+
+    const replacementItemRows =
+      await sequelize.query(
+        `
+        SELECT
+          id,
+          article_code,
+          sku_code,
+          item_name,
+          metal_type,
+          category,
+          purity,
+          gross_weight,
+          net_weight,
+          stone_weight,
+          stone_amount,
+          making_charge,
+          purchase_rate,
+          sale_rate,
+          hsn_code,
+          unit,
+          current_status,
+          organization_id,
+          "storeCode",
+          "storeName",
+          is_active
+        FROM items
+        WHERE id = :replacementItemId
+        `,
+        {
+          replacements: {
+            replacementItemId,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const replacementItem =
+      replacementItemRows[0];
+
+    if (!replacementItem) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "Replacement item not found",
+        replacement_item_id:
+          replacementItemId,
+      });
+    }
+
+    if (replacementItem.is_active === false) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Inactive item cannot be sent as replacement",
+        replacement_item_id:
+          replacementItemId,
+      });
+    }
+
+    // =====================================================
+    // QUANTITY VALIDATION
+    // =====================================================
+
+    const shortageQty = Number(
+      complaintItem.shortage_qty || 0
+    );
+
+    const shortageWeight = Number(
+      complaintItem.shortage_weight || 0
+    );
+
+    const replacementQty =
+      dispatch_qty === undefined ||
+      dispatch_qty === null ||
+      dispatch_qty === ""
+        ? shortageQty
+        : Number(dispatch_qty);
+
+    const replacementWeight =
+      dispatch_weight === undefined ||
+      dispatch_weight === null ||
+      dispatch_weight === ""
+        ? shortageWeight
+        : Number(dispatch_weight);
+
+    if (
+      !Number.isFinite(shortageQty) ||
+      shortageQty <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Complaint does not contain valid shortage quantity",
+      });
+    }
+
+    if (
+      !Number.isFinite(replacementQty) ||
+      replacementQty <= 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "dispatch_qty must be greater than zero",
+      });
+    }
+
+    if (replacementQty > shortageQty) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Replacement quantity cannot exceed shortage quantity",
+      });
+    }
+
+    if (
+      !Number.isFinite(replacementWeight) ||
+      replacementWeight < 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "dispatch_weight cannot be negative",
+      });
+    }
+
+    if (
+      shortageWeight > 0 &&
+      replacementWeight > shortageWeight
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Replacement weight cannot exceed shortage weight",
+      });
+    }
+        // =====================================================
+    // FETCH SOURCE AND DESTINATION STORES
+    // Only actual database columns are selected.
+    // =====================================================
+
+    const sourceStoreRows = await sequelize.query(
+      `
+        SELECT
+          id,
+          store_code,
+          store_name,
+          organization_level,
+          state,
+          district,
+          district_id,
+          address,
+          phone_number,
+          is_active
+        FROM stores
+        WHERE id = :sourceOrganizationId
+      `,
+      {
+        replacements: {
+          sourceOrganizationId,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const sourceStore = sourceStoreRows[0];
+
+    if (!sourceStore) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message: "Source organization not found",
+        organization_id: sourceOrganizationId,
+      });
+    }
+
+    if (sourceStore.is_active === false) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message: "Source organization is inactive",
+        organization_id: sourceOrganizationId,
+      });
+    }
+
+    const destinationStoreRows =
+      await sequelize.query(
+        `
+          SELECT
+            id,
+            store_code,
+            store_name,
+            organization_level,
+            state,
+            district,
+            district_id,
+            address,
+            phone_number,
+            is_active
+          FROM stores
+          WHERE id = :destinationOrganizationId
+        `,
+        {
+          replacements: {
+            destinationOrganizationId,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const destinationStore =
+      destinationStoreRows[0];
+
+    if (!destinationStore) {
+      await transaction.rollback();
+
+      return res.status(404).json({
+        success: false,
+        message:
+          "Destination organization not found",
+        organization_id:
+          destinationOrganizationId,
+      });
+    }
+
+    if (destinationStore.is_active === false) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Destination organization is inactive",
+        organization_id:
+          destinationOrganizationId,
+      });
+    }
+
+    // =====================================================
+    // FETCH AND LOCK SOURCE STOCK
+    //
+    // Ek single stock row ke andar required quantity aur
+    // required weight dono available hone chahiye.
+    // =====================================================
+
+    const sourceStockRows = await sequelize.query(
+      `
+        SELECT
+          id,
+          item_id,
+          organization_id,
+          organization_type,
+          store_code,
+          batch_id,
+          COALESCE(available_qty, 0) AS available_qty,
+          COALESCE(available_weight, 0) AS available_weight,
+          COALESCE(reserved_qty, 0) AS reserved_qty,
+          COALESCE(reserved_weight, 0) AS reserved_weight,
+          COALESCE(transit_qty, 0) AS transit_qty,
+          COALESCE(transit_weight, 0) AS transit_weight,
+          COALESCE(damaged_qty, 0) AS damaged_qty,
+          COALESCE(damaged_weight, 0) AS damaged_weight,
+          COALESCE(dead_qty, 0) AS dead_qty,
+          COALESCE(dead_weight, 0) AS dead_weight
+        FROM stocks
+        WHERE organization_id = :sourceOrganizationId
+          AND item_id = :replacementItemId
+          AND COALESCE(available_qty, 0) >= :replacementQty
+          AND (
+            :replacementWeight = 0
+            OR COALESCE(available_weight, 0) >= :replacementWeight
+          )
+        ORDER BY
+          CASE
+            WHEN batch_id IS NOT NULL THEN 0
+            ELSE 1
+          END,
+          id ASC
+        LIMIT 1
+        FOR UPDATE
+      `,
+      {
+        replacements: {
+          sourceOrganizationId,
+          replacementItemId,
+          replacementQty,
+          replacementWeight,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const sourceStock = sourceStockRows[0];
+
+    // =====================================================
+    // STOCK NOT FOUND / INSUFFICIENT STOCK
+    // =====================================================
+
+    if (!sourceStock) {
+      const stockSummaryRows = await sequelize.query(
+        `
+          SELECT
+            COUNT(*)::integer AS stock_row_count,
+
+            COALESCE(
+              SUM(COALESCE(available_qty, 0)),
+              0
+            ) AS total_available_qty,
+
+            COALESCE(
+              SUM(COALESCE(available_weight, 0)),
+              0
+            ) AS total_available_weight
+
+          FROM stocks
+
+          WHERE organization_id = :sourceOrganizationId
+            AND item_id = :replacementItemId
+        `,
+        {
+          replacements: {
+            sourceOrganizationId,
+            replacementItemId,
+          },
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+      const stockSummary = stockSummaryRows[0];
+
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          Number(
+            stockSummary?.stock_row_count || 0
+          ) === 0
+            ? "Source stock record not found for replacement item"
+            : "Insufficient source stock for replacement",
+
+        original_item_id: originalItemId,
+
+        replacement_item_id:
+          replacementItemId,
+
+        source_organization_id:
+          sourceOrganizationId,
+
+        source_store_code:
+          sourceStore.store_code,
+
+        required_qty:
+          replacementQty,
+
+        required_weight:
+          replacementWeight,
+
+        total_available_qty: Number(
+          stockSummary?.total_available_qty || 0
+        ),
+
+        total_available_weight: Number(
+          stockSummary?.total_available_weight || 0
+        ),
+      });
+    }
+
+    // =====================================================
+    // OPENING STOCK VALUES
+    // =====================================================
+
+    const openingAvailableQty = Number(
+      sourceStock.available_qty || 0
+    );
+
+    const openingAvailableWeight = Number(
+      sourceStock.available_weight || 0
+    );
+
+    const openingReservedQty = Number(
+      sourceStock.reserved_qty || 0
+    );
+
+    const openingReservedWeight = Number(
+      sourceStock.reserved_weight || 0
+    );
+
+    const openingTransitQty = Number(
+      sourceStock.transit_qty || 0
+    );
+
+    const openingTransitWeight = Number(
+      sourceStock.transit_weight || 0
+    );
+
+    const openingDamagedQty = Number(
+      sourceStock.damaged_qty || 0
+    );
+
+    const openingDamagedWeight = Number(
+      sourceStock.damaged_weight || 0
+    );
+
+    // =====================================================
+    // CLOSING STOCK VALUES
+    //
+    // Replacement dispatch hone par:
+    // available stock kam hoga
+    // transit stock badhega
+    // =====================================================
+
+    const closingAvailableQty =
+      openingAvailableQty - replacementQty;
+
+    const closingAvailableWeight =
+      openingAvailableWeight - replacementWeight;
+
+    const closingReservedQty =
+      openingReservedQty;
+
+    const closingReservedWeight =
+      openingReservedWeight;
+
+    const closingTransitQty =
+      openingTransitQty + replacementQty;
+
+    const closingTransitWeight =
+      openingTransitWeight + replacementWeight;
+
+    const closingDamagedQty =
+      openingDamagedQty;
+
+    const closingDamagedWeight =
+      openingDamagedWeight;
+
+    // =====================================================
+    // FINAL NEGATIVE STOCK VALIDATION
+    // =====================================================
+
+    if (
+      closingAvailableQty < 0 ||
+      closingAvailableWeight < 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+        message:
+          "Source stock became negative during replacement validation",
+
+        available_qty:
+          openingAvailableQty,
+
+        available_weight:
+          openingAvailableWeight,
+
+        requested_qty:
+          replacementQty,
+
+        requested_weight:
+          replacementWeight,
+      });
+    }
+        // =====================================================
+    // GENERATE REPLACEMENT TRANSFER NUMBER
+    // =====================================================
+
+    const replacementTransferNo =
+      `RPL-${complaintId}-${Date.now()}-${Math.floor(
+        1000 + Math.random() * 9000
+      )}`;
+
+    const transferRemarks =
+      String(remarks || "").trim() ||
+      `Replacement dispatched against complaint ${complaint.complaint_no}`;
+
+    // =====================================================
+    // CREATE REPLACEMENT TRANSFER
+    // =====================================================
+
+    const replacementTransferRows =
+      await sequelize.query(
+        `
+        INSERT INTO stock_transfers
+        (
+          transfer_no,
+          request_id,
+          from_organization_id,
+          to_organization_id,
+          transfer_date,
+          dispatch_date,
+          status,
+          remarks,
+          approved_by,
+          dispatched_by,
+          created_by,
+          driver_name,
+          driver_phone,
+          vehicle_number,
+          tracking_number,
+          pickup_address,
+          delivery_address,
+          expected_delivery_date,
+          expected_delivery_time,
+          additional_notes,
+          created_at,
+          updated_at
+        )
+        VALUES
+        (
+          :replacementTransferNo,
+          NULL,
+          :sourceOrganizationId,
+          :destinationOrganizationId,
+          CURRENT_DATE,
+          NOW(),
+          'in_transit',
+          :transferRemarks,
+          :userId,
+          :userId,
+          :userId,
+          :driverName,
+          :driverPhone,
+          :vehicleNumber,
+          :replacementTransferNo,
+          :pickupAddress,
+          :deliveryAddress,
+          :expectedDeliveryDate,
+          :expectedDeliveryTime,
+          :additionalNotes,
+          NOW(),
+          NOW()
+        )
+        RETURNING *
+        `,
+        {
+          replacements: {
+            replacementTransferNo,
+            sourceOrganizationId,
+            destinationOrganizationId,
+
+            userId: Number(user.id),
+
+            transferRemarks,
+
+            driverName:
+              String(driver_name || "").trim() ||
+              null,
+
+            driverPhone:
+              String(driver_phone || "").trim() ||
+              null,
+
+            vehicleNumber:
+              String(vehicle_number || "").trim() ||
+              null,
+
+            pickupAddress:
+              String(pickup_address || "").trim() ||
+              sourceStore.address ||
+              null,
+
+            deliveryAddress:
+              String(delivery_address || "").trim() ||
+              destinationStore.address ||
+              null,
+
+            expectedDeliveryDate:
+              expected_delivery_date || null,
+
+            expectedDeliveryTime:
+              expected_delivery_time || null,
+
+            additionalNotes:
+              String(additional_notes || "").trim() ||
+              `Replacement against complaint ${complaint.complaint_no} and original transfer ${originalTransfer.transfer_no}`,
+          },
+
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const replacementTransfer =
+      replacementTransferRows[0];
+
+    if (!replacementTransfer) {
+      throw new Error(
+        "Replacement stock transfer could not be created"
       );
     }
 
-    if (requestStatus === "forwarded") {
-      return rollback("Request already forwarded");
-    }
+    // =====================================================
+    // CREATE REPLACEMENT TRANSFER ITEM
+    // =====================================================
 
-    // ---------------- ITEMS ----------------
-    const items = await StockRequestItem.findAll({
-      where: {
-        request_id: request.id,
-      },
-      transaction: t,
-    });
-
-    if (!items.length) {
-      return rollback("No items found in request");
-    }
-
-    // ---------------- DUPLICATE CHECK ----------------
-    const alreadyForwarded = await StockRequest.findOne({
-      where: {
-        parent_request_id: request.id,
-        request_source: "district_to_retail_forwarded",
-        to_organization_id: retailStore.id,
-      },
-      transaction: t,
-    });
-
-    if (alreadyForwarded) {
-      return rollback("Request already forwarded to this retail store", 409, {
-        forwarded_request_id: alreadyForwarded.id,
-        forwarded_request_no: alreadyForwarded.request_no,
-      });
-    }
-
-    // ---------------- CREATE FORWARDED REQUEST ----------------
-    const forwardedRequest = await StockRequest.create(
-      {
-        request_no: `REQ-DTR-${Date.now()}`,
-
-        from_organization_id: districtOrgId,
-        from_store_code: districtStore.store_code,
-        from_store_name: districtStore.store_name,
-
-        to_organization_id: retailStore.id,
-        to_store_code: retailStore.store_code,
-        to_store_name: retailStore.store_name,
-
-        to_district_code: districtStore.store_code,
-        to_district_name: districtStore.store_name,
-
-        parent_request_id: request.id,
-        request_source: "district_to_retail_forwarded",
-
-        status: "pending",
-
-        priority: request.priority || "medium",
-        category: request.category || null,
-
-        notes: notes || "Forwarded from district to retail",
-
-        created_by: user.id,
-        forwarded_by: user.id,
-        forwarded_at: new Date(),
-      },
-      { transaction: t }
+    const replacementRate = Number(
+      replacementItem.sale_rate ||
+      replacementItem.purchase_rate ||
+      originalTransferItem.rate ||
+      0
     );
 
-    // ---------------- COPY ITEMS ----------------
-    const childItems = items.map((i) => ({
-      request_id: forwardedRequest.id,
-      item_id: i.item_id,
-      request_qty: i.request_qty,
-      request_weight: i.request_weight || null,
+   const externalItemData = JSON.stringify({
+  complaint_id: complaintId,
+  complaint_no: complaint.complaint_no,
 
-      approved_qty: 0,
-      approved_weight: 0,
+  original_transfer_id: Number(originalTransfer.id),
 
-      rate: i.rate || null,
-      remarks: i.remarks || null,
-      status: "pending",
-    }));
+  original_transfer_no:
+    originalTransfer.transfer_no,
 
-    await StockRequestItem.bulkCreate(childItems, {
-      transaction: t,
-    });
+  original_tracking_number:
+    originalTransfer.tracking_number ||
+    originalTransfer.transfer_no,
 
-    // ---------------- UPDATE ORIGINAL REQUEST ----------------
-    request.status = "forwarded";
-    request.forwarded_by = user.id;
-    request.forwarded_at = new Date();
-    request.forward_note = notes || null;
+  original_transfer_item_id:
+    transferItemId,
 
-    await request.save({ transaction: t });
+  original_item_id:
+    originalItemId,
 
-    await t.commit();
+  replacement_item_id:
+    replacementItemId,
+
+  source_stock_id:
+    Number(sourceStock.id),
+
+  source_batch_id:
+    sourceStock.batch_id || null,
+});
+
+    const replacementTransferItemRows =
+      await sequelize.query(
+        `
+        INSERT INTO stock_transfer_items
+        (
+          transfer_id,
+          item_id,
+          qty,
+          weight,
+          rate,
+          remarks,
+          parent_batch_id,
+          child_batch_id,
+          external_item_data
+        )
+        VALUES
+        (
+          :replacementTransferId,
+          :replacementItemId,
+          :replacementQty,
+          :replacementWeight,
+          :replacementRate,
+          :itemRemarks,
+          :parentBatchId,
+          NULL,
+          CAST(:externalItemData AS jsonb)
+        )
+        RETURNING *
+        `,
+        {
+          replacements: {
+            replacementTransferId:
+              Number(replacementTransfer.id),
+
+            replacementItemId,
+
+            replacementQty,
+
+            replacementWeight,
+
+            replacementRate,
+
+            itemRemarks:
+              `Replacement against complaint ${complaint.complaint_no}`,
+
+            parentBatchId:
+              sourceStock.batch_id || null,
+
+            externalItemData,
+          },
+
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const replacementTransferItem =
+      replacementTransferItemRows[0];
+
+    if (!replacementTransferItem) {
+      throw new Error(
+        "Replacement transfer item could not be created"
+      );
+    }
+        // =====================================================
+    // UPDATE SOURCE STOCK: AVAILABLE -> TRANSIT
+    // =====================================================
+
+    const updatedStockRows = await sequelize.query(
+      `
+        UPDATE stocks
+        SET
+          available_qty = :closingAvailableQty,
+          available_weight = :closingAvailableWeight,
+          transit_qty = :closingTransitQty,
+          transit_weight = :closingTransitWeight,
+          updated_at = NOW()
+        WHERE id = :stockId
+        RETURNING
+          id,
+          item_id,
+          organization_id,
+          store_code,
+          batch_id,
+          available_qty,
+          available_weight,
+          reserved_qty,
+          reserved_weight,
+          transit_qty,
+          transit_weight,
+          damaged_qty,
+          damaged_weight,
+          dead_qty,
+          dead_weight,
+          updated_at
+      `,
+      {
+        replacements: {
+          stockId: Number(sourceStock.id),
+          closingAvailableQty,
+          closingAvailableWeight,
+          closingTransitQty,
+          closingTransitWeight,
+        },
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const updatedStock = updatedStockRows[0];
+
+    if (!updatedStock) {
+      throw new Error(
+        "Source stock could not be updated"
+      );
+    }
+
+    // =====================================================
+    // CREATE STOCK MOVEMENT
+    // movement_type = dispatch DB constraint me allowed hai
+    // =====================================================
+
+    const movementMakingCharge = Number(
+      replacementItem.making_charge || 0
+    );
+
+    const movementStoneAmount = Number(
+      replacementItem.stone_amount || 0
+    );
+
+    const movementTotalAmount =
+      replacementRate * replacementQty +
+      movementMakingCharge +
+      movementStoneAmount;
+
+    const stockMovementRows = await sequelize.query(
+      `
+        INSERT INTO stock_movements
+        (
+          organization_id,
+          item_id,
+          movement_type,
+          reference_type,
+          reference_id,
+          qty,
+          weight,
+
+          opening_available_qty,
+          closing_available_qty,
+
+          opening_reserved_qty,
+          closing_reserved_qty,
+
+          opening_transit_qty,
+          closing_transit_qty,
+
+          opening_damaged_qty,
+          closing_damaged_qty,
+
+          opening_available_weight,
+          closing_available_weight,
+
+          opening_reserved_weight,
+          closing_reserved_weight,
+
+          opening_transit_weight,
+          closing_transit_weight,
+
+          opening_damaged_weight,
+          closing_damaged_weight,
+
+          remarks,
+          created_by,
+          created_at,
+
+          rate,
+          making_charge,
+          stone_amount,
+          total_amount,
+          profit_amount,
+
+          from_organization_id,
+          to_organization_id,
+
+          movement_weight,
+          transfer_id
+        )
+        VALUES
+        (
+          :sourceOrganizationId,
+          :replacementItemId,
+          'dispatch',
+          'complaint_replacement',
+          :replacementTransferId,
+          :replacementQty,
+          :replacementWeight,
+
+          :openingAvailableQty,
+          :closingAvailableQty,
+
+          :openingReservedQty,
+          :closingReservedQty,
+
+          :openingTransitQty,
+          :closingTransitQty,
+
+          :openingDamagedQty,
+          :closingDamagedQty,
+
+          :openingAvailableWeight,
+          :closingAvailableWeight,
+
+          :openingReservedWeight,
+          :closingReservedWeight,
+
+          :openingTransitWeight,
+          :closingTransitWeight,
+
+          :openingDamagedWeight,
+          :closingDamagedWeight,
+
+          :movementRemarks,
+          :userId,
+          NOW(),
+
+          :movementRate,
+          :movementMakingCharge,
+          :movementStoneAmount,
+          :movementTotalAmount,
+          0,
+
+          :sourceOrganizationId,
+          :destinationOrganizationId,
+
+          :replacementWeight,
+          :replacementTransferId
+        )
+        RETURNING *
+      `,
+      {
+        replacements: {
+          sourceOrganizationId,
+          destinationOrganizationId,
+
+          replacementItemId,
+
+          replacementTransferId: Number(
+            replacementTransfer.id
+          ),
+
+          replacementQty,
+          replacementWeight,
+
+          openingAvailableQty,
+          closingAvailableQty,
+
+          openingReservedQty,
+          closingReservedQty,
+
+          openingTransitQty,
+          closingTransitQty,
+
+          openingDamagedQty,
+          closingDamagedQty,
+
+          openingAvailableWeight,
+          closingAvailableWeight,
+
+          openingReservedWeight,
+          closingReservedWeight,
+
+          openingTransitWeight,
+          closingTransitWeight,
+
+          openingDamagedWeight,
+          closingDamagedWeight,
+
+          movementRemarks:
+            `Replacement dispatched against complaint ${complaint.complaint_no}`,
+
+          userId: Number(user.id),
+
+          movementRate: replacementRate,
+          movementMakingCharge,
+          movementStoneAmount,
+          movementTotalAmount,
+        },
+
+        type: QueryTypes.SELECT,
+        transaction,
+      }
+    );
+
+    const stockMovement =
+      stockMovementRows[0];
+
+    if (!stockMovement) {
+      throw new Error(
+        "Stock movement could not be created"
+      );
+    }
+
+    // =====================================================
+    // UPDATE COMPLAINT ITEM JSONB
+    // =====================================================
+
+    const dispatchedAt =
+      new Date().toISOString();
+
+    const updatedComplaintItem = {
+      ...complaintItem,
+
+      status: "replacement_dispatched",
+
+      resolution_status:
+        "replacement_dispatched",
+
+      original_item_id:
+        originalItemId,
+
+      replacement_item_id:
+        replacementItemId,
+
+      replacement_transfer_id:
+        Number(replacementTransfer.id),
+
+      replacement_transfer_no:
+        replacementTransfer.transfer_no,
+
+      replacement_transfer_item_id:
+        Number(replacementTransferItem.id),
+
+      replacement_qty:
+        replacementQty,
+
+      replacement_weight:
+        replacementWeight,
+
+      replacement_rate:
+        replacementRate,
+
+      replacement_stock_id:
+        Number(sourceStock.id),
+
+      replacement_batch_id:
+        sourceStock.batch_id || null,
+
+      replacement_dispatched_by:
+        Number(user.id),
+
+      replacement_dispatched_at:
+        dispatchedAt,
+
+      resolution_note:
+        String(remarks || "").trim() ||
+        "Replacement item dispatched",
+    };
+
+    complaintItems[complaintItemIndex] =
+      updatedComplaintItem;
+
+    /*
+      Complaint ka main status under_review hi rakha gaya hai.
+
+      Kyunki database ke complaint status constraint ki
+      complete allowed values abhi confirm nahi hain.
+
+      Individual complaint item ke andar:
+      replacement_dispatched status save ho raha hai.
+    */
+
+    const updatedComplaintStatus =
+  "replacement_dispatched";
+
+    const updatedComplaintRows =
+      await sequelize.query(
+        `
+          UPDATE stock_transfer_complaints
+          SET
+            items = CAST(:complaintItems AS jsonb),
+            status = :updatedComplaintStatus,
+            resolution_note = :resolutionNote,
+            updated_at = NOW()
+          WHERE id = :complaintId
+          RETURNING
+            id,
+            complaint_no,
+            transfer_id,
+            from_organization_id,
+            to_organization_id,
+            complaint_type,
+            description,
+            items,
+            status,
+            raised_by,
+            resolution_note,
+            resolved_by,
+            resolved_at,
+            created_at,
+            updated_at
+        `,
+        {
+          replacements: {
+            complaintItems:
+              JSON.stringify(complaintItems),
+
+            updatedComplaintStatus,
+
+            resolutionNote:
+              String(remarks || "").trim() ||
+              `Replacement transfer ${replacementTransfer.transfer_no} dispatched`,
+
+            complaintId,
+          },
+
+          type: QueryTypes.SELECT,
+          transaction,
+        }
+      );
+
+    const updatedComplaint =
+      updatedComplaintRows[0];
+
+    if (!updatedComplaint) {
+      throw new Error(
+        "Complaint could not be updated"
+      );
+    }
+
+    // =====================================================
+    // COMMIT TRANSACTION
+    // =====================================================
+
+    await transaction.commit();
+
+    // =====================================================
+    // SUCCESS RESPONSE
+    // =====================================================
 
     return res.status(201).json({
       success: true,
-      message: "District request transferred to retail successfully",
+
+      message:
+        "Replacement item dispatched successfully",
+
       data: {
-        original_request: {
-          id: request.id,
-          request_no: request.request_no,
-          parent_request_id: request.parent_request_id,
-          request_source: request.request_source,
-          status: request.status,
-          from_organization_id: request.from_organization_id,
-          to_organization_id: request.to_organization_id,
+        complaint: {
+          id: Number(updatedComplaint.id),
+
+          complaint_no:
+            updatedComplaint.complaint_no,
+
+          status:
+            updatedComplaint.status,
+
+          original_transfer_id:
+            Number(originalTransfer.id),
+
+          original_transfer_no:
+            originalTransfer.transfer_no,
+
+          source_organization_id:
+            sourceOrganizationId,
+
+          source_store_code:
+            sourceStore.store_code,
+
+          destination_organization_id:
+            destinationOrganizationId,
+
+          destination_store_code:
+            destinationStore.store_code,
         },
 
-        forwarded_request: {
-          id: forwardedRequest.id,
-          request_no: forwardedRequest.request_no,
-          parent_request_id: forwardedRequest.parent_request_id,
-          request_source: forwardedRequest.request_source,
+        complaint_item: {
+          original_transfer_item_id:
+            transferItemId,
 
-          from_organization_id: forwardedRequest.from_organization_id,
-          from_store_code: forwardedRequest.from_store_code,
-          from_store_name: forwardedRequest.from_store_name,
+          original_item_id:
+            originalItemId,
 
-          to_organization_id: forwardedRequest.to_organization_id,
-          to_store_code: forwardedRequest.to_store_code,
-          to_store_name: forwardedRequest.to_store_name,
+          sent_qty: Number(
+            updatedComplaintItem.sent_qty || 0
+          ),
 
-          district_mapping_id: districtMappingId,
+          received_qty: Number(
+            updatedComplaintItem.received_qty || 0
+          ),
 
-          forwarded_by: forwardedRequest.forwarded_by,
-          forwarded_at: forwardedRequest.forwarded_at,
+          shortage_qty:
+            shortageQty,
 
-          notes: forwardedRequest.notes,
-          status: forwardedRequest.status,
+          shortage_weight:
+            shortageWeight,
 
-          total_items: childItems.length,
+          replacement_item_id:
+            replacementItemId,
 
-          items: childItems.map((item) => ({
-            item_id: item.item_id,
-            request_qty: item.request_qty,
-            request_weight: item.request_weight,
-            approved_qty: item.approved_qty,
-            approved_weight: item.approved_weight,
-            status: item.status,
-          })),
+          replacement_qty:
+            replacementQty,
+
+          replacement_weight:
+            replacementWeight,
+
+          resolution_status:
+            "replacement_dispatched",
+        },
+
+        replacement_transfer: {
+          id: Number(
+            replacementTransfer.id
+          ),
+
+          transfer_no:
+            replacementTransfer.transfer_no,
+
+          status:
+            replacementTransfer.status,
+
+          from_organization_id: Number(
+            replacementTransfer.from_organization_id
+          ),
+
+          to_organization_id: Number(
+            replacementTransfer.to_organization_id
+          ),
+
+          dispatch_date:
+            replacementTransfer.dispatch_date,
+
+          tracking_number:
+            replacementTransfer.tracking_number,
+
+          driver_name:
+            replacementTransfer.driver_name,
+
+          driver_phone:
+            replacementTransfer.driver_phone,
+
+          vehicle_number:
+            replacementTransfer.vehicle_number,
+        },
+
+        replacement_transfer_item: {
+          id: Number(
+            replacementTransferItem.id
+          ),
+
+          transfer_id: Number(
+            replacementTransferItem.transfer_id
+          ),
+
+          item_id: Number(
+            replacementTransferItem.item_id
+          ),
+
+          qty: Number(
+            replacementTransferItem.qty
+          ),
+
+          weight: Number(
+            replacementTransferItem.weight
+          ),
+
+          rate: Number(
+            replacementTransferItem.rate
+          ),
+        },
+
+        stock_after_dispatch: {
+          stock_id: Number(
+            updatedStock.id
+          ),
+
+          item_id: Number(
+            updatedStock.item_id
+          ),
+
+          organization_id: Number(
+            updatedStock.organization_id
+          ),
+
+          store_code:
+            updatedStock.store_code,
+
+          batch_id:
+            updatedStock.batch_id,
+
+          available_qty: Number(
+            updatedStock.available_qty
+          ),
+
+          available_weight: Number(
+            updatedStock.available_weight
+          ),
+
+          transit_qty: Number(
+            updatedStock.transit_qty
+          ),
+
+          transit_weight: Number(
+            updatedStock.transit_weight
+          ),
+        },
+
+        stock_movement: {
+          id: Number(
+            stockMovement.id
+          ),
+
+          movement_type:
+            stockMovement.movement_type,
+
+          reference_type:
+            stockMovement.reference_type,
+
+          reference_id: Number(
+            stockMovement.reference_id
+          ),
+
+          opening_available_qty: Number(
+            stockMovement.opening_available_qty
+          ),
+
+          closing_available_qty: Number(
+            stockMovement.closing_available_qty
+          ),
+
+          opening_transit_qty: Number(
+            stockMovement.opening_transit_qty
+          ),
+
+          closing_transit_qty: Number(
+            stockMovement.closing_transit_qty
+          ),
         },
       },
     });
-  } catch (err) {
-    try {
-      await t.rollback();
-    } catch {}
+  } catch (error) {
+    // =====================================================
+    // ROLLBACK TRANSACTION
+    // =====================================================
+
+    if (!transaction.finished) {
+      await transaction.rollback();
+    }
+
+    console.error(
+      "sendReplacementAgainstComplaint error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: err.message,
+
+      message:
+        "Failed to dispatch replacement item",
+
+      error:
+        error.message,
+
+      database_error:
+        error?.parent?.message ||
+        error?.original?.message ||
+        null,
+
+      sql_state:
+        error?.parent?.code ||
+        error?.original?.code ||
+        null,
     });
   }
 };
+/**
+ * ==========================================================
+ * GET COMPLAINT DETAILS (STORE)
+ * ==========================================================
+ * GET /stock-transfer-complaints/:complaintId
+ *
+ * Only the receiver store (complaint raiser)
+ * can view complaint details.
+ * ==========================================================
+ */
 
-
-export const downloadDeliveryChallanByTransfer = async (req, res) => {
+export const getComplaintDetails = async (req, res) => {
   try {
-    const transferId = Number(req.params.transferId);
+    const { complaintId } = req.params;
+    const user = req.user;
 
-    if (!Number.isInteger(transferId) || transferId <= 0) {
-      return res.status(400).json({
+    // =====================================================
+    // VALIDATION
+    // =====================================================
+
+    if (!user?.id || !user?.organization_id) {
+      return res.status(401).json({
         success: false,
-        message: "Valid transferId is required",
+        message: "Unauthorized user.",
       });
     }
 
-    const transfer = await StockTransfer.findByPk(transferId);
+    const id = Number(complaintId);
+
+    if (!Number.isInteger(id) || id <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid complaint id.",
+      });
+    }
+
+    // =====================================================
+    // FETCH COMPLAINT
+    // =====================================================
+
+    const complaint = await StockTransferComplaint.findByPk(id);
+
+    if (!complaint) {
+      return res.status(404).json({
+        success: false,
+        message: "Complaint not found.",
+      });
+    }
+
+    // =====================================================
+    // AUTHORIZATION
+    // =====================================================
+
+    if (
+      Number(user.organization_id) !==
+      Number(complaint.to_organization_id)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message:
+          "You are not authorized to view this complaint.",
+      });
+    }
+
+    // =====================================================
+    // FETCH EVERYTHING
+    // =====================================================
+
+    const [
+      transfer,
+      transferItems,
+      senderStore,
+      receiverStore,
+    ] = await Promise.all([
+      StockTransfer.findByPk(complaint.transfer_id),
+
+      StockTransferItem.findAll({
+        where: {
+          transfer_id: complaint.transfer_id,
+        },
+        raw: true,
+      }),
+
+      sequelize.query(
+        `
+        SELECT
+            id,
+            store_code,
+            store_name,
+            organization_level,
+            state,
+            district,
+            district_id,
+            address,
+            phone_number,
+            is_active
+        FROM stores
+        WHERE id=:id
+        `,
+        {
+          replacements: {
+            id: complaint.from_organization_id,
+          },
+          type: QueryTypes.SELECT,
+        }
+      ),
+
+      sequelize.query(
+        `
+        SELECT
+            id,
+            store_code,
+            store_name,
+            organization_level,
+            state,
+            district,
+            district_id,
+            address,
+            phone_number,
+            is_active
+        FROM stores
+        WHERE id=:id
+        `,
+        {
+          replacements: {
+            id: complaint.to_organization_id,
+          },
+          type: QueryTypes.SELECT,
+        }
+      ),
+    ]);
 
     if (!transfer) {
       return res.status(404).json({
         success: false,
-        message: "Transfer not found",
+        message: "Transfer not found.",
       });
     }
 
-    const request = await StockRequest.findByPk(transfer.request_id);
+    const fromStore = senderStore[0] || null;
+    const toStore = receiverStore[0] || null;
 
-    if (!request) {
-      return res.status(404).json({
-        success: false,
-        message: "Linked stock request not found",
-      });
-    }
+    // =====================================================
+    // PREPARE MAPS
+    // =====================================================
 
-    const transferItems = await StockTransferItem.findAll({
-      where: {
-        transfer_id: transfer.id,
-      },
-      include: [
-        {
-          model: Item,
-          as: "item",
-          required: false,
-        },
-      ],
-    });
+    const transferItemMap = new Map();
 
-    const fromStore = await Store.findOne({
-      where: { id: transfer.from_organization_id },
-    });
-
-    const toStore = await Store.findOne({
-      where: { id: transfer.to_organization_id },
-    });
-
-    const challanItems = transferItems.map((row) => {
-      const item = row.item || {};
-
-      const qty = Number(row.qty || 0);
-      const weight = Number(row.weight || 0);
-      const rate = Number(row.rate || 0);
-
-      return {
-        item_id: row.item_id,
-        item_name: item.item_name || "-",
-        product_code: item.article_code || item.sku_code || "-",
-        hsn_code: item.hsn_code || "-",
-        purity: item.purity || "-",
-        qty,
-        weight,
-        rate,
-        making_charge: item.making_charge || 0,
-        huid_code: item.huid_code || "-",
-        base_value: weight > 0 ? weight * rate : qty * rate,
-      };
-    });
-
-    const challanPdf = await generateDeliveryChallanPdf({
-      transfer,
-      request,
-      fromStore,
-      toStore,
-      challanItems,
-      driver: {
-        driver_name: transfer.driver_name,
-        driver_phone: transfer.driver_phone,
-        vehicle_number: transfer.vehicle_number,
-        pickup_address: transfer.pickup_address,
-        delivery_address: transfer.delivery_address,
-      },
-    });
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${challanPdf.fileName}"`
+    transferItems.forEach((x) =>
+      transferItemMap.set(Number(x.id), x)
     );
 
-    return res.sendFile(challanPdf.filePath);
-  } catch (error) {
-    console.error("downloadDeliveryChallanByTransfer error:", error);
+    const itemIds = [
+      ...new Set(
+        transferItems.map((x) =>
+          Number(x.item_id)
+        )
+      ),
+    ];
 
-    return res.status(500).json({
-      success: false,
-      message: "Failed to download delivery challan",
-      error: error.message,
-    });
-  }
-};
-import fs from "fs";
+    const items =
+      itemIds.length === 0
+        ? []
+        : await Item.findAll({
+            where: {
+              id: {
+                [Op.in]: itemIds,
+              },
+            },
+            raw: true,
+          });
 
-export const dispatchNewItemTransfer = async (req, res) => {
-  const transaction = await sequelize.transaction();
-  const uploadedLocalPaths = [];
+    const itemMap = new Map();
 
-  const safeRollback = async () => {
-    if (!transaction.finished) await transaction.rollback();
-  };
+    items.forEach((x) =>
+      itemMap.set(Number(x.id), x)
+    );
 
-  const addLocalPath = (file) => {
-    if (file?.path) uploadedLocalPaths.push(file.path);
-  };
+    const complaintItems = Array.isArray(
+      complaint.items
+    )
+      ? complaint.items
+      : [];
 
-  const isValidPhone = (phone) => /^[6-9]\d{9}$/.test(String(phone).trim());
+    let totalSentQty = 0;
+    let totalReceivedQty = 0;
+    let totalShortageQty = 0;
 
-  const isPositiveNumber = (value) =>
-    !isNaN(Number(value)) && Number(value) > 0;
+    let totalSentWeight = 0;
+    let totalReceivedWeight = 0;
+    let totalShortageWeight = 0;
 
-  const isValidNonNegativeNumber = (value) => {
-    return value === undefined || value === null || value === ""
-      ? true
-      : !isNaN(Number(value)) && Number(value) >= 0;
-  };
+    const formattedItems = [];
+        // =====================================================
+    // BUILD ITEM DETAILS
+    // =====================================================
 
-  const isPastDate = (date) => {
-    if (!date) return false;
+    for (const complaintItem of complaintItems) {
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+      const transferItem =
+        transferItemMap.get(
+          Number(complaintItem.transfer_item_id)
+        ) || null;
 
-    const inputDate = new Date(date);
-    inputDate.setHours(0, 0, 0, 0);
+      const item =
+        itemMap.get(
+          Number(complaintItem.item_id)
+        ) || null;
 
-    return inputDate < today;
-  };
-
-  const uploadFileSafely = async (file, folder, type, errorMessage) => {
-    try {
-      const uploaded = await uploadToCloudinary(file.path, folder, type);
-      return uploaded.secure_url;
-    } catch (err) {
-      throw new Error(errorMessage || "File upload failed");
-    }
-  };
-
-  try {
-    const {
-      remarks,
-      driver_name,
-      driver_phone,
-      vehicle_number,
-      pickup_address,
-      delivery_address,
-      expected_delivery_date,
-      expected_delivery_time,
-      additional_notes,
-      items,
-      to_organization_id,
-    } = req.body;
-
-    const user = req.user;
-
-    if (!user?.id || !user?.organization_id) {
-      await safeRollback();
-      return res.status(401).json({
-        success: false,
-        message: "Invalid user token",
-      });
-    }
-
-    if (!to_organization_id) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Destination organization is required",
-      });
-    }
-
-    let parsedItems = [];
-
-    try {
-      if (Array.isArray(items)) {
-        parsedItems = items;
-      } else if (typeof items === "string") {
-        parsedItems = JSON.parse(items);
-      } else {
-        parsedItems = parseItemsFromBody(req.body) || [];
-      }
-    } catch (err) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Invalid items JSON format",
-      });
-    }
-
-    if (!Array.isArray(parsedItems) || !parsedItems.length) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Items required",
-      });
-    }
-
-    if (!driver_name || !String(driver_name).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Driver name is required",
-      });
-    }
-
-    if (!driver_phone || !String(driver_phone).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Driver phone is required",
-      });
-    }
-
-    if (!isValidPhone(driver_phone)) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Driver phone must be a valid 10 digit Indian mobile number",
-      });
-    }
-
-    if (!vehicle_number || !String(vehicle_number).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Vehicle number is required",
-      });
-    }
-
-    if (!pickup_address || !String(pickup_address).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Pickup address is required",
-      });
-    }
-
-    if (!delivery_address || !String(delivery_address).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Delivery address is required",
-      });
-    }
-
-    if (expected_delivery_date && isPastDate(expected_delivery_date)) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Expected delivery date cannot be in the past",
-      });
-    }
-
-    // ================= FILES =================
-    const driverPhotoFile = req.files?.driver_photo?.[0] || null;
-    const dispatchImageFiles = req.files?.dispatch_images || [];
-    const dispatchVideoFile = req.files?.dispatch_video?.[0] || null;
-    const eWayBillFile = req.files?.e_way_bill?.[0] || null;
-
-    addLocalPath(driverPhotoFile);
-    dispatchImageFiles.forEach(addLocalPath);
-    addLocalPath(dispatchVideoFile);
-    addLocalPath(eWayBillFile);
-
-    let driver_photo_url = null;
-    let dispatch_image_urls = [];
-    let dispatch_video_url = null;
-    let e_way_bill_url = null;
-
-    if (driverPhotoFile?.path) {
-      driver_photo_url = await uploadFileSafely(
-        driverPhotoFile,
-        "new-item/driver-photo",
-        "image",
-        "Failed to upload driver photo"
-      );
-    }
-
-    for (const file of dispatchImageFiles) {
-      const imageUrl = await uploadFileSafely(
-        file,
-        "new-item/dispatch-images",
-        "image",
-        "Failed to upload dispatch image"
+      const sentQty = Number(
+        complaintItem.sent_qty || 0
       );
 
-      dispatch_image_urls.push(imageUrl);
-    }
-
-    if (dispatchVideoFile?.path) {
-      dispatch_video_url = await uploadFileSafely(
-        dispatchVideoFile,
-        "new-item/dispatch-video",
-        "video",
-        "Failed to upload dispatch video"
+      const receivedQty = Number(
+        complaintItem.received_qty || 0
       );
-    }
 
-    if (eWayBillFile?.path) {
-      const isPdf =
-        eWayBillFile.mimetype === "application/pdf" ||
-        eWayBillFile.originalname?.toLowerCase().endsWith(".pdf");
-
-      e_way_bill_url = await uploadFileSafely(
-        eWayBillFile,
-        "new-item/e-way-bill",
-        isPdf ? "raw" : "image",
-        "Failed to upload e-way bill"
+      const shortageQty = Number(
+        complaintItem.shortage_qty || 0
       );
-    }
 
-    // ================= CREATE TRANSFER =================
-    const transfer = await StockTransfer.create(
-      {
-        transfer_no: generateTransferNo(),
-        from_organization_id: user.organization_id,
-        to_organization_id,
-        status: "in_transit",
+      const sentWeight = Number(
+        complaintItem.sent_weight || 0
+      );
 
-        driver_name: String(driver_name).trim(),
-        driver_phone: String(driver_phone).trim(),
-        vehicle_number: String(vehicle_number).trim(),
-        pickup_address: String(pickup_address).trim(),
-        delivery_address: String(delivery_address).trim(),
-        expected_delivery_date,
-        expected_delivery_time,
-        additional_notes,
-        remarks: remarks || null,
+      const receivedWeight = Number(
+        complaintItem.received_weight || 0
+      );
 
-        driver_photo_url,
-        dispatch_image_url: dispatch_image_urls.length
-          ? JSON.stringify(dispatch_image_urls)
+      const shortageWeight = Number(
+        complaintItem.shortage_weight || 0
+      );
+
+      // =============================================
+      // SUMMARY
+      // =============================================
+
+      totalSentQty += sentQty;
+      totalReceivedQty += receivedQty;
+      totalShortageQty += shortageQty;
+
+      totalSentWeight += sentWeight;
+      totalReceivedWeight += receivedWeight;
+      totalShortageWeight += shortageWeight;
+
+      // =============================================
+      // PUSH ITEM
+      // =============================================
+
+      formattedItems.push({
+
+        transfer_item_id:
+          complaintItem.transfer_item_id,
+
+        item_id:
+          complaintItem.item_id,
+
+        article_code:
+          item?.article_code ?? null,
+
+        sku_code:
+          item?.sku_code ?? null,
+
+        item_name:
+          item?.item_name ?? null,
+
+        category:
+          item?.category ?? null,
+
+        metal_type:
+          item?.metal_type ?? null,
+
+        purity:
+          item?.purity ?? null,
+
+        details:
+          item?.details ?? null,
+
+        image_url:
+          item?.image_url ?? null,
+
+        qr_code_url:
+          item?.qr_code_url ?? null,
+
+        qr_code_value:
+          item?.qr_code_value ?? null,
+
+        unit:
+          item?.unit ?? null,
+
+        gross_weight:
+          Number(item?.gross_weight || 0),
+
+        net_weight:
+          Number(item?.net_weight || 0),
+
+        stone_weight:
+          Number(item?.stone_weight || 0),
+
+        making_charge:
+          Number(item?.making_charge || 0),
+
+        purchase_rate:
+          Number(item?.purchase_rate || 0),
+
+        sale_rate:
+          Number(item?.sale_rate || 0),
+
+        current_status:
+          item?.current_status ?? null,
+
+        organization_id:
+          item?.organization_id ?? null,
+
+        // =========================================
+        // Transfer Snapshot
+        // =========================================
+
+        transfer: transferItem
+          ? {
+
+              id:
+                transferItem.id,
+
+              qty:
+                Number(
+                  transferItem.qty || 0
+                ),
+
+              weight:
+                Number(
+                  transferItem.weight || 0
+                ),
+
+              rate:
+                Number(
+                  transferItem.rate || 0
+                ),
+
+              remarks:
+                transferItem.remarks,
+            }
           : null,
-        dispatch_video_url,
-        e_way_bill_url,
 
-        created_by: user.id,
-        dispatched_by: user.id,
-      },
-      { transaction }
-    );
+        // =========================================
+        // Complaint Snapshot
+        // =========================================
 
-    // ================= ITEMS =================
-    for (const row of parsedItems) {
-      const {
-        item_name,
-        article_code,
-        sku_code,
-        qty,
-        weight,
-        rate,
-        purity,
-        hsn_code,
-      } = row;
+        complaint: {
 
-      if (!item_name || !String(item_name).trim()) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: "item_name is required",
-        });
-      }
+          sent_qty:
+            sentQty,
 
-      if (!isPositiveNumber(qty)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Valid qty is required for item ${item_name}`,
-        });
-      }
+          received_qty:
+            receivedQty,
 
-      if (!isValidNonNegativeNumber(weight)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Weight cannot be negative for item ${item_name}`,
-        });
-      }
+          shortage_qty:
+            shortageQty,
 
-      if (!isValidNonNegativeNumber(rate)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Rate cannot be negative for item ${item_name}`,
-        });
-      }
+          sent_weight:
+            sentWeight,
 
-      if (!isValidNonNegativeNumber(row.gross_weight)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Gross weight cannot be negative for item ${item_name}`,
-        });
-      }
+          received_weight:
+            receivedWeight,
 
-      if (!isValidNonNegativeNumber(row.net_weight)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Net weight cannot be negative for item ${item_name}`,
-        });
-      }
+          shortage_weight:
+            shortageWeight,
 
-      if (!isValidNonNegativeNumber(row.stone_weight)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Stone weight cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.stone_amount)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Stone amount cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.making_charge)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Making charge cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.purchase_rate)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Purchase rate cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.sale_rate)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Sale rate cannot be negative for item ${item_name}`,
-        });
-      }
-
-      let item = null;
-      let isNewItem = false;
-
-      // =====================================================
-      // CASE 1: EXISTING HEAD INVENTORY ITEM
-      // item_id ya sku_code mila to Head inventory se item uthayega
-      // =====================================================
-      if (row.item_id) {
-        item = await Item.findOne({
-          where: {
-            id: row.item_id,
-            organization_id: user.organization_id,
-            is_active: true,
-          },
-          transaction,
-        });
-      }
-
-      if (!item && sku_code) {
-        item = await Item.findOne({
-          where: {
-            sku_code: String(sku_code).trim(),
-            organization_id: user.organization_id,
-            is_active: true,
-          },
-          transaction,
-        });
-      }
-
-      // =====================================================
-      // CASE 2: BRAND NEW ITEM
-      // Agar Head inventory me item nahi mila to new item create hoga
-      // =====================================================
-      if (!item) {
-        isNewItem = true;
-
-        if (!row.metal_type || !String(row.metal_type).trim()) {
-          await safeRollback();
-          return res.status(400).json({
-            success: false,
-            message: `metal_type is required for item ${item_name}`,
-          });
-        }
-
-        if (!row.category || !String(row.category).trim()) {
-          await safeRollback();
-          return res.status(400).json({
-            success: false,
-            message: `category is required for item ${item_name}`,
-          });
-        }
-
-        item = await Item.create(
-          {
-            article_code:
-              article_code ||
-              `ART-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-
-            sku_code:
-              sku_code ||
-              `SKU-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-
-            item_name: String(item_name).trim(),
-
-            metal_type: row.metal_type,
-            category: row.category,
-            subcategory: row.subcategory || "",
-
-            details: row.details || null,
-            purity: purity || "NA",
-
-            gross_weight: Number(row.gross_weight || weight || 0),
-            net_weight: Number(row.net_weight || weight || 0),
-            stone_weight: Number(row.stone_weight || 0),
-            stone_amount: Number(row.stone_amount || 0),
-
-            making_charge: Number(row.making_charge || rate || 0),
-            purchase_rate: Number(row.purchase_rate || 0),
-            sale_rate: Number(row.sale_rate || 0),
-
-            hsn_code: hsn_code || null,
-            unit: row.unit || "PCS",
-
-            organization_id: user.organization_id,
-            storeCode: user.store_code || user.storeCode || null,
-
-            current_status: "in_stock",
-            is_active: true,
-          },
-          { transaction }
-        );
-
-        // ================= INSERT INTO HEAD STOCK =================
-        await sequelize.query(
-          `
-          INSERT INTO stocks (
-            item_id,
-            organization_id,
-            store_code,
-            available_qty,
-            available_weight,
-            reserved_qty,
-            reserved_weight,
-            transit_qty,
-            transit_weight,
-            damaged_qty,
-            damaged_weight,
-            dead_qty,
-            dead_weight,
-            created_at,
-            updated_at
-          )
-          VALUES (
-            :item_id,
-            :organization_id,
-            :store_code,
-            :available_qty,
-            :available_weight,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            NOW(),
-            NOW()
-          )
-          `,
-          {
-            replacements: {
-              item_id: item.id,
-              organization_id: user.organization_id,
-              store_code: user.store_code || user.storeCode || null,
-              available_qty: Number(qty),
-              available_weight: Number(weight || item.gross_weight || 0),
-            },
-            type: QueryTypes.INSERT,
-            transaction,
-          }
-        );
-
-        // ================= CREATE ROOT BATCH FOR NEW ITEM =================
-        const batchNo = `BATCH-${Date.now()}-${Math.floor(
-          Math.random() * 1000
-        )}`;
-
-        const [createdBatch] = await sequelize.query(
-          `
-          INSERT INTO inventory_batches (
-  batch_no,
-  item_id,
-  root_batch_id,
-  parent_batch_id,
-  organization_id,
-  current_organization_id,
-  total_qty,
-  available_qty,
-  total_weight,
-  available_weight,
-  split_level,
-  status,
-  created_at,
-  updated_at
-)
-VALUES (
-  :batch_no,
-  :item_id,
-  NULL,
-  NULL,
-  :organization_id,
-  :current_organization_id,
-  :total_qty,
-  :available_qty,
-  :total_weight,
-  :available_weight,
-  0,
-  'created',
-  NOW(),
-  NOW()
-)
-RETURNING *
-          `,
-          {
-            replacements: {
-              batch_no: batchNo,
-              item_id: item.id,
-               organization_id: user.organization_id,
-              current_organization_id: user.organization_id,
-              total_qty: Number(qty),
-              available_qty: Number(qty),
-              total_weight: Number(weight || item.gross_weight || 0),
-              available_weight: Number(weight || item.gross_weight || 0),
-            },
-            type: QueryTypes.SELECT,
-            transaction,
-          }
-        );
-
-        // root_batch_id same batch id update
-        await sequelize.query(
-          `
-          UPDATE inventory_batches
-          SET root_batch_id = :root_batch_id,
-              updated_at = NOW()
-          WHERE id = :batch_id
-          `,
-          {
-            replacements: {
-              root_batch_id: createdBatch.id,
-              batch_id: createdBatch.id,
-            },
-            type: QueryTypes.UPDATE,
-            transaction,
-          }
-        );
-      }
-
-      // =====================================================
-      // AB EXISTING YA NEW DONO CASE ME HEAD STOCK SE DISPATCH
-      // Stock minus + batch split
-      // =====================================================
-
-      const [stock] = await sequelize.query(
-        `
-        SELECT *
-        FROM stocks
-        WHERE item_id = :item_id
-        AND organization_id = :organization_id
-        FOR UPDATE
-        `,
-        {
-          replacements: {
-            item_id: item.id,
-            organization_id: user.organization_id,
-          },
-          type: QueryTypes.SELECT,
-          transaction,
-        }
-      );
-
-      if (!stock) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Stock not found for item ${item.item_name}`,
-        });
-      }
-
-      if (Number(stock.available_qty || 0) < Number(qty)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for ${item.item_name}. Available qty: ${stock.available_qty}`,
-        });
-      }
-
-      const [parentBatch] = await sequelize.query(
-        `
-        SELECT 
-          id,
-          batch_no,
-          root_batch_id,
-          parent_batch_id,
-          item_id,
-          current_organization_id,
-          total_qty,
-          available_qty,
-          total_weight,
-          available_weight,
-          split_level,
-          status
-        FROM inventory_batches
-        WHERE item_id = :item_id
-        AND current_organization_id = :organization_id
-        AND COALESCE(available_qty, 0) >= :qty
-        ORDER BY created_at ASC, id ASC
-        LIMIT 1
-        FOR UPDATE
-        `,
-        {
-          replacements: {
-            item_id: item.id,
-            organization_id: user.organization_id,
-            qty: Number(qty),
-          },
-          type: QueryTypes.SELECT,
-          transaction,
-        }
-      );
-
-      if (!parentBatch) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Available batch not found for item ${item.item_name}`,
-        });
-      }
-
-      const childBatch = await InventoryTrackingService.distributeBatch(
-        {
-          parent_batch_id: parentBatch.id,
-          to_organization_id,
-          quantity: Number(qty),
-          weight: Number(weight || item.gross_weight || 0),
-          reference_type: isNewItem
-            ? "HEAD_NEW_ITEM_DIRECT_TRANSFER"
-            : "HEAD_EXISTING_ITEM_DIRECT_TRANSFER",
-          reference_id: transfer.id,
-          remarks: remarks || "Head inventory direct transfer",
-          handled_by: user.id,
+          note:
+            complaintItem.note || "",
         },
-        { transaction }
-      );
+      });
 
-      await sequelize.query(
-        `
-        UPDATE stocks
-        SET 
-          available_qty = available_qty - :qty,
-          transit_qty = COALESCE(transit_qty, 0) + :qty,
-          available_weight = COALESCE(available_weight, 0) - :weight,
-          transit_weight = COALESCE(transit_weight, 0) + :weight,
-          updated_at = NOW()
-        WHERE id = :stock_id
-        `,
-        {
-          replacements: {
-            qty: Number(qty),
-            weight: Number(weight || item.gross_weight || 0),
-            stock_id: stock.id,
-          },
-          type: QueryTypes.UPDATE,
-          transaction,
-        }
-      );
-
-      await StockTransferItem.create(
-        {
-          transfer_id: transfer.id,
-
-          item_id: item.id,
-
-          batch_id: childBatch?.id || childBatch?.batch_id || null,
-          root_batch_id:
-            childBatch?.root_batch_id ||
-            parentBatch.root_batch_id ||
-            parentBatch.id,
-          parent_batch_id: parentBatch.id,
-
-          qty: Number(qty),
-          weight: Number(weight || item.gross_weight || 0),
-          rate: Number(rate || item.sale_rate || 0),
-
-          remarks: remarks || null,
-
-          external_item_data: {
-            source_type: isNewItem
-              ? "brand_new_item"
-              : "existing_head_inventory",
-
-            item_id: item.id,
-
-            parent_batch_id: parentBatch.id,
-            parent_batch_no: parentBatch.batch_no,
-
-            batch_id: childBatch?.id || childBatch?.batch_id || null,
-            batch_no: childBatch?.batch_no || null,
-
-            root_batch_id:
-              childBatch?.root_batch_id ||
-              parentBatch.root_batch_id ||
-              parentBatch.id,
-
-            item_name: item.item_name,
-            article_code: item.article_code,
-            sku_code: item.sku_code,
-            metal_type: item.metal_type,
-            category: item.category,
-            subcategory: item.subcategory,
-            details: item.details,
-            purity: item.purity,
-            gross_weight: item.gross_weight,
-            net_weight: item.net_weight,
-            stone_weight: item.stone_weight,
-            stone_amount: item.stone_amount,
-            making_charge: item.making_charge,
-            purchase_rate: item.purchase_rate,
-            sale_rate: item.sale_rate,
-            hsn_code: item.hsn_code,
-            unit: item.unit,
-            organization_id: item.organization_id,
-          },
-        },
-        { transaction }
-      );
     }
 
-    await transaction.commit();
+    // =====================================================
+    // SUMMARY OBJECT
+    // =====================================================
+
+    const summary = {
+
+      total_items:
+        formattedItems.length,
+
+      total_sent_qty:
+        Number(totalSentQty.toFixed(3)),
+
+      total_received_qty:
+        Number(totalReceivedQty.toFixed(3)),
+
+      total_shortage_qty:
+        Number(totalShortageQty.toFixed(3)),
+
+      total_sent_weight:
+        Number(totalSentWeight.toFixed(3)),
+
+      total_received_weight:
+        Number(totalReceivedWeight.toFixed(3)),
+
+      total_shortage_weight:
+        Number(totalShortageWeight.toFixed(3)),
+    };
+
+    // =====================================================
+    // TIMELINE
+    // =====================================================
+
+    const timeline = [];
+
+    timeline.push({
+      key: "raised",
+      title: "Complaint Raised",
+      completed: true,
+      date: complaint.created_at,
+    });
+
+    timeline.push({
+      key: "review",
+      title: "Under Review",
+      completed: [
+        "under_review",
+        "resolved",
+        "closed",
+        "rejected",
+      ].includes(complaint.status),
+      date:
+        complaint.status === "under_review"
+          ? complaint.updated_at
+          : null,
+    });
+
+    timeline.push({
+      key: "resolved",
+      title: "Resolved",
+      completed:
+        complaint.status === "resolved",
+      date:
+        complaint.resolved_at,
+    });
+
+    timeline.push({
+      key: "rejected",
+      title: "Rejected",
+      completed:
+        complaint.status === "rejected",
+      date:
+        complaint.resolved_at,
+    });
+
+    timeline.push({
+      key: "closed",
+      title: "Closed",
+      completed:
+        complaint.status === "closed",
+      date:
+        complaint.updated_at,
+    });
+        // =====================================================
+    // RESPONSE OBJECT
+    // =====================================================
+
+    const response = {
+      complaint: {
+        id: complaint.id,
+        complaint_no: complaint.complaint_no,
+        transfer_id: complaint.transfer_id,
+
+        complaint_type: complaint.complaint_type,
+        status: complaint.status,
+
+        description: complaint.description,
+
+        raised_by: complaint.raised_by,
+
+        from_organization_id:
+          complaint.from_organization_id,
+
+        to_organization_id:
+          complaint.to_organization_id,
+
+        created_at: complaint.created_at,
+        updated_at: complaint.updated_at,
+
+        resolution_note:
+          complaint.resolution_note,
+
+        resolved_by:
+          complaint.resolved_by,
+
+        resolved_at:
+          complaint.resolved_at,
+      },
+
+      transfer: {
+        id: transfer.id,
+
+        transfer_no:
+          transfer.transfer_no,
+
+        request_id:
+          transfer.request_id,
+
+        status:
+          transfer.status,
+
+        transfer_date:
+          transfer.transfer_date,
+
+        dispatch_date:
+          transfer.dispatch_date,
+
+        receive_date:
+          transfer.receive_date,
+
+        remarks:
+          transfer.remarks,
+
+        approved_by:
+          transfer.approved_by,
+
+        dispatched_by:
+          transfer.dispatched_by,
+
+        received_by:
+          transfer.received_by,
+
+        created_by:
+          transfer.created_by,
+
+        driver_name:
+          transfer.driver_name,
+
+        driver_phone:
+          transfer.driver_phone,
+
+        vehicle_number:
+          transfer.vehicle_number,
+
+        tracking_number:
+          transfer.tracking_number,
+
+        dispatch_address:
+          transfer.dispatch_address,
+
+        destination_address:
+          transfer.destination_address,
+
+        expected_delivery_date:
+          transfer.expected_delivery_date,
+
+        expected_delivery_time:
+          transfer.expected_delivery_time,
+
+        dispatch_image_url:
+          transfer.dispatch_image_url,
+
+        dispatch_video_url:
+          transfer.dispatch_video_url,
+
+        e_way_bill_url:
+          transfer.e_way_bill_url,
+      },
+
+      sender_store: fromStore
+        ? {
+            id: fromStore.id,
+            store_code:
+              fromStore.store_code,
+            store_name:
+              fromStore.store_name,
+            organization_level:
+              fromStore.organization_level,
+            state:
+              fromStore.state,
+            district:
+              fromStore.district,
+            district_id:
+              fromStore.district_id,
+            address:
+              fromStore.address,
+            phone_number:
+              fromStore.phone_number,
+            is_active:
+              fromStore.is_active,
+          }
+        : null,
+
+      receiver_store: toStore
+        ? {
+            id: toStore.id,
+            store_code:
+              toStore.store_code,
+            store_name:
+              toStore.store_name,
+            organization_level:
+              toStore.organization_level,
+            state:
+              toStore.state,
+            district:
+              toStore.district,
+            district_id:
+              toStore.district_id,
+            address:
+              toStore.address,
+            phone_number:
+              toStore.phone_number,
+            is_active:
+              toStore.is_active,
+          }
+        : null,
+
+      evidence: {
+        image_1_url:
+          complaint.image_1_url,
+
+        image_2_url:
+          complaint.image_2_url,
+
+        video_url:
+          complaint.video_url,
+      },
+
+      summary,
+
+      items: formattedItems,
+
+      timeline,
+    };
+
+    // =====================================================
+    // SUCCESS RESPONSE
+    // =====================================================
 
     return res.status(200).json({
       success: true,
-      message: "Head item dispatched successfully",
-      data: {
-        transfer_id: transfer.id,
-        transfer_no: transfer.transfer_no,
-        status: "in_transit",
-      },
+      message:
+        "Complaint details fetched successfully.",
+      data: response,
     });
+
   } catch (error) {
-    await safeRollback();
 
-    console.error("dispatchNewItemTransfer error:", error);
-
-    return res.status(500).json({
-      success: false,
-      message: error.message || "Server error",
-    });
-  } finally {
-    for (const filePath of uploadedLocalPaths) {
-      try {
-        if (filePath && fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
-      } catch (err) {
-        console.error("Local file cleanup error:", err.message);
-      }
-    }
-  }
-};
-export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
-  const transaction = await sequelize.transaction();
-  const uploadedLocalPaths = [];
-
-  const safeRollback = async () => {
-    if (!transaction.finished) {
-      await transaction.rollback();
-    }
-  };
-
-  const addLocalPath = (file) => {
-    if (file?.path) uploadedLocalPaths.push(file.path);
-  };
-
-  const isValidPhone = (phone) => /^[6-9]\d{9}$/.test(String(phone).trim());
-
-  const isPositiveNumber = (value) =>
-    !isNaN(Number(value)) && Number(value) > 0;
-
-  const isValidNonNegativeNumber = (value) => {
-    return value === undefined || value === null || value === ""
-      ? true
-      : !isNaN(Number(value)) && Number(value) >= 0;
-  };
-
-  const isPastDate = (date) => {
-    if (!date) return false;
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const inputDate = new Date(date);
-    inputDate.setHours(0, 0, 0, 0);
-
-    return inputDate < today;
-  };
-
-  const uploadFileSafely = async (file, folder, type, errorMessage) => {
-    try {
-      const uploaded = await uploadToCloudinary(file.path, folder, type);
-      return uploaded.secure_url;
-    } catch (err) {
-      throw new Error(errorMessage || "File upload failed");
-    }
-  };
-
-  try {
-    const {
-      remarks,
-      driver_name,
-      driver_phone,
-      vehicle_number,
-      pickup_address,
-      delivery_address,
-      expected_delivery_date,
-      expected_delivery_time,
-      additional_notes,
-      items,
-      to_organization_id,
-    } = req.body;
-
-    const user = req.user;
-
-    if (!user?.id || !user?.organization_id) {
-      await safeRollback();
-      return res.status(401).json({
-        success: false,
-        message: "Invalid user token",
-      });
-    }
-
-    const userLevel = String(user.organization_level || "").toLowerCase();
-
-    if (userLevel !== "district") {
-      await safeRollback();
-      return res.status(403).json({
-        success: false,
-        message: "Only district user can dispatch directly to retail",
-      });
-    }
-
-    if (!to_organization_id) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Retail organization is required",
-      });
-    }
-
-    const retailStore = await Store.findOne({
-      where: {
-        id: to_organization_id,
-        organization_level: "Retail",
-        is_active: true,
-      },
-      transaction,
-    });
-
-    if (!retailStore) {
-      await safeRollback();
-      return res.status(404).json({
-        success: false,
-        message: "Retail store not found",
-      });
-    }
-
-    if (
-      retailStore.district_id &&
-      Number(retailStore.district_id) !== Number(user.organization_id)
-    ) {
-      await safeRollback();
-      return res.status(403).json({
-        success: false,
-        message: "This retail store does not belong to your district",
-      });
-    }
-
-    let parsedItems = [];
-
-    try {
-      if (Array.isArray(items)) {
-        parsedItems = items;
-      } else if (typeof items === "string") {
-        parsedItems = JSON.parse(items);
-      } else {
-        parsedItems = parseItemsFromBody(req.body) || [];
-      }
-    } catch (err) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Invalid items JSON format",
-      });
-    }
-
-    if (!Array.isArray(parsedItems) || !parsedItems.length) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Items required",
-      });
-    }
-
-    if (!driver_name || !String(driver_name).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Driver name is required",
-      });
-    }
-
-    if (!driver_phone || !String(driver_phone).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Driver phone is required",
-      });
-    }
-
-    if (!isValidPhone(driver_phone)) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Driver phone must be a valid 10 digit Indian mobile number",
-      });
-    }
-
-    if (!vehicle_number || !String(vehicle_number).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Vehicle number is required",
-      });
-    }
-
-    if (!pickup_address || !String(pickup_address).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Pickup address is required",
-      });
-    }
-
-    if (!delivery_address || !String(delivery_address).trim()) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Delivery address is required",
-      });
-    }
-
-    if (expected_delivery_date && isPastDate(expected_delivery_date)) {
-      await safeRollback();
-      return res.status(400).json({
-        success: false,
-        message: "Expected delivery date cannot be in the past",
-      });
-    }
-
-    // ================= FILES =================
-    const driverPhotoFile = req.files?.driver_photo?.[0] || null;
-    const dispatchImageFiles = req.files?.dispatch_images || [];
-    const dispatchVideoFile = req.files?.dispatch_video?.[0] || null;
-    const eWayBillFile = req.files?.e_way_bill?.[0] || null;
-
-    addLocalPath(driverPhotoFile);
-    dispatchImageFiles.forEach(addLocalPath);
-    addLocalPath(dispatchVideoFile);
-    addLocalPath(eWayBillFile);
-
-    let driver_photo_url = null;
-    let dispatch_image_urls = [];
-    let dispatch_video_url = null;
-    let e_way_bill_url = null;
-
-    if (driverPhotoFile?.path) {
-      driver_photo_url = await uploadFileSafely(
-        driverPhotoFile,
-        "district-retail/driver-photo",
-        "image",
-        "Failed to upload driver photo"
-      );
-    }
-
-    for (const file of dispatchImageFiles) {
-      const imageUrl = await uploadFileSafely(
-        file,
-        "district-retail/dispatch-images",
-        "image",
-        "Failed to upload dispatch image"
-      );
-
-      dispatch_image_urls.push(imageUrl);
-    }
-
-    if (dispatchVideoFile?.path) {
-      dispatch_video_url = await uploadFileSafely(
-        dispatchVideoFile,
-        "district-retail/dispatch-video",
-        "video",
-        "Failed to upload dispatch video"
-      );
-    }
-
-    if (eWayBillFile?.path) {
-      const isPdf =
-        eWayBillFile.mimetype === "application/pdf" ||
-        eWayBillFile.originalname?.toLowerCase().endsWith(".pdf");
-
-      e_way_bill_url = await uploadFileSafely(
-        eWayBillFile,
-        "district-retail/e-way-bill",
-        isPdf ? "raw" : "image",
-        "Failed to upload e-way bill"
-      );
-    }
-
-    // ================= CREATE TRANSFER =================
-    const transfer = await StockTransfer.create(
-      {
-        transfer_no: generateTransferNo(),
-        from_organization_id: user.organization_id,
-        to_organization_id,
-        status: "in_transit",
-
-        driver_name: String(driver_name).trim(),
-        driver_phone: String(driver_phone).trim(),
-        vehicle_number: String(vehicle_number).trim(),
-        pickup_address: String(pickup_address).trim(),
-        delivery_address: String(delivery_address).trim(),
-        expected_delivery_date,
-        expected_delivery_time,
-        additional_notes,
-        remarks: remarks || null,
-
-        driver_photo_url,
-        dispatch_image_url: dispatch_image_urls.length
-          ? JSON.stringify(dispatch_image_urls)
-          : null,
-        dispatch_video_url,
-        e_way_bill_url,
-
-        created_by: user.id,
-        dispatched_by: user.id,
-      },
-      { transaction }
+    console.error(
+      "getComplaintDetails Error:",
+      error
     );
 
-    // ================= ITEMS =================
-    for (const row of parsedItems) {
-      const {
-        item_name,
-        article_code,
-        sku_code,
-        qty,
-        weight,
-        rate,
-        purity,
-        hsn_code,
-      } = row;
-
-      if (!item_name || !String(item_name).trim()) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: "item_name is required",
-        });
-      }
-
-      if (!sku_code || !String(sku_code).trim()) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `sku_code is required for item ${item_name}`,
-        });
-      }
-
-      if (!isPositiveNumber(qty)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Valid qty is required for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(weight)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Weight cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(rate)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Rate cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.gross_weight)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Gross weight cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.net_weight)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Net weight cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.stone_weight)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Stone weight cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.stone_amount)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Stone amount cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.making_charge)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Making charge cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.purchase_rate)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Purchase rate cannot be negative for item ${item_name}`,
-        });
-      }
-
-      if (!isValidNonNegativeNumber(row.sale_rate)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Sale rate cannot be negative for item ${item_name}`,
-        });
-      }
-
-      // ================= ITEM MASTER HANDLING BY SKU =================
-      const item = await Item.findOne({
-        where: {
-          sku_code: String(sku_code).trim(),
-          organization_id: user.organization_id,
-          is_active: true,
-        },
-        transaction,
-      });
-
-      if (!item) {
-        await safeRollback();
-        return res.status(404).json({
-          success: false,
-          message: `Item with SKU ${sku_code} not found in your inventory`,
-        });
-      }
-
-      // ================= CHECK OWN INVENTORY STOCK =================
-      const [stock] = await sequelize.query(
-        `
-        SELECT *
-        FROM stocks
-        WHERE item_id = :item_id
-        AND organization_id = :organization_id
-        FOR UPDATE
-        `,
-        {
-          replacements: {
-            item_id: item.id,
-            organization_id: user.organization_id,
-          },
-          type: QueryTypes.SELECT,
-          transaction,
-        }
-      );
-
-      if (!stock) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Stock not found for SKU ${sku_code}`,
-        });
-      }
-
-      if (Number(stock.available_qty || 0) < Number(qty)) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for SKU ${sku_code}. Available qty: ${stock.available_qty}`,
-        });
-      }
-
-      // ================= FIND AVAILABLE PARENT BATCH =================
-      const [parentBatch] = await sequelize.query(
-        `
-        SELECT 
-          id,
-          batch_no,
-          root_batch_id,
-          parent_batch_id,
-          item_id,
-          current_organization_id,
-          total_qty,
-          available_qty,
-          total_weight,
-          available_weight,
-          split_level,
-          status
-        FROM inventory_batches
-        WHERE item_id = :item_id
-        AND current_organization_id = :organization_id
-        AND COALESCE(available_qty, 0) >= :qty
-        ORDER BY created_at ASC, id ASC
-        LIMIT 1
-        FOR UPDATE
-        `,
-        {
-          replacements: {
-            item_id: item.id,
-            organization_id: user.organization_id,
-            qty: Number(qty),
-          },
-          type: QueryTypes.SELECT,
-          transaction,
-        }
-      );
-
-      if (!parentBatch) {
-        await safeRollback();
-        return res.status(400).json({
-          success: false,
-          message: `Available batch not found for SKU ${sku_code}`,
-        });
-      }
-
-      // ================= CREATE CHILD BATCH + BATCH SPLIT TRACKING =================
-      const childBatch = await InventoryTrackingService.distributeBatch(
-        {
-          parent_batch_id: parentBatch.id,
-          to_organization_id,
-          quantity: Number(qty),
-          weight: Number(weight || item.gross_weight || 0),
-          reference_type: "DISTRICT_TO_RETAIL_DIRECT_TRANSFER",
-          reference_id: transfer.id,
-          remarks: remarks || "District to retail direct transfer",
-          handled_by: user.id,
-        },
-        { transaction }
-      );
-
-      // ================= REDUCE STOCK INVENTORY AFTER TRANSFER =================
-      await sequelize.query(
-        `
-        UPDATE stocks
-        SET 
-          available_qty = available_qty - :qty,
-          transit_qty = COALESCE(transit_qty, 0) + :qty,
-          updated_at = NOW()
-        WHERE id = :stock_id
-        `,
-        {
-          replacements: {
-            qty: Number(qty),
-            stock_id: stock.id,
-          },
-          type: QueryTypes.UPDATE,
-          transaction,
-        }
-      );
-
-      await StockTransferItem.create(
-        {
-          transfer_id: transfer.id,
-
-          item_id: item.id,
-
-          batch_id: childBatch?.id || childBatch?.batch_id || null,
-          root_batch_id:
-            childBatch?.root_batch_id ||
-            parentBatch.root_batch_id ||
-            parentBatch.id,
-          parent_batch_id: parentBatch.id,
-
-          qty: Number(qty),
-
-          weight: Number(weight || item.gross_weight || 0),
-
-          rate: Number(rate || item.sale_rate || 0),
-
-          remarks: remarks || null,
-
-          external_item_data: {
-            item_id: item.id,
-
-            parent_batch_id: parentBatch.id,
-            parent_batch_no: parentBatch.batch_no,
-
-            batch_id: childBatch?.id || childBatch?.batch_id || null,
-            batch_no: childBatch?.batch_no || null,
-
-            root_batch_id:
-              childBatch?.root_batch_id ||
-              parentBatch.root_batch_id ||
-              parentBatch.id,
-
-            item_name: item.item_name,
-            article_code: item.article_code,
-            sku_code: item.sku_code,
-            metal_type: item.metal_type,
-            category: item.category,
-            subcategory: item.subcategory,
-            details: item.details,
-            purity: item.purity,
-            gross_weight: item.gross_weight,
-            net_weight: item.net_weight,
-            stone_weight: item.stone_weight,
-            stone_amount: item.stone_amount,
-            making_charge: item.making_charge,
-            purchase_rate: item.purchase_rate,
-            sale_rate: item.sale_rate,
-            hsn_code: item.hsn_code,
-            unit: item.unit,
-            organization_id: item.organization_id,
-          },
-        },
-        { transaction }
-      );
-    }
-
-    await transaction.commit();
-
-    return res.status(200).json({
-      success: true,
-      message: "District to retail item dispatched successfully",
-      data: {
-        transfer_id: transfer.id,
-        transfer_no: transfer.transfer_no,
-        status: "in_transit",
-      },
-    });
-  } catch (error) {
-    await safeRollback();
-
-    console.error("dispatchDistrictToRetailDirectTransfer error:", error);
-
     return res.status(500).json({
       success: false,
-      message: error.message || "Server error",
+      message:
+        "Failed to fetch complaint details.",
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
     });
-  } finally {
-    for (const filePath of uploadedLocalPaths) {
-      try {
-        if (filePath && fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-        }
-      } catch (err) {
-        console.error("Local file cleanup error:", err.message);
-      }
-    }
+
   }
 };
