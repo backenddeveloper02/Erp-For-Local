@@ -8609,7 +8609,7 @@ export const dispatchNewItemTransfer = async (req, res) => {
         from_organization_id: user.organization_id,
         to_organization_id,
         status: "in_transit",
-
+        transfer_type: "district_direct_transfer",
         driver_name: String(driver_name).trim(),
         driver_phone: String(driver_phone).trim(),
         vehicle_number: String(vehicle_number).trim(),
@@ -9429,7 +9429,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
         from_organization_id: user.organization_id,
         to_organization_id,
         status: "in_transit",
-
+        transfer_type: "head_direct_transfer_new_item",
         driver_name: String(driver_name).trim(),
         driver_phone: String(driver_phone).trim(),
         vehicle_number: String(vehicle_number).trim(),
