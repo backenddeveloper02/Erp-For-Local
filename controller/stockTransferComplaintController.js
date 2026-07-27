@@ -878,6 +878,10 @@ wrong_item_code:
       to_organization_id:
         transfer.to_organization_id,
 
+      // 👇 Ye line add karo
+      complaint_transfer_type:
+        transfer.transfer_type,
+
       complaint_type:
         normalizedComplaintType,
 
@@ -906,6 +910,7 @@ wrong_item_code:
       transaction,
     }
   );
+  
 
     // =====================================================
     // IMPORTANT CHANGE
@@ -1775,11 +1780,11 @@ const complaintItems =
               ),
             0
           );
-        const totalDamagedItems =
+      const totalDamagedQty =
   complaintItems.reduce(
     (total, item) =>
       total +
-      Number(item.damaged_item || 0),
+      Number(item.damaged_qty || 0),
     0
   );
         return {
@@ -1790,7 +1795,8 @@ const complaintItems =
 
           complaint_type:
             complaint.complaint_type,
-
+           complaint_transfer_type:
+    complaint.complaint_transfer_type || null,
           description:
             complaint.description,
 
@@ -1916,9 +1922,10 @@ raised_by_store: {
             total_shortage_qty: Number(
               totalShortageQty.toFixed(3)
             ),
-          total_damaged_items: Number(
-  totalDamagedItems.toFixed(3)
+          damaged_qty: Number(
+  totalDamagedQty.toFixed(3)
 ),
+
             total_sent_weight: Number(
               totalSentWeight.toFixed(3)
             ),
@@ -3416,11 +3423,11 @@ for (const item of itemMaster) {
               ),
             0
           );
-        const totalDamagedItems =
+     const totalDamagedQty =
   complaintItems.reduce(
     (total, item) =>
       total +
-      Number(item.damaged_item || 0),
+      Number(item.damaged_qty || 0),
     0
   );
         return {
@@ -3431,10 +3438,12 @@ for (const item of itemMaster) {
 
           complaint_type:
             complaint.complaint_type,
+          complaint_transfer_type:
+    complaint.complaint_transfer_type || null,
 
           description:
             complaint.description,
-
+    
           /*
            * Current complaint status.
            */
@@ -3469,9 +3478,10 @@ for (const item of itemMaster) {
             total_shortage_qty: Number(
               totalShortageQty.toFixed(3)
             ),
-            total_damaged_items: Number(
-  totalDamagedItems.toFixed(3)
+     damaged_qty: Number(
+  totalDamagedQty.toFixed(3)
 ),
+
             total_sent_weight: Number(
               totalSentWeight.toFixed(3)
             ),
