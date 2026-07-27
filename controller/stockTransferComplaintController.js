@@ -1647,6 +1647,40 @@ const storeMap = new Map();
 for (const store of stores) {
   storeMap.set(Number(store.id), store);
 }
+// =====================================================
+// FETCH ITEM NAMES
+// =====================================================
+
+const itemIds = [
+  ...new Set(
+    complaints
+      .flatMap((complaint) =>
+        Array.isArray(complaint.items)
+          ? complaint.items.map((item) => Number(item.item_id))
+          : []
+      )
+      .filter(Boolean)
+  ),
+];
+
+const itemMaster =
+  itemIds.length > 0
+    ? await Item.findAll({
+        where: {
+          id: {
+            [Op.in]: itemIds,
+          },
+        },
+        attributes: ["id", "item_name"],
+        raw: true,
+      })
+    : [];
+
+const itemMap = new Map();
+
+for (const item of itemMaster) {
+  itemMap.set(Number(item.id), item.item_name);
+}
 
     // =====================================================
     // FORMAT COMPLAINT RESPONSE
@@ -1678,7 +1712,11 @@ const toStore =
 
 const complaintItems =
   Array.isArray(complaint.items)
-    ? complaint.items
+    ? complaint.items.map((item) => ({
+        ...item,
+        item_name:
+          itemMap.get(Number(item.item_id)) || null,
+      }))
     : [];
         const totalSentQty =
           complaintItems.reduce(
@@ -1737,7 +1775,13 @@ const complaintItems =
               ),
             0
           );
-
+        const totalDamagedItems =
+  complaintItems.reduce(
+    (total, item) =>
+      total +
+      Number(item.damaged_item || 0),
+    0
+  );
         return {
           complaint_id: complaint.id,
 
@@ -1872,7 +1916,9 @@ raised_by_store: {
             total_shortage_qty: Number(
               totalShortageQty.toFixed(3)
             ),
-
+          total_damaged_items: Number(
+  totalDamagedItems.toFixed(3)
+),
             total_sent_weight: Number(
               totalSentWeight.toFixed(3)
             ),
@@ -3251,7 +3297,40 @@ const storeMap = new Map();
 for (const store of stores) {
   storeMap.set(Number(store.id), store);
 }
+// =====================================================
+// FETCH ITEM NAMES
+// =====================================================
 
+const itemIds = [
+  ...new Set(
+    complaints
+      .flatMap((complaint) =>
+        Array.isArray(complaint.items)
+          ? complaint.items.map((item) => Number(item.item_id))
+          : []
+      )
+      .filter(Boolean)
+  ),
+];
+
+const itemMaster =
+  itemIds.length > 0
+    ? await Item.findAll({
+        where: {
+          id: {
+            [Op.in]: itemIds,
+          },
+        },
+        attributes: ["id", "item_name"],
+        raw: true,
+      })
+    : [];
+
+const itemMap = new Map();
+
+for (const item of itemMaster) {
+  itemMap.set(Number(item.id), item.item_name);
+}
     // =====================================================
     // FORMAT COMPLAINT RESPONSE
     // =====================================================
@@ -3277,10 +3356,14 @@ for (const store of stores) {
             )
           ) || null;
 
-        const complaintItems =
-          Array.isArray(complaint.items)
-            ? complaint.items
-            : [];
+      const complaintItems =
+  Array.isArray(complaint.items)
+    ? complaint.items.map((item) => ({
+        ...item,
+        item_name:
+          itemMap.get(Number(item.item_id)) || null,
+      }))
+    : [];
 
         const totalSentQty =
           complaintItems.reduce(
@@ -3333,7 +3416,13 @@ for (const store of stores) {
               ),
             0
           );
-
+        const totalDamagedItems =
+  complaintItems.reduce(
+    (total, item) =>
+      total +
+      Number(item.damaged_item || 0),
+    0
+  );
         return {
           complaint_id: complaint.id,
 
@@ -3380,7 +3469,9 @@ for (const store of stores) {
             total_shortage_qty: Number(
               totalShortageQty.toFixed(3)
             ),
-
+            total_damaged_items: Number(
+  totalDamagedItems.toFixed(3)
+),
             total_sent_weight: Number(
               totalSentWeight.toFixed(3)
             ),
