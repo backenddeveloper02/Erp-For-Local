@@ -4585,10 +4585,11 @@ export const updateComplaintItemStatus = async (req, res) => {
     const requestedStatus = normalizeStatus(status);
 
     const allowedStatuses = [
-      "under_review",
-      "replacement_dispatched",
-      "resolved",
-    ];
+  "under_review",
+  "replacement_dispatched",
+  "resolved",
+  "rejected",
+];
 
     if (!allowedStatuses.includes(requestedStatus)) {
       await safeRollback(transaction);
@@ -4606,11 +4607,13 @@ export const updateComplaintItemStatus = async (req, res) => {
       normalizeText(resolution_note);
 
     if (
-      ["replacement_dispatched", "resolved"].includes(
-        requestedStatus
-      ) &&
-      !normalizedResolutionNote
-    ) {
+  [
+    "replacement_dispatched",
+    "resolved",
+    "rejected",
+  ].includes(requestedStatus) &&
+  !normalizedResolutionNote
+){
       await safeRollback(transaction);
 
       return res.status(400).json({
@@ -5134,7 +5137,48 @@ export const updateComplaintItemStatus = async (req, res) => {
       responseMessage =
         "Replacement transfer received. Complaint item solved and closed automatically.";
     }
+   /*
+ * =====================================================
+ * UNDER REVIEW -> REJECTED
+ * =====================================================
+ */
 
+if (requestedStatus === "rejected") {
+  if (!isSourceStore && !headOfficeUser) {
+    await safeRollback(transaction);
+
+    return res.status(403).json({
+      success: false,
+      message:
+        "Only source store or Head Office can reject complaint item",
+    });
+  }
+
+  if (currentItemStatus !== "under_review") {
+    await safeRollback(transaction);
+
+    return res.status(400).json({
+      success: false,
+      message: `Complaint item cannot move from ${currentItemStatus} to rejected`,
+      required_current_status: "under_review",
+    });
+  }
+
+  complaintItem.resolution_status =
+    "rejected";
+
+  complaintItem.rejected_by =
+    user.id;
+
+  complaintItem.rejected_at =
+    new Date();
+
+  complaintItem.resolution_note =
+    normalizedResolutionNote;
+
+  responseMessage =
+    "Complaint item rejected successfully";
+}
     /*
      * Updated item ko complaint items JSON me replace karna.
      */
@@ -5192,6 +5236,21 @@ export const updateComplaintItemStatus = async (req, res) => {
     }
 
     if (overallComplaintStatus === "resolved") {
+      if (overallComplaintStatus === "rejected") {
+  setIfModelHasAttribute(
+    StockTransferComplaint,
+    complaintUpdatePayload,
+    "rejected_by",
+    user.id
+  );
+
+  setIfModelHasAttribute(
+    StockTransferComplaint,
+    complaintUpdatePayload,
+    "rejected_at",
+    new Date()
+  );
+}
       setIfModelHasAttribute(
         StockTransferComplaint,
         complaintUpdatePayload,
@@ -5264,10 +5323,11 @@ export const updateComplaintItemStatus = async (req, res) => {
         "Complaint item status updated",
 
       description:
-        requestedStatus === "resolved"
-          ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} solved and closed after replacement transfer receive`
-          : `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} changed from ${currentItemStatus} to ${complaintItem.resolution_status}`,
-
+  requestedStatus === "resolved"
+    ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} solved and closed after replacement transfer receive`
+    : requestedStatus === "rejected"
+    ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} rejected`
+    : `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} changed from ${currentItemStatus} to ${complaintItem.resolution_status}`,
       meta: {
         transfer_item_id:
           parsedTransferItemId,
@@ -5310,20 +5370,26 @@ export const updateComplaintItemStatus = async (req, res) => {
       },
 
       icon:
-        requestedStatus === "resolved"
-          ? "check-circle"
-          : requestedStatus ===
-              "replacement_dispatched"
-            ? "truck"
-            : "complaint",
+  requestedStatus === "resolved"
+    ? "check-circle"
+    : requestedStatus ===
+        "replacement_dispatched"
+    ? "truck"
+    : requestedStatus ===
+        "rejected"
+    ? "x-circle"
+    : "complaint",
 
       color:
-        requestedStatus === "resolved"
-          ? "green"
-          : requestedStatus ===
-              "replacement_dispatched"
-            ? "blue"
-            : "orange",
+  requestedStatus === "resolved"
+    ? "green"
+    : requestedStatus ===
+        "replacement_dispatched"
+    ? "blue"
+    : requestedStatus ===
+        "rejected"
+    ? "red"
+    : "orange",
     });
 
     await transaction.commit();
@@ -5352,6 +5418,8 @@ export const updateComplaintItemStatus = async (req, res) => {
           overallComplaintStatus,
 
         updated_item: {
+          rejected:
+  requestedStatus === "rejected",
           ...complaintItem,
 
           requested_status:
