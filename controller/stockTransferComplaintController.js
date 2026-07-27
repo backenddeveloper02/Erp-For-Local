@@ -465,17 +465,7 @@ for (const requestedItem of requestedItems) {
     requestedItem.received_weight
   );
 
-  // Sirf missing_item complaint me use hoga.
-  const missingQty = toNumber(
-    requestedItem.missing_qty
-  );
-  const wrongItemId = Number(
-  requestedItem.wrong_item_id
-);
-
-const wrongItemCode = String(
-  requestedItem.wrong_item_code || ""
-).trim();
+  
   // ===================================================
   // BASIC QUANTITY VALIDATION
   // ===================================================
@@ -574,7 +564,30 @@ const wrongItemCode = String(
         sent_qty: sentQty,
         missing_qty: missingQty,
       });
-    }
+    }}
+    if (
+  normalizedComplaintType === COMPLAINT_TYPES.DAMAGED_ITEM
+) {
+  if (damagedQty <= 0) {
+    await transaction.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message:
+        `damaged_qty must be greater than 0 for transfer item ${transferItemId}`,
+    });
+  }
+
+  if (damagedQty > receivedQty) {
+    await transaction.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message:
+        `damaged_qty cannot exceed received_qty for transfer item ${transferItemId}`,
+    });
+  }
+}
 
     const expectedMissingQty = Number(
       Math.max(
@@ -763,53 +776,35 @@ if (
   // PREPARE COMPLAINT ITEM
   // ===================================================
 
-  complaintItems.push({
-    transfer_item_id:
-      transferItem.id,
+ complaintItems.push({
+  transfer_item_id: transferItem.id,
 
-    item_id:
-      transferItem.item_id,
+  item_id: transferItem.item_id,
 
-    sent_qty:
-      sentQty,
+  sent_qty: sentQty,
 
-    received_qty:
-      receivedQty,
+  received_qty: receivedQty,
 
-    shortage_qty:
-      shortageQty,
+  shortage_qty: shortageQty,
 
-    // Missing item complaint me missing quantity save hogi.
-    // Baaki complaint types me null save hoga.
-    missing_qty:
-      normalizedComplaintType ===
-      COMPLAINT_TYPES.MISSING_ITEM
-        ? missingQty
-        : null,
-    wrong_item_id:
-  normalizedComplaintType ===
-  COMPLAINT_TYPES.WRONG_ITEM
-    ? wrongItemId
-    : null,
+  damaged_qty: damagedQty,
 
-wrong_item_code:
-  normalizedComplaintType ===
-  COMPLAINT_TYPES.WRONG_ITEM
-    ? wrongItemCode
-    : null,
-    sent_weight:
-      sentWeight,
+  missing_qty: missingQty,
 
-    received_weight:
-      receivedWeight,
+  wrong_item_id: wrongItemId || null,
 
-    shortage_weight:
-      shortageWeight,
+  wrong_item_code: wrongItemCode || null,
 
-    note:
-      requestedItem.note || null,
-  });
-}
+  sent_weight: sentWeight,
+
+  received_weight: receivedWeight,
+
+  shortage_weight: shortageWeight,
+
+  note: requestedItem.note || null,
+
+  resolution_status: "open",
+});
 
     // =====================================================
     // UPLOAD 2 IMAGES AND 1 VIDEO
