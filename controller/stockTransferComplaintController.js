@@ -5133,46 +5133,39 @@ export const updateComplaintItemStatus = async (req, res) => {
         "Replacement transfer received. Complaint item solved and closed automatically.";
     }
    /*
- * =====================================================
- * UNDER REVIEW -> REJECTED
- * =====================================================
- */
+ /*
+* =====================================================
+* OPEN / UNDER REVIEW -> REJECTED
+* =====================================================
+*/
 
 if (requestedStatus === "rejected") {
-  if (!isSourceStore && !headOfficeUser) {
-    await safeRollback(transaction);
+    if (!isSourceStore && !headOfficeUser) {
+        await safeRollback(transaction);
 
-    return res.status(403).json({
-      success: false,
-      message:
-        "Only source store or Head Office can reject complaint item",
-    });
-  }
+        return res.status(403).json({
+            success: false,
+            message:
+                "Only source store or Head Office can reject complaint item",
+        });
+    }
 
-  if (currentItemStatus !== "under_review") {
-    await safeRollback(transaction);
+    if (!["open", "under_review"].includes(currentItemStatus)) {
+        await safeRollback(transaction);
 
-    return res.status(400).json({
-      success: false,
-      message: `Complaint item cannot move from ${currentItemStatus} to rejected`,
-      required_current_status: "under_review",
-    });
-  }
+        return res.status(400).json({
+            success: false,
+            message: `Complaint item cannot move from ${currentItemStatus} to rejected`,
+            allowed_current_statuses: ["open", "under_review"],
+        });
+    }
 
-  complaintItem.resolution_status =
-    "rejected";
+    complaintItem.resolution_status = "rejected";
+    complaintItem.rejected_by = user.id;
+    complaintItem.rejected_at = new Date();
+    complaintItem.resolution_note = normalizedResolutionNote;
 
-  complaintItem.rejected_by =
-    user.id;
-
-  complaintItem.rejected_at =
-    new Date();
-
-  complaintItem.resolution_note =
-    normalizedResolutionNote;
-
-  responseMessage =
-    "Complaint item rejected successfully";
+    responseMessage = "Complaint item rejected successfully";
 }
     /*
      * Updated item ko complaint items JSON me replace karna.
@@ -5231,35 +5224,36 @@ if (requestedStatus === "rejected") {
     }
 
     if (overallComplaintStatus === "resolved") {
-      if (overallComplaintStatus === "rejected") {
-  setIfModelHasAttribute(
-    StockTransferComplaint,
-    complaintUpdatePayload,
-    "rejected_by",
-    user.id
-  );
-
-  setIfModelHasAttribute(
-    StockTransferComplaint,
-    complaintUpdatePayload,
-    "rejected_at",
-    new Date()
-  );
-}
-      setIfModelHasAttribute(
+    setIfModelHasAttribute(
         StockTransferComplaint,
         complaintUpdatePayload,
         "resolved_by",
         user.id
-      );
+    );
 
-      setIfModelHasAttribute(
+    setIfModelHasAttribute(
         StockTransferComplaint,
         complaintUpdatePayload,
         "resolved_at",
         new Date()
-      );
-    }
+    );
+}
+
+if (overallComplaintStatus === "rejected") {
+    setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "rejected_by",
+        user.id
+    );
+
+    setIfModelHasAttribute(
+        StockTransferComplaint,
+        complaintUpdatePayload,
+        "rejected_at",
+        new Date()
+    );
+}
 
     if (overallComplaintStatus === "closed") {
       const closedAt = new Date();
@@ -5304,7 +5298,16 @@ if (requestedStatus === "rejected") {
         transaction,
       }
     );
+    const latestComplaint =
+  await StockTransferComplaint.findByPk(
+    parsedComplaintId,
+    { transaction }
+  );
 
+console.log(
+  "DB Items After Update:",
+  JSON.stringify(latestComplaint.items, null, 2)
+);
     await createComplaintActivity({
       transaction,
       user,
