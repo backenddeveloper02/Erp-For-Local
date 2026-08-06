@@ -13,7 +13,7 @@ import InvoiceItem from "../model/InvoiceItem.js";
 import { getGoldRate } from "../service/goldService.js";
 // import { getGoldRate } from "../service/goldService.js";
 import axios from "axios";
-
+import redisClient from "../config/redis.js";
 
 
 
@@ -1629,6 +1629,10 @@ const getTableColumns = async (tableName) => {
 export const getDistrictDashboard = async (req, res) => {
   try {
     const user = req.user;
+    const startTime = Date.now();
+    // =====================================================
+    // AUTHENTICATION
+    // =====================================================
 
     if (!user) {
       return res.status(401).json({
@@ -1639,7 +1643,9 @@ export const getDistrictDashboard = async (req, res) => {
 
     if (
       user.role !== "district_manager" &&
-      String(user.organization_level || "").toLowerCase() !== "district"
+      String(user.organization_level || "")
+        .trim()
+        .toLowerCase() !== "district"
     ) {
       return res.status(403).json({
         success: false,
@@ -1659,194 +1665,212 @@ export const getDistrictDashboard = async (req, res) => {
     if (!districtId) {
       return res.status(400).json({
         success: false,
-        message:
-          "District organization_id not found",
+        message: "District organization_id not found",
       });
     }
 
-    const storeNameField =
-      getStoreNameField();
-
-    const storeCodeField =
-      getStoreCodeField();
+    const storeNameField = getStoreNameField();
+    const storeCodeField = getStoreCodeField();
 
     // =====================================================
     // LIVE GOLD / SILVER RATE
     // =====================================================
 
-    // =====================================================
-// LIVE GOLD / SILVER RATE
-// =====================================================
+    let liveRate = {
+      gold_price: 0,
+      silver_price: 0,
 
-let liveRate = {
-  gold_price: 0,
-  silver_price: 0,
+      gold_rate_24k: 0,
+      gold_rate_22k: 0,
+      gold_rate_18k: 0,
+      silver_rate: 0,
 
-  gold_rate_24k: 0,
-  gold_rate_22k: 0,
-  gold_rate_18k: 0,
-  silver_rate: 0,
+      gold_change_percent: 0,
+      silver_change_percent: 0,
 
-  gold_change_percent: 0,
-  silver_change_percent: 0,
+      gold_trend: "up",
+      silver_trend: "up",
 
-  gold_trend: "up",
-  silver_trend: "up",
+      currency: "INR",
+      updated_at: null,
+    };
+   const goldApiStart = Date.now();
 
-  currency: "INR",
-  updated_at: null,
-};
+const CACHE_KEY = "live_rates";
+const CACHE_TTL = 300; // 5 Minutes
 
 try {
-  const [goldRes, silverRes, rateRes] =
-    await Promise.all([
-      axios.get(
-        "https://api.gold-api.com/price/XAU",
-        {
-          timeout: 10000,
-        }
+
+  // ===============================
+  // CHECK REDIS FIRST
+  // ===============================
+
+  const cachedRates = await redisClient.get(CACHE_KEY);
+
+  if (cachedRates) {
+
+    console.log("✅ Live Rates Loaded From Redis");
+
+    liveRate = JSON.parse(cachedRates);
+
+  } else {
+
+    console.log("🌐 Fetching Live Rates From APIs");
+
+    const [goldRes, silverRes, rateRes] =
+      await Promise.all([
+
+        axios.get(
+          "https://api.gold-api.com/price/XAU",
+          {
+            timeout: 10000,
+          }
+        ),
+
+        axios.get(
+          "https://api.gold-api.com/price/XAG",
+          {
+            timeout: 10000,
+          }
+        ),
+
+        axios.get(
+          "https://open.er-api.com/v6/latest/USD",
+          {
+            timeout: 10000,
+          }
+        ),
+
+      ]);
+
+    const goldUsdPerOunce =
+      Number(goldRes?.data?.price || 0);
+
+    const silverUsdPerOunce =
+      Number(silverRes?.data?.price || 0);
+
+    const usdToInr =
+      Number(rateRes?.data?.rates?.INR || 0);
+
+    if (
+      !goldUsdPerOunce ||
+      !silverUsdPerOunce ||
+      !usdToInr
+    ) {
+      throw new Error("Invalid live rate response");
+    }
+
+    const ounceToGram = 31.1035;
+
+    const gold24KPerGram =
+      (goldUsdPerOunce / ounceToGram) *
+      usdToInr;
+
+    const gold22KPerGram =
+      gold24KPerGram * (22 / 24);
+
+    const gold18KPerGram =
+      gold24KPerGram * (18 / 24);
+
+    const silver999PerGram =
+      (silverUsdPerOunce / ounceToGram) *
+      usdToInr;
+
+    const silver925PerGram =
+      silver999PerGram * 0.925;
+
+    liveRate = {
+
+      gold_price: Number(
+        (gold24KPerGram * 10).toFixed(2)
       ),
 
-      axios.get(
-        "https://api.gold-api.com/price/XAG",
-        {
-          timeout: 10000,
-        }
+      silver_price: Number(
+        silver925PerGram.toFixed(2)
       ),
 
-      axios.get(
-        "https://open.er-api.com/v6/latest/USD",
-        {
-          timeout: 10000,
-        }
+      gold_rate_24k: Number(
+        gold24KPerGram.toFixed(2)
       ),
-    ]);
 
-  console.log(
-    "GOLD API =>",
-    goldRes?.data
-  );
+      gold_rate_22k: Number(
+        gold22KPerGram.toFixed(2)
+      ),
 
-  console.log(
-    "SILVER API =>",
-    silverRes?.data
-  );
+      gold_rate_18k: Number(
+        gold18KPerGram.toFixed(2)
+      ),
 
-  console.log(
-    "USD INR API =>",
-    rateRes?.data
-  );
+      silver_rate: Number(
+        silver925PerGram.toFixed(2)
+      ),
 
-  const goldUsdPerOunce = Number(
-    goldRes?.data?.price || 0
-  );
+      gold_change_percent: Number(
+        goldRes?.data?.change_percent || 0
+      ),
 
-  const silverUsdPerOunce = Number(
-    silverRes?.data?.price || 0
-  );
+      silver_change_percent: Number(
+        silverRes?.data?.change_percent || 0
+      ),
 
-  const usdToInr = Number(
-    rateRes?.data?.rates?.INR || 0
-  );
+      gold_trend:
+        Number(
+          goldRes?.data?.change_percent || 0
+        ) >= 0
+          ? "up"
+          : "down",
 
-  if (
-    !goldUsdPerOunce ||
-    !silverUsdPerOunce ||
-    !usdToInr
-  ) {
-    throw new Error(
-      "Invalid live rate response"
+      silver_trend:
+        Number(
+          silverRes?.data?.change_percent || 0
+        ) >= 0
+          ? "up"
+          : "down",
+
+      currency: "INR",
+
+      updated_at:
+        new Date().toISOString(),
+
+    };
+
+    // ===============================
+    // SAVE IN REDIS
+    // ===============================
+
+    await redisClient.setEx(
+      CACHE_KEY,
+      CACHE_TTL,
+      JSON.stringify(liveRate)
     );
+
+    console.log(
+      "✅ Live Rates Saved In Redis"
+    );
+
   }
 
-  // 1 troy ounce = 31.1035 grams
-  const ounceToGram = 31.1035;
-
-  // GOLD
-  const gold24KPerGram =
-    (goldUsdPerOunce / ounceToGram) *
-    usdToInr;
-
-  const gold22KPerGram =
-    gold24KPerGram * (22 / 24);
-
-  const gold18KPerGram =
-    gold24KPerGram * (18 / 24);
-
-  // SILVER
-  const silver999PerGram =
-    (silverUsdPerOunce /
-      ounceToGram) *
-    usdToInr;
-
-  const silver925PerGram =
-    silver999PerGram * 0.925;
-
-  liveRate = {
-    // per 10 gram
-    gold_price: Number(
-      (gold24KPerGram * 10).toFixed(2)
-    ),
-
-    // per gram
-    silver_price: Number(
-      silver925PerGram.toFixed(2)
-    ),
-
-    gold_rate_24k: Number(
-      gold24KPerGram.toFixed(2)
-    ),
-
-    gold_rate_22k: Number(
-      gold22KPerGram.toFixed(2)
-    ),
-
-    gold_rate_18k: Number(
-      gold18KPerGram.toFixed(2)
-    ),
-
-    silver_rate: Number(
-      silver925PerGram.toFixed(2)
-    ),
-
-    gold_change_percent: Number(
-      goldRes?.data?.change_percent || 0
-    ),
-
-    silver_change_percent: Number(
-      silverRes?.data?.change_percent || 0
-    ),
-
-    gold_trend:
-      Number(
-        goldRes?.data?.change_percent || 0
-      ) >= 0
-        ? "up"
-        : "down",
-
-    silver_trend:
-      Number(
-        silverRes?.data?.change_percent || 0
-      ) >= 0
-        ? "up"
-        : "down",
-
-    currency: "INR",
-
-    updated_at:
-      new Date().toISOString(),
-  };
-} catch (err) {
   console.log(
-    "Gold/Silver API Full Error =>",
-    err?.response?.data || err.message
+    "Gold API Time:",
+    Date.now() - goldApiStart,
+    "ms"
   );
+
+}
+catch (err) {
+
+  console.log(
+    "Gold/Silver API Error =>",
+    err?.response?.data ||
+      err.message
+  );
+
 }
 
     // =====================================================
     // DISTRICT RETAIL STORES
     // =====================================================
-
+    const districtStoreStart = Date.now();
     const districtStores =
       await Store.findAll({
         where: {
@@ -1925,191 +1949,114 @@ try {
 
         raw: true,
       });
-
+    console.log(
+   "District Store Query:",
+   Date.now() - districtStoreStart,
+   "ms"
+);
     const storeIds =
       districtStores
-        .map((s) => Number(s.id))
+        .map((store) =>
+          Number(store.id)
+        )
         .filter(Boolean);
 
     // =====================================================
     // CENTRALIZED STOCK SUMMARY
     // =====================================================
-
+    //
+    // IMPORTANT:
+    // Total stock items quantity ke basis par calculate hoga.
+    //
+    // district_stock:
+    // District ki available quantity
+    //
+    // retail_stock:
+    // District ke sabhi retail stores ki available quantity
+    //
+    // total_stock_items:
+    // District ki available quantity
+    // Frontend compatibility ke liye district_item_count me bhi
+    // yahi quantity return ki jayegi.
+    // =====================================================
+const stockSummaryStart = Date.now();
     const stockSummary =
-      await sequelize.query(
-        `
-        SELECT
-          COALESCE(
-            SUM(
-              CASE
-                WHEN s.organization_id = :districtId
-                THEN s.available_qty
-                ELSE 0
-              END
-            ),
-            0
-          )::numeric AS district_stock,
-
-          COALESCE(
-            SUM(
-              CASE
-                WHEN s.organization_id IN (:storeIds)
-                THEN s.available_qty
-                ELSE 0
-              END
-            ),
-            0
-          )::numeric AS retail_stock,
-
-          COALESCE(
-            SUM(s.transit_qty),
-            0
-          )::numeric AS transit_goods,
-
-          COUNT(
-            DISTINCT CASE
-              WHEN
-                COALESCE(
-                  s.dead_qty,
-                  0
-                ) > 0
-
-              THEN s.item_id
-            END
-          )::int AS dead_stock_items,
-
-          COUNT(
-            DISTINCT CASE
-              WHEN
-                s.available_qty > 0
-
-              THEN s.item_id
-            END
-          )::int AS district_item_count
-
-        FROM stocks s
-
-        WHERE
-          (
-            s.organization_id =
-            :districtId
-
-            OR s.organization_id
-            IN (:storeIds)
-          )
-        `,
-        {
-          replacements: {
-            districtId,
-
-            storeIds:
-              storeIds.length
-                ? storeIds
-                : [0],
-          },
-
-          type: QueryTypes.SELECT,
-        }
-      );
-
-    const stock =
-      stockSummary?.[0] || {};
-
-    // =====================================================
-    // STORE PERFORMANCE
-    // =====================================================
-
-    const storePerformance =
-      await sequelize.query(
-        `
-        SELECT
-          s.id AS store_id,
-
-          s.store_name,
-
-          s.store_code,
-
-          COALESCE(
-            SUM(inv.total_amount),
-            0
-          ) AS revenue
-
-        FROM stores s
-
-        LEFT JOIN invoices inv
-        ON inv.organization_id = s.id
-
-        WHERE s.id IN (:storeIds)
-
-        GROUP BY
-          s.id,
-          s.store_name,
-          s.store_code
-
-        ORDER BY revenue DESC
-        `,
-        {
-          replacements: {
-            storeIds:
-              storeIds.length
-                ? storeIds
-                : [0],
-          },
-
-          type: QueryTypes.SELECT,
-        }
-      );
-
-    // =====================================================
-    // PROFIT LOSS
-    // =====================================================
-
-  const profitLoss =
   await sequelize.query(
     `
-    SELECT
-      TO_CHAR(
-        DATE_TRUNC(
-          'month',
-          inv."createdAt"
-        ),
-        'Mon'
-      ) AS month,
+      SELECT
 
-      COALESCE(
-        SUM(inv.total_amount),
-        0
-      ) AS amount
+        -- District Manager ka apna store stock
+        COALESCE(
+          SUM(
+            CASE
+              WHEN s.store_code = :districtCode
+              THEN COALESCE(s.available_qty, 0)
+              ELSE 0
+            END
+          ),
+          0
+        )::numeric AS district_stock,
 
-    FROM invoices inv
+        -- District ke sabhi Retail Stores ka stock
+        COALESCE(
+          SUM(
+            CASE
+              WHEN s.organization_id IN (:storeIds)
+              THEN COALESCE(s.available_qty, 0)
+              ELSE 0
+            END
+          ),
+          0
+        )::numeric AS retail_stock,
 
-    WHERE
-      (
-        inv.organization_id =
-        :districtId
+        -- Dashboard Total Stock (Sirf District Store)
+        COALESCE(
+          SUM(
+            CASE
+              WHEN s.store_code = :districtCode
+              THEN COALESCE(s.available_qty, 0)
+              ELSE 0
+            END
+          ),
+          0
+        )::numeric AS total_stock_items,
 
-        OR inv.organization_id
-        IN (:storeIds)
-      )
+        -- Transit Goods (Sirf District Store)
+        COALESCE(
+          SUM(
+            CASE
+              WHEN s.store_code = :districtCode
+              THEN COALESCE(s.transit_qty, 0)
+              ELSE 0
+            END
+          ),
+          0
+        )::numeric AS transit_goods,
 
-    GROUP BY
-      DATE_TRUNC(
-        'month',
-        inv."createdAt"
-      )
+        -- Dead Stock (Sirf District Store)
+        COUNT(
+          DISTINCT CASE
+            WHEN s.store_code = :districtCode
+             AND COALESCE(s.dead_qty, 0) > 0
+            THEN s.item_id
+          END
+        )::int AS dead_stock_items
 
-    ORDER BY
-      DATE_TRUNC(
-        'month',
-        inv."createdAt"
-      ) ASC
+      FROM stocks s
+
+      WHERE
+        (
+          s.store_code = :districtCode
+          OR s.organization_id IN (:storeIds)
+        )
     `,
     {
       replacements: {
         districtId,
+        districtCode,
 
         storeIds:
-          storeIds.length
+          storeIds.length > 0
             ? storeIds
             : [0],
       },
@@ -2117,83 +2064,231 @@ try {
       type: QueryTypes.SELECT,
     }
   );
+console.log(
+   "Stock Summary:",
+   Date.now() - stockSummaryStart,
+   "ms"
+);
+const stock =
+  stockSummary?.[0] || {};
 
-    // =====================================================
-    // PENDING TASKS
-    // =====================================================
-
-    const pendingTasks =
+// =====================================================
+// STORE PERFORMANCE
+// =====================================================
+const performanceStart = Date.now();
+const storePerformance =
   await sequelize.query(
     `
-    SELECT t.*
+      SELECT
+        s.id AS store_id,
 
-    FROM tasks t
+        s.store_name,
 
-    WHERE
-      LOWER(
-        t.status::text
-      ) = 'pending'
+        s.store_code,
 
-      AND t.district_code =
-      :districtCode
+        COALESCE(
+          SUM(
+            COALESCE(
+              inv.total_amount,
+              0
+            )
+          ),
+          0
+        ) AS revenue
 
-    ORDER BY
-      t.created_at DESC
+      FROM stores s
 
-    LIMIT 5
+      LEFT JOIN invoices inv
+        ON inv.organization_id = s.id
+
+      WHERE s.id IN (:storeIds)
+
+      GROUP BY
+        s.id,
+        s.store_name,
+        s.store_code
+
+      ORDER BY revenue DESC
     `,
     {
       replacements: {
-        districtCode,
+        storeIds:
+          storeIds.length > 0
+            ? storeIds
+            : [0],
       },
 
       type: QueryTypes.SELECT,
     }
   );
+  console.log(
+   "Store Performance:",
+   Date.now() - performanceStart,
+   "ms"
+);
+    // =====================================================
+    // PROFIT LOSS
+    // =====================================================
+const profitStart = Date.now();
+    const profitLoss =
+      await sequelize.query(
+        `
+          SELECT
+            TO_CHAR(
+              DATE_TRUNC(
+                'month',
+                inv."createdAt"
+              ),
+              'Mon'
+            ) AS month,
+
+            COALESCE(
+              SUM(
+                COALESCE(
+                  inv.total_amount,
+                  0
+                )
+              ),
+              0
+            ) AS amount
+
+          FROM invoices inv
+
+          WHERE
+            (
+              inv.organization_id =
+              :districtId
+
+              OR inv.organization_id
+              IN (:storeIds)
+            )
+
+          GROUP BY
+            DATE_TRUNC(
+              'month',
+              inv."createdAt"
+            )
+
+          ORDER BY
+            DATE_TRUNC(
+              'month',
+              inv."createdAt"
+            ) ASC
+        `,
+        {
+          replacements: {
+            districtId,
+
+            storeIds:
+              storeIds.length > 0
+                ? storeIds
+                : [0],
+          },
+
+          type: QueryTypes.SELECT,
+        }
+      );
+     console.log(
+   "Profit Loss:",
+   Date.now() - profitStart,
+   "ms"
+);
+    // =====================================================
+    // PENDING TASKS
+    // =====================================================
+
+    const pendingTasks =
+      await sequelize.query(
+        `
+          SELECT
+            t.*
+
+          FROM tasks t
+
+          WHERE
+            LOWER(
+              t.status::text
+            ) = 'pending'
+
+            AND t.district_code =
+            :districtCode
+
+          ORDER BY
+            t.created_at DESC
+
+          LIMIT 5
+        `,
+        {
+          replacements: {
+            districtCode,
+          },
+
+          type: QueryTypes.SELECT,
+        }
+      );
 
     // =====================================================
     // RECENT ACTIVITIES
     // =====================================================
 
     const recentActivities =
-  await sequelize.query(
-    `
-    SELECT sa.*
+      await sequelize.query(
+        `
+          SELECT
+            sa.*
 
-    FROM system_activities sa
+          FROM system_activities sa
 
-    WHERE
-      (
-        sa.store_code = :districtCode
+          WHERE
+            (
+              sa.store_code =
+              :districtCode
 
-        OR sa.store_code
-        IN (:storeCodes)
-      )
+              OR sa.store_code
+              IN (:storeCodes)
+            )
 
-    ORDER BY
-      sa.created_at DESC
+          ORDER BY
+            sa.created_at DESC
 
-    LIMIT 5
-    `,
-    {
-      replacements: {
-        districtCode,
+          LIMIT 5
+        `,
+        {
+          replacements: {
+            districtCode,
 
-        storeCodes:
-          districtStores.length
-            ? districtStores.map(
-                (s) => s.store_code
-              )
-            : ["NA"],
-      },
+            storeCodes:
+              districtStores.length > 0
+                ? districtStores.map(
+                    (store) =>
+                      store.store_code
+                  )
+                : ["NA"],
+          },
 
-      type: QueryTypes.SELECT,
-    }
-  );
+          type: QueryTypes.SELECT,
+        }
+      );
+
     // =====================================================
     // FINAL RESPONSE
     // =====================================================
 
+    const districtStockQuantity =
+  Number(stock.district_stock || 0);
+  console.log(
+   "================================="
+);
+
+console.log(
+   "Total Dashboard Time:",
+   Date.now() - startTime,
+   "ms"
+);
+
+console.log(
+   "================================="
+);
     return res.status(200).json({
       success: true,
 
@@ -2202,10 +2297,11 @@ try {
 
       data: {
         summary_cards: {
-          total_stock: Number(
-            stock.district_stock || 0
-          ),
+          // District ki total available quantity
+          total_stock:
+            districtStockQuantity,
 
+          // District ke retail stores ki total available quantity
           retail_stores_stocks:
             Number(
               stock.retail_stock || 0
@@ -2213,13 +2309,13 @@ try {
 
           dead_stock_items:
             Number(
-              stock.dead_stock_items ||
-                0
+              stock.dead_stock_items || 0
             ),
 
-          transit_goods: Number(
-            stock.transit_goods || 0
-          ),
+          transit_goods:
+            Number(
+              stock.transit_goods || 0
+            ),
 
           gold_price:
             liveRate.gold_price,
@@ -2262,7 +2358,7 @@ try {
           storePerformance.map(
             (row) => ({
               store_id:
-                row.store_id,
+                Number(row.store_id),
 
               store_name:
                 row.store_name,
@@ -2270,20 +2366,25 @@ try {
               store_code:
                 row.store_code,
 
-              revenue: Number(
-                row.revenue || 0
-              ),
+              revenue:
+                Number(
+                  row.revenue || 0
+                ),
             })
           ),
 
         profit_loss:
-          profitLoss.map((row) => ({
-            month: row.month,
+          profitLoss.map(
+            (row) => ({
+              month:
+                row.month,
 
-            amount: Number(
-              row.amount || 0
-            ),
-          })),
+              amount:
+                Number(
+                  row.amount || 0
+                ),
+            })
+          ),
 
         pending_tasks:
           pendingTasks,
@@ -2292,24 +2393,27 @@ try {
           recentActivities,
 
         extra_summary: {
-          district_id: districtId,
+          district_id:
+            districtId,
 
           district_code:
             districtCode,
 
           district_own_stock:
-            Number(
-              stock.district_stock || 0
-            ),
+            districtStockQuantity,
 
           total_stores:
             districtStores.length,
 
+          // Frontend compatibility ke liye key same rakhi hai.
+          // Ab ye unique item count nahi,
+          // available quantity ka sum return karegi.
           district_item_count:
-            Number(
-              stock.district_item_count ||
-                0
-            ),
+            districtStockQuantity,
+
+          // Clear naming ke liye additional field
+          total_stock_items:
+            districtStockQuantity,
         },
       },
     });
@@ -2325,7 +2429,8 @@ try {
       message:
         "Failed to fetch district dashboard",
 
-      error: error.message,
+      error:
+        error.message,
     });
   }
 };
