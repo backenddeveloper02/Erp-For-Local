@@ -1960,7 +1960,12 @@ catch (err) {
           Number(store.id)
         )
         .filter(Boolean);
-
+const storeCodes =
+  districtStores.length > 0
+    ? districtStores.map(
+        (store) => store.store_code
+      )
+    : ["NA"];
     // =====================================================
     // CENTRALIZED STOCK SUMMARY
     // =====================================================
@@ -1980,64 +1985,67 @@ catch (err) {
     // yahi quantity return ki jayegi.
     // =====================================================
 const stockSummaryStart = Date.now();
-    const stockSummary =
-  await sequelize.query(
+   const queryStart = Date.now();
+
+const [
+  stockSummary,
+  storePerformance,
+  profitLoss,
+  pendingTasks,
+  recentActivities,
+] = await Promise.all([
+
+  // ===============================
+  // STOCK SUMMARY
+  // ===============================
+
+  sequelize.query(
     `
       SELECT
-
-        -- District Manager ka apna store stock
         COALESCE(
           SUM(
             CASE
               WHEN s.store_code = :districtCode
-              THEN COALESCE(s.available_qty, 0)
+              THEN COALESCE(s.available_qty,0)
               ELSE 0
             END
-          ),
-          0
+          ),0
         )::numeric AS district_stock,
 
-        -- District ke sabhi Retail Stores ka stock
         COALESCE(
           SUM(
             CASE
               WHEN s.organization_id IN (:storeIds)
-              THEN COALESCE(s.available_qty, 0)
+              THEN COALESCE(s.available_qty,0)
               ELSE 0
             END
-          ),
-          0
+          ),0
         )::numeric AS retail_stock,
 
-        -- Dashboard Total Stock (Sirf District Store)
         COALESCE(
           SUM(
             CASE
-              WHEN s.store_code = :districtCode
-              THEN COALESCE(s.available_qty, 0)
+              WHEN s.store_code=:districtCode
+              THEN COALESCE(s.available_qty,0)
               ELSE 0
             END
-          ),
-          0
+          ),0
         )::numeric AS total_stock_items,
 
-        -- Transit Goods (Sirf District Store)
         COALESCE(
           SUM(
             CASE
-              WHEN s.store_code = :districtCode
-              THEN COALESCE(s.transit_qty, 0)
+              WHEN s.store_code=:districtCode
+              THEN COALESCE(s.transit_qty,0)
               ELSE 0
             END
-          ),
-          0
+          ),0
         )::numeric AS transit_goods,
 
-        -- Dead Stock (Sirf District Store)
         COUNT(
           DISTINCT CASE
-            WHEN s.store_code = :districtCode
-             AND COALESCE(s.dead_qty, 0) > 0
+            WHEN s.store_code=:districtCode
+            AND COALESCE(s.dead_qty,0)>0
             THEN s.item_id
           END
         )::int AS dead_stock_items
@@ -2045,235 +2053,169 @@ const stockSummaryStart = Date.now();
       FROM stocks s
 
       WHERE
-        (
-          s.store_code = :districtCode
-          OR s.organization_id IN (:storeIds)
-        )
+      (
+        s.store_code=:districtCode
+        OR s.organization_id IN (:storeIds)
+      )
     `,
     {
       replacements: {
-        districtId,
         districtCode,
-
-        storeIds:
-          storeIds.length > 0
-            ? storeIds
-            : [0],
+        storeIds: storeIds.length ? storeIds : [0],
       },
-
       type: QueryTypes.SELECT,
     }
-  );
-console.log(
-   "Stock Summary:",
-   Date.now() - stockSummaryStart,
-   "ms"
-);
-const stock =
-  stockSummary?.[0] || {};
+  ),
 
-// =====================================================
-// STORE PERFORMANCE
-// =====================================================
-const performanceStart = Date.now();
-const storePerformance =
-  await sequelize.query(
+  // ===============================
+  // STORE PERFORMANCE
+  // ===============================
+
+  sequelize.query(
     `
       SELECT
-        s.id AS store_id,
+      s.id AS store_id,
+      s.store_name,
+      s.store_code,
 
-        s.store_name,
-
-        s.store_code,
-
-        COALESCE(
-          SUM(
-            COALESCE(
-              inv.total_amount,
-              0
-            )
-          ),
-          0
-        ) AS revenue
+      COALESCE(
+      SUM(
+      COALESCE(inv.total_amount,0)
+      ),0) AS revenue
 
       FROM stores s
 
       LEFT JOIN invoices inv
-        ON inv.organization_id = s.id
+      ON inv.organization_id=s.id
 
       WHERE s.id IN (:storeIds)
 
       GROUP BY
-        s.id,
-        s.store_name,
-        s.store_code
+      s.id,
+      s.store_name,
+      s.store_code
 
       ORDER BY revenue DESC
     `,
     {
       replacements: {
-        storeIds:
-          storeIds.length > 0
-            ? storeIds
-            : [0],
+        storeIds: storeIds.length ? storeIds : [0],
       },
-
       type: QueryTypes.SELECT,
     }
-  );
-  console.log(
-   "Store Performance:",
-   Date.now() - performanceStart,
-   "ms"
+  ),
+
+  // ===============================
+  // PROFIT LOSS
+  // ===============================
+
+  sequelize.query(
+    `
+      SELECT
+
+      TO_CHAR(
+      DATE_TRUNC('month',inv."createdAt"),
+      'Mon'
+      ) AS month,
+
+      COALESCE(
+      SUM(
+      COALESCE(inv.total_amount,0)
+      ),0) AS amount
+
+      FROM invoices inv
+
+      WHERE
+      (
+      inv.organization_id=:districtId
+      OR inv.organization_id IN (:storeIds)
+      )
+
+      GROUP BY
+      DATE_TRUNC('month',inv."createdAt")
+
+      ORDER BY
+      DATE_TRUNC('month',inv."createdAt")
+    `,
+    {
+      replacements: {
+        districtId,
+        storeIds: storeIds.length ? storeIds : [0],
+      },
+      type: QueryTypes.SELECT,
+    }
+  ),
+
+  // ===============================
+  // PENDING TASKS
+  // ===============================
+
+  sequelize.query(
+    `
+      SELECT *
+
+      FROM tasks
+
+      WHERE
+      LOWER(status::text)='pending'
+
+      AND district_code=:districtCode
+
+      ORDER BY created_at DESC
+
+      LIMIT 5
+    `,
+    {
+      replacements: {
+        districtCode,
+      },
+      type: QueryTypes.SELECT,
+    }
+  ),
+
+  // ===============================
+  // RECENT ACTIVITIES
+  // ===============================
+
+  sequelize.query(
+    `
+      SELECT *
+
+      FROM system_activities
+
+      WHERE
+
+      (
+      store_code=:districtCode
+
+      OR store_code IN (:storeCodes)
+      )
+
+      ORDER BY created_at DESC
+
+      LIMIT 5
+    `,
+    {
+      replacements: {
+        districtCode,
+        storeCodes,
+      },
+      type: QueryTypes.SELECT,
+    }
+  ),
+
+]);
+
+console.log(
+  "All Queries Parallel Time:",
+  Date.now() - queryStart,
+  "ms"
 );
-    // =====================================================
-    // PROFIT LOSS
-    // =====================================================
-const profitStart = Date.now();
-    const profitLoss =
-      await sequelize.query(
-        `
-          SELECT
-            TO_CHAR(
-              DATE_TRUNC(
-                'month',
-                inv."createdAt"
-              ),
-              'Mon'
-            ) AS month,
-
-            COALESCE(
-              SUM(
-                COALESCE(
-                  inv.total_amount,
-                  0
-                )
-              ),
-              0
-            ) AS amount
-
-          FROM invoices inv
-
-          WHERE
-            (
-              inv.organization_id =
-              :districtId
-
-              OR inv.organization_id
-              IN (:storeIds)
-            )
-
-          GROUP BY
-            DATE_TRUNC(
-              'month',
-              inv."createdAt"
-            )
-
-          ORDER BY
-            DATE_TRUNC(
-              'month',
-              inv."createdAt"
-            ) ASC
-        `,
-        {
-          replacements: {
-            districtId,
-
-            storeIds:
-              storeIds.length > 0
-                ? storeIds
-                : [0],
-          },
-
-          type: QueryTypes.SELECT,
-        }
-      );
-     console.log(
-   "Profit Loss:",
-   Date.now() - profitStart,
-   "ms"
-);
-    // =====================================================
-    // PENDING TASKS
-    // =====================================================
-
-    const pendingTasks =
-      await sequelize.query(
-        `
-          SELECT
-            t.*
-
-          FROM tasks t
-
-          WHERE
-            LOWER(
-              t.status::text
-            ) = 'pending'
-
-            AND t.district_code =
-            :districtCode
-
-          ORDER BY
-            t.created_at DESC
-
-          LIMIT 5
-        `,
-        {
-          replacements: {
-            districtCode,
-          },
-
-          type: QueryTypes.SELECT,
-        }
-      );
-
-    // =====================================================
-    // RECENT ACTIVITIES
-    // =====================================================
-
-    const recentActivities =
-      await sequelize.query(
-        `
-          SELECT
-            sa.*
-
-          FROM system_activities sa
-
-          WHERE
-            (
-              sa.store_code =
-              :districtCode
-
-              OR sa.store_code
-              IN (:storeCodes)
-            )
-
-          ORDER BY
-            sa.created_at DESC
-
-          LIMIT 5
-        `,
-        {
-          replacements: {
-            districtCode,
-
-            storeCodes:
-              districtStores.length > 0
-                ? districtStores.map(
-                    (store) =>
-                      store.store_code
-                  )
-                : ["NA"],
-          },
-
-          type: QueryTypes.SELECT,
-        }
-      );
 
     // =====================================================
     // FINAL RESPONSE
     // =====================================================
-
+const stock = stockSummary?.[0] || {};
     const districtStockQuantity =
   Number(stock.district_stock || 0);
   console.log(
