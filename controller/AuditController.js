@@ -311,58 +311,157 @@ const session = await createAuditSession({
     // =====================================================
     // SCAN QR
     // =====================================================
-      if (action === "scan") {
+   if (action === "scan") {
 
-    await validateAuditSession(sessionToken);
+  await validateAuditSession(sessionToken);
 
-    await updateAuditHeartbeat(sessionToken);
-      if (!qr_code) {
-        await t.rollback();
-        return res.status(400).json({
-          success: false,
-          message: "QR code is required",
-        });
-      }
+  await updateAuditHeartbeat(sessionToken);
 
-      const itemWhere = {
-        organization_id: scope.organization_id,
-        is_active: true,
-        [Op.or]: [{ sku_code: qr_code }, { article_code: qr_code }],
-      };
+  if (!qr_code) {
+    await t.rollback();
 
-      if (hasAttr(Item, "qr_code_value")) {
-        itemWhere[Op.or].push({ qr_code_value: qr_code });
-      }
+    return res.status(400).json({
+      success: false,
+      message: "QR code is required",
+    });
+  }
 
-      if (
-        scope.organization_level === "retail" &&
-        scope.store_code &&
-        hasAttr(Item, "storeCode")
-      ) {
-        itemWhere.storeCode = scope.store_code;
-      }
+  // =====================================================
+  // PARSE QR CODE
+  // =====================================================
 
-      const item = await Item.findOne({
-        where: itemWhere,
-        include: [
-          {
-            model: Stock,
-            as: "stocks",
-            required: false,
-            where: { organization_id: scope.organization_id },
-            attributes: ["id", "available_qty", "available_weight"],
-          },
+  let parsedQR;
+
+  try {
+    parsedQR =
+      typeof qr_code === "string"
+        ? JSON.parse(qr_code)
+        : qr_code;
+  } catch (error) {
+    await t.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message: "Invalid QR code format",
+    });
+  }
+
+  const qrPayload = parsedQR?.payload;
+
+  if (!qrPayload) {
+    await t.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message: "Invalid QR payload",
+    });
+  }
+
+  const qrItemId = qrPayload.item_id;
+  const qrCode = qrPayload.code;
+  const qrOrganizationId = qrPayload.organization_id;
+
+  console.log("========== QR DEBUG ==========");
+  console.log("QR Item ID:", qrItemId);
+  console.log("QR Code:", qrCode);
+  console.log("QR Organization ID:", qrOrganizationId);
+  console.log("User Organization ID:", scope.organization_id);
+  console.log("User Store Code:", scope.store_code);
+  console.log("User Level:", scope.organization_level);
+  console.log("==============================");
+
+  if (!qrItemId && !qrCode) {
+    await t.rollback();
+
+    return res.status(400).json({
+      success: false,
+      message: "Invalid QR code payload",
+    });
+  }
+
+  // =====================================================
+  // FIND ITEM
+  // =====================================================
+
+  const itemWhere = {
+    is_active: true,
+
+    [Op.or]: [
+      ...(qrItemId ? [{ id: qrItemId }] : []),
+      ...(qrCode ? [{ sku_code: qrCode }] : []),
+      ...(qrCode ? [{ article_code: qrCode }] : []),
+    ],
+  };
+
+  // Organization filter
+  if (scope.organization_id) {
+    itemWhere.organization_id = scope.organization_id;
+  }
+
+  // Retail store filter
+  if (
+    scope.organization_level === "retail" &&
+    scope.store_code &&
+    hasAttr(Item, "storeCode")
+  ) {
+    itemWhere.storeCode = scope.store_code;
+  }
+
+  console.log(
+    "Final Item Query:",
+    JSON.stringify(itemWhere, null, 2)
+  );
+
+  const item = await Item.findOne({
+    where: itemWhere,
+
+    include: [
+      {
+        model: Stock,
+        as: "stocks",
+        required: false,
+
+        where: {
+          organization_id: scope.organization_id,
+        },
+
+        attributes: [
+          "id",
+          "available_qty",
+          "available_weight",
         ],
-        transaction: t,
-      });
+      },
+    ],
 
-      if (!item) {
-        await t.rollback();
-        return res.status(404).json({
-          success: false,
-          message: "Item not found for this QR code",
-        });
-      }
+    transaction: t,
+  });
+
+  if (!item) {
+    await t.rollback();
+
+    return res.status(404).json({
+      success: false,
+      message: "Item not found for this QR code",
+
+      debug: {
+        qr_item_id: qrItemId,
+        qr_code: qrCode,
+        qr_organization_id: qrOrganizationId,
+        user_organization_id: scope.organization_id,
+        store_code: scope.store_code,
+      },
+    });
+  }
+
+  console.log(
+    "✅ ITEM FOUND:",
+    item.id,
+    item.sku_code
+  );
+
+  // =====================================================
+  // REST OF YOUR EXISTING SCAN CODE
+  // =====================================================
 
       // =====================================================
       // 24 HOURS DUPLICATE AUDIT CHECK
