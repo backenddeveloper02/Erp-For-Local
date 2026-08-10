@@ -93,7 +93,8 @@ const corsOptions = {
     "https://erp-dash-board-stagging-iep5.vercel.app",
      "http://192.168.1.9:3000",        // Your phone's IP
         "http://192.168.1.100:3000",      // Your computer's IP
-        "http://192.168.1.*:3000",        // All devices on same network
+        "http://192.168.1.*:3000", 
+     "https://wiry-staleness-rebate.ngrok-free.dev",// All devices on same network
   ],
 
   methods: [
