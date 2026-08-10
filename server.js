@@ -109,6 +109,7 @@ const corsOptions = {
   allowedHeaders: [
     "Content-Type",
     "Authorization",
+    "Audit-Session",
     "store_code",
     "x-store-code",
     "organization_id",
