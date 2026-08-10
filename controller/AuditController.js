@@ -5,9 +5,14 @@ import Item from "../model/item.js";
 import Stock from "../model/stockrecord.js";
 import Store from "../model/Store.js";
 
-import InventoryAudit from "../model/inventoryAudit.js";
+import InventoryAudit  from "../model/inventoryAudit.js";
 import InventoryAuditItem from "../model/inventoryAuditItem.js";
-
+import {
+    createAuditSession,
+    validateAuditSession,
+    updateAuditHeartbeat,
+    completeAuditSession,
+} from "../service/auditSession.service.js";
 const safeNum = (val, def = 0) => {
   const n = Number(val);
   return Number.isFinite(n) ? n : def;
@@ -41,28 +46,44 @@ const getUserScope = async (user) => {
     throw new Error("Unauthorized user");
   }
 
+  // =========================================
+  // RETAIL USER
+  // =========================================
   if (level === "retail" || level === "store") {
     const store = await Store.findOne({
       where: {
-        [Op.or]: [{ id: organizationId }, { store_code: storeCode }],
+        [Op.or]: [
+          { id: organizationId },
+          { store_code: storeCode },
+        ],
       },
-      attributes: ["id", "store_code", "store_name", "district_id"],
+      attributes: [
+        "id",
+        "store_code",
+        "store_name",
+        "district_id",
+      ],
     });
 
-    if (!store) throw new Error("Store record not found");
+    if (!store) {
+      throw new Error("Store record not found");
+    }
 
     return {
       organization_id: safeNum(store.id),
       organization_level: "retail",
       store_id: safeNum(store.id),
-      store_code: store.store_code || storeCode,
-      store_name: store.store_name || null,
+      store_code: store.store_code,
+      store_name: store.store_name,
       district_id: safeNum(store.district_id, null),
       visible_to_organization_id: safeNum(store.district_id, null),
       parent_organization_id: safeNum(store.district_id, null),
     };
   }
 
+  // =========================================
+  // DISTRICT USER
+  // =========================================
   if (level === "district") {
     return {
       organization_id: organizationId,
@@ -76,7 +97,25 @@ const getUserScope = async (user) => {
     };
   }
 
-  throw new Error("Only retail or district user can do audit");
+  // =========================================
+  // STATE USER
+  // =========================================
+  if (level === "state") {
+    return {
+      organization_id: organizationId,
+      organization_level: "state",
+      store_id: null,
+      store_code: storeCode,
+      store_name: null,
+      district_id: null,
+      visible_to_organization_id: organizationId,
+      parent_organization_id: null,
+    };
+  }
+
+  throw new Error(
+    "Only Retail, District or State user can do audit"
+  );
 };
 
 const getOrCreateTodayAudit = async ({ user, scope, auditDate, transaction }) => {
@@ -192,6 +231,10 @@ export const auditController = async (req, res) => {
       remark,
     } = req.body;
 
+    const sessionToken =
+    req.headers["audit-session"] ||
+    req.body.session_token ||
+    null;
     if (!action) {
       await t.rollback();
       return res.status(400).json({
@@ -226,12 +269,16 @@ export const auditController = async (req, res) => {
     // =====================================================
     if (action === "start") {
       const summary = await recalculateAuditSummary({
-        audit,
-        transaction: t,
-      });
+    audit,
+    transaction: t,
+});
 
-      await t.commit();
+await t.commit();
 
+const session = await createAuditSession({
+    audit_id: audit.id,
+    user,
+});
       emitAuditEvent(req, audit.id, "audit:started", {
         audit_id: audit.id,
         audit_no: audit.audit_no,
@@ -243,20 +290,32 @@ export const auditController = async (req, res) => {
       return res.status(200).json({
         success: true,
         message: "Audit started successfully",
-        data: {
-          audit_id: audit.id,
-          audit_no: audit.audit_no,
-          status: audit.status,
-          verification_status: audit.verification_status,
-          summary,
-        },
+       data: {
+    audit_id: audit.id,
+
+    audit_no: audit.audit_no,
+
+    status: audit.status,
+
+    verification_status: audit.verification_status,
+
+    session_token: session.session_token,
+
+    socket_room: session.socket_room,
+
+    summary,
+},
       });
     }
 
     // =====================================================
     // SCAN QR
     // =====================================================
-    if (action === "scan") {
+      if (action === "scan") {
+
+    await validateAuditSession(sessionToken);
+
+    await updateAuditHeartbeat(sessionToken);
       if (!qr_code) {
         await t.rollback();
         return res.status(400).json({
@@ -443,7 +502,11 @@ export const auditController = async (req, res) => {
     // =====================================================
     // NOT DONE
     // =====================================================
-    if (action === "not_done") {
+  if (action === "not_done") {
+
+    await validateAuditSession(sessionToken);
+
+    await updateAuditHeartbeat(sessionToken);
       if (!item_id) {
         await t.rollback();
         return res.status(400).json({
@@ -604,6 +667,8 @@ export const auditController = async (req, res) => {
     // SUBMIT
     // =====================================================
     if (action === "submit") {
+
+    await validateAuditSession(sessionToken);
       const itemWhere = {
         organization_id: scope.organization_id,
         is_active: true,
@@ -689,9 +754,9 @@ export const auditController = async (req, res) => {
         },
         { transaction: t }
       );
+await t.commit();
 
-      await t.commit();
-
+await completeAuditSession(sessionToken);
       const socketPayload = {
         audit_id: audit.id,
         audit_no: audit.audit_no,
@@ -841,14 +906,342 @@ export const auditController = async (req, res) => {
       message: "Invalid audit action",
     });
   } catch (error) {
-    await t.rollback();
+  try {
+    if (!t.finished) {
+      await t.rollback();
+    }
+  } catch (rollbackError) {
+    console.error("Rollback Error:", rollbackError.message);
+  }
 
-    console.error("auditController error:", error);
+  console.error("auditController error:", error);
+
+  return res.status(500).json({
+    success: false,
+    message: "Audit operation failed",
+    error: error.message,
+  });
+}
+};
+import crypto from "crypto";
+
+import AuditSession from "../model/auditSession.js";
+
+const SESSION_TIMEOUT = 30; // Minutes
+
+export const auditSessionController = async (req, res) => {
+  try {
+    const user = req.user;
+
+    const {
+      action,
+      audit_id,
+      session_token,
+    } = req.body;
+
+    if (!action) {
+      return res.status(400).json({
+        success: false,
+        message: "Action is required",
+      });
+    }
+
+    // =====================================================
+    // CREATE SESSION
+    // =====================================================
+
+    if (action === "create") {
+
+      if (!audit_id) {
+        return res.status(400).json({
+          success: false,
+          message: "audit_id is required",
+        });
+      }
+
+      const existing = await AuditSession.findOne({
+        where: {
+          audit_id,
+          status: "active",
+        },
+      });
+
+      if (existing) {
+        return res.status(409).json({
+          success: false,
+          message: "Audit session already active",
+          data: existing,
+        });
+      }
+
+      const token = crypto.randomUUID();
+
+      const session = await AuditSession.create({
+        audit_id,
+
+        user_id: user.id,
+
+        organization_id: user.organization_id,
+
+        session_token: token,
+
+        socket_room: `audit_session_${token}`,
+
+        status: "active",
+
+        started_at: new Date(),
+
+        last_activity_at: new Date(),
+
+        expires_at: new Date(
+          Date.now() + SESSION_TIMEOUT * 60 * 1000
+        ),
+
+        device_info: req.headers["user-agent"] || "",
+      });
+
+      return res.json({
+        success: true,
+        message: "Session created",
+        data: session,
+      });
+    }
+
+    // =====================================================
+    // VALIDATE SESSION
+    // =====================================================
+
+    if (action === "validate") {
+
+      const session = await AuditSession.findOne({
+        where: {
+          session_token,
+        },
+      });
+
+      if (!session) {
+        return res.status(404).json({
+          success: false,
+          message: "Session not found",
+        });
+      }
+
+      if (session.status !== "active") {
+        return res.status(401).json({
+          success: false,
+          message: "Session inactive",
+        });
+      }
+
+      if (new Date() > session.expires_at) {
+
+        await session.update({
+          status: "expired",
+        });
+
+        return res.status(401).json({
+          success: false,
+          message: "Session expired",
+        });
+      }
+
+      return res.json({
+        success: true,
+        data: session,
+      });
+
+    }
+
+    // =====================================================
+    // HEARTBEAT
+    // =====================================================
+
+    if (action === "heartbeat") {
+
+      const session = await AuditSession.findOne({
+        where: {
+          session_token,
+          status: "active",
+        },
+      });
+
+      if (!session) {
+        return res.status(404).json({
+          success: false,
+          message: "Session not found",
+        });
+      }
+
+      await session.update({
+
+        last_activity_at: new Date(),
+
+        expires_at: new Date(
+          Date.now() + SESSION_TIMEOUT * 60 * 1000
+        ),
+
+      });
+
+      return res.json({
+        success: true,
+        message: "Heartbeat updated",
+      });
+
+    }
+
+    // =====================================================
+    // CURRENT SESSION
+    // =====================================================
+
+    if (action === "current") {
+
+      const session = await AuditSession.findOne({
+
+        where: {
+
+          user_id: user.id,
+
+          status: "active",
+
+        },
+
+        order: [["createdAt", "DESC"]],
+
+      });
+
+      if (!session) {
+
+        return res.status(404).json({
+
+          success: false,
+
+          message: "No active session",
+
+        });
+
+      }
+
+      return res.json({
+
+        success: true,
+
+        data: session,
+
+      });
+
+    }
+
+    // =====================================================
+    // END SESSION
+    // =====================================================
+
+    if (action === "end") {
+
+      const session = await AuditSession.findOne({
+
+        where: {
+
+          session_token,
+
+          status: "active",
+
+        },
+
+      });
+
+      if (!session) {
+
+        return res.status(404).json({
+
+          success: false,
+
+          message: "Session not found",
+
+        });
+
+      }
+
+      await session.update({
+
+        status: "completed",
+
+        ended_at: new Date(),
+
+      });
+
+      return res.json({
+
+        success: true,
+
+        message: "Session completed",
+
+      });
+
+    }
+
+    // =====================================================
+    // EXPIRE ALL OLD SESSIONS
+    // =====================================================
+
+    if (action === "expire") {
+
+      const count = await AuditSession.update(
+
+        {
+
+          status: "expired",
+
+        },
+
+        {
+
+          where: {
+
+            status: "active",
+
+            expires_at: {
+
+              [Op.lt]: new Date(),
+
+            },
+
+          },
+
+        }
+
+      );
+
+      return res.json({
+
+        success: true,
+
+        message: "Expired sessions updated",
+
+        data: count,
+
+      });
+
+    }
+
+    return res.status(400).json({
+
+      success: false,
+
+      message: "Invalid action",
+
+    });
+
+  } catch (error) {
+
+    console.error(error);
 
     return res.status(500).json({
+
       success: false,
-      message: "Audit operation failed",
-      error: error.message,
+
+      message: error.message,
+
     });
+
   }
 };
