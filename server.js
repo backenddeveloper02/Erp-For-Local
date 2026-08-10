@@ -91,6 +91,9 @@ const corsOptions = {
     "http://localhost:5173",
     "https://erp-dash-board.vercel.app",
     "https://erp-dash-board-stagging-iep5.vercel.app",
+     "http://192.168.1.9:3000",        // Your phone's IP
+        "http://192.168.1.100:3000",      // Your computer's IP
+        "http://192.168.1.*:3000",        // All devices on same network
   ],
 
   methods: [
