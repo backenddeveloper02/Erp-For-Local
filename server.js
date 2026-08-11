@@ -421,7 +421,8 @@ async function startServer() {
       }
     );
 
-    global.io = io;
+    app.set("io", io);
+global.io = io;
 
     io.on(
       "connection",
