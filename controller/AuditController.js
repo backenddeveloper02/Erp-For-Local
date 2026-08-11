@@ -244,7 +244,7 @@ export const auditController = async (req, res) => {
     }
 
     const scope = await getUserScope(user);
-    const finalAuditDate = audit_date || getTodayDate();
+    const finalAuditDate = getTodayDate();
 
     const audit = await getOrCreateTodayAudit({
       user,
@@ -459,42 +459,43 @@ const session = await createAuditSession({
     item.sku_code
   );
 
-  // =====================================================
-  // REST OF YOUR EXISTING SCAN CODE
-  // =====================================================
+ // =====================================================
+// TODAY'S AUDIT DUPLICATE CHECK
+// =====================================================
+// Only check whether this item has already been audited
+// in the CURRENT TODAY audit.
+//
+// Yesterday's audit will NOT block today's audit.
+// Same item scanned again TODAY will be blocked.
+// =====================================================
 
-      // =====================================================
-      // 24 HOURS DUPLICATE AUDIT CHECK
-      // Same item audited within 24 hours => block
-      // After 24 hours => allow audit again
-      // =====================================================
-      const lastCompletedAuditItem = await InventoryAuditItem.findOne({
-        where: {
-          item_id: item.id,
-          audit_result: "present",
-        },
-        order: [["updated_at", "DESC"]],
-        transaction: t,
-      });
+const existingTodayAuditItem = await InventoryAuditItem.findOne({
+  where: {
+    audit_id: audit.id,
+    item_id: item.id,
+    audit_result: "present",
+  },
+  transaction: t,
+});
 
-      if (lastCompletedAuditItem) {
-        const lastAuditTime = new Date(
-          lastCompletedAuditItem.updated_at ||
-            lastCompletedAuditItem.created_at
-        );
+if (existingTodayAuditItem) {
+  await t.rollback();
 
-        const now = new Date();
-        const diffHours = (now - lastAuditTime) / (1000 * 60 * 60);
-
-        if (diffHours < 24) {
-          await t.rollback();
-
-          return res.status(400).json({
-            success: false,
-            message: "Item audit is already completed",
-          });
-        }
-      }
+  return res.status(400).json({
+    success: false,
+    message: "Item audit is already completed today",
+    data: {
+      audit_id: audit.id,
+      item_id: item.id,
+      audit_item_id: existingTodayAuditItem.id,
+      audit_date: finalAuditDate,
+      audit_result: existingTodayAuditItem.audit_result,
+      audited_at:
+        existingTodayAuditItem.updated_at ||
+        existingTodayAuditItem.created_at,
+    },
+  });
+}
 
       const stock = Array.isArray(item.stocks) ? item.stocks[0] : null;
 
