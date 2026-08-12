@@ -6545,16 +6545,39 @@ export const getComplaintDetails = async (req, res) => {
     // AUTHORIZATION
     // =====================================================
 
-    if (
-      Number(user.organization_id) !==
-      Number(complaint.to_organization_id)
-    ) {
-      return res.status(403).json({
-        success: false,
-        message:
-          "You are not authorized to view this complaint.",
-      });
-    }
+    const role = String(user.role || "").trim().toLowerCase();
+
+const organizationLevel = String(
+  user.organization_level || ""
+).trim().toLowerCase();
+
+const allowedHeadRoles = [
+  "super_admin",
+  "super-admin",
+  "head_admin",
+  "head-admin",
+  "head_manager",
+  "head-manager",
+  "head_office",
+];
+
+const isHeadOfficeUser =
+  allowedHeadRoles.includes(role) ||
+  organizationLevel === "head_office" ||
+  organizationLevel === "head office" ||
+  organizationLevel === "head";
+
+if (!isHeadOfficeUser) {
+  if (
+    Number(user.organization_id) !==
+    Number(complaint.to_organization_id)
+  ) {
+    return res.status(403).json({
+      success: false,
+      message: "You are not authorized to view this complaint.",
+    });
+  }
+}
 
     // =====================================================
     // FETCH EVERYTHING
