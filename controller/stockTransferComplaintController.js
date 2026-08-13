@@ -6541,184 +6541,186 @@ export const getComplaintDetails = async (req, res) => {
       });
     }
 
-   // =====================================================
+    // =====================================================
+    // AUTHORIZATION
+    // =====================================================
+// =====================================================
 // AUTHORIZATION
 // =====================================================
 
-const role = String(user.role || "")
-  .trim()
-  .toLowerCase();
+// const role = String(user.role || "")
+//   .trim()
+//   .toLowerCase();
 
-const organizationLevel = String(
-  user.organization_level || ""
-)
-  .trim()
-  .toLowerCase();
+// const organizationLevel = String(
+//   user.organization_level || ""
+// )
+//   .trim()
+//   .toLowerCase();
 
-const userOrganizationId = Number(user.organization_id);
+// const userOrganizationId = Number(user.organization_id);
 
-const userDistrictId = Number(
-  user.district_id || user.districtId || 0
-);
+// const userDistrictId = Number(
+//   user.district_id || user.districtId || 0
+// );
 
-// =====================================================
-// HEAD OFFICE ROLES
-// =====================================================
+// // =====================================================
+// // HEAD OFFICE ROLES
+// // =====================================================
 
-const allowedHeadRoles = [
-  "super_admin",
-  "super-admin",
-  "head_admin",
-  "head-admin",
-  "head_manager",
-  "head-manager",
-  "head_office",
-];
+// const allowedHeadRoles = [
+//   "super_admin",
+//   "super-admin",
+//   "head_admin",
+//   "head-admin",
+//   "head_manager",
+//   "head-manager",
+//   "head_office",
+// ];
 
-const isHeadOfficeUser =
-  allowedHeadRoles.includes(role) ||
-  organizationLevel === "head_office" ||
-  organizationLevel === "head office" ||
-  organizationLevel === "head";
+// const isHeadOfficeUser =
+//   allowedHeadRoles.includes(role) ||
+//   organizationLevel === "head_office" ||
+//   organizationLevel === "head office" ||
+//   organizationLevel === "head";
 
-// =====================================================
-// DISTRICT USER
-// =====================================================
+// // =====================================================
+// // DISTRICT USER
+// // =====================================================
 
-const isDistrictUser =
-  organizationLevel === "district" ||
-  organizationLevel === "district office" ||
-  role === "district" ||
-  role === "district_manager" ||
-  role === "district-manager";
+// const isDistrictUser =
+//   organizationLevel === "district" ||
+//   organizationLevel === "district office" ||
+//   role === "district" ||
+//   role === "district_manager" ||
+//   role === "district-manager";
 
-// =====================================================
-// HEAD OFFICE
-// =====================================================
+// // =====================================================
+// // HEAD OFFICE
+// // =====================================================
 
-if (isHeadOfficeUser) {
-  // Head Office can view all complaints.
-}
+// if (isHeadOfficeUser) {
+//   // Head Office can view all complaints.
+// }
 
-// =====================================================
-// DISTRICT
-// =====================================================
+// // =====================================================
+// // DISTRICT
+// // =====================================================
 
-else if (isDistrictUser) {
-  /*
-   * District should be able to view:
-   *
-   * 1. Complaint directly assigned to this District
-   * 2. Complaint raised by a Retail Store under this District
-   */
+// else if (isDistrictUser) {
+//   /*
+//    * District should be able to view:
+//    *
+//    * 1. Complaint directly assigned to this District
+//    * 2. Complaint raised by a Retail Store under this District
+//    */
 
-  let districtAuthorized = false;
+//   let districtAuthorized = false;
 
-  // ---------------------------------------------------
-  // CASE 1:
-  // Complaint directly belongs to this District
-  // ---------------------------------------------------
+//   // ---------------------------------------------------
+//   // CASE 1:
+//   // Complaint directly belongs to this District
+//   // ---------------------------------------------------
 
-  if (
-    Number(complaint.to_organization_id) ===
-    userOrganizationId
-  ) {
-    districtAuthorized = true;
-  }
+//   if (
+//     Number(complaint.to_organization_id) ===
+//     userOrganizationId
+//   ) {
+//     districtAuthorized = true;
+//   }
 
-  // ---------------------------------------------------
-  // CASE 2:
-  // Complaint came from a Retail Store
-  // under this District
-  // ---------------------------------------------------
+//   // ---------------------------------------------------
+//   // CASE 2:
+//   // Complaint came from a Retail Store
+//   // under this District
+//   // ---------------------------------------------------
 
-  if (!districtAuthorized) {
-    const senderStoreForAuth =
-      await sequelize.query(
-        `
-        SELECT
-          id,
-          store_code,
-          store_name,
-          organization_level,
-          district_id
-        FROM stores
-        WHERE id = :id
-        LIMIT 1
-        `,
-        {
-          replacements: {
-            id: complaint.from_organization_id,
-          },
-          type: QueryTypes.SELECT,
-        }
-      );
+//   if (!districtAuthorized) {
+//     const senderStoreForAuth =
+//       await sequelize.query(
+//         `
+//         SELECT
+//           id,
+//           store_code,
+//           store_name,
+//           organization_level,
+//           district_id
+//         FROM stores
+//         WHERE id = :id
+//         LIMIT 1
+//         `,
+//         {
+//           replacements: {
+//             id: complaint.from_organization_id,
+//           },
+//           type: QueryTypes.SELECT,
+//         }
+//       );
 
-    const senderStore =
-      senderStoreForAuth[0] || null;
+//     const senderStore =
+//       senderStoreForAuth[0] || null;
 
-    if (senderStore) {
-      const senderDistrictId = Number(
-        senderStore.district_id || 0
-      );
+//     if (senderStore) {
+//       const senderDistrictId = Number(
+//         senderStore.district_id || 0
+//       );
 
-      // District organization's ID matches
-      // the retail store's district_id
-      if (
-        senderDistrictId > 0 &&
-        senderDistrictId === userOrganizationId
-      ) {
-        districtAuthorized = true;
-      }
+//       // District organization's ID matches
+//       // the retail store's district_id
+//       if (
+//         senderDistrictId > 0 &&
+//         senderDistrictId === userOrganizationId
+//       ) {
+//         districtAuthorized = true;
+//       }
 
-      // In case auth middleware provides district_id
-      if (
-        !districtAuthorized &&
-        senderDistrictId > 0 &&
-        userDistrictId > 0 &&
-        senderDistrictId === userDistrictId
-      ) {
-        districtAuthorized = true;
-      }
-    }
-  }
+//       // In case auth middleware provides district_id
+//       if (
+//         !districtAuthorized &&
+//         senderDistrictId > 0 &&
+//         userDistrictId > 0 &&
+//         senderDistrictId === userDistrictId
+//       ) {
+//         districtAuthorized = true;
+//       }
+//     }
+//   }
 
-  // ---------------------------------------------------
-  // DENY
-  // ---------------------------------------------------
+//   // ---------------------------------------------------
+//   // DENY
+//   // ---------------------------------------------------
 
-  if (!districtAuthorized) {
-    return res.status(403).json({
-      success: false,
-      message:
-        "You are not authorized to view this complaint.",
-    });
-  }
-}
+//   if (!districtAuthorized) {
+//     return res.status(403).json({
+//       success: false,
+//       message:
+//         "You are not authorized to view this complaint.",
+//     });
+//   }
+// }
 
-// =====================================================
-// OTHER USERS
-// =====================================================
+// // =====================================================
+// // OTHER USERS
+// // =====================================================
 
-else {
-  /*
-   * Existing behavior for other roles:
-   * only the organization receiving the complaint
-   * can view it.
-   */
+// else {
+//   /*
+//    * Existing behavior for other roles:
+//    * only the organization receiving the complaint
+//    * can view it.
+//    */
 
-  if (
-    userOrganizationId !==
-    Number(complaint.to_organization_id)
-  ) {
-    return res.status(403).json({
-      success: false,
-      message:
-        "You are not authorized to view this complaint.",
-    });
-  }
-}
-
+//   if (
+//     userOrganizationId !==
+//     Number(complaint.to_organization_id)
+//   ) {
+//     return res.status(403).json({
+//       success: false,
+//       message:
+//         "You are not authorized to view this complaint.",
+//     });
+//   }
+// }
     // =====================================================
     // FETCH EVERYTHING
     // =====================================================
