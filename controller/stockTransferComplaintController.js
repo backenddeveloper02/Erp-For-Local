@@ -3438,7 +3438,7 @@ const getComplaintOverallStatus = (
   }
 
   // =====================================================
-  // ALL ITEMS RESOLVED / CLOSED
+  // ALL ITEMS RESOLVED OR CLOSED
   // =====================================================
 
   const allResolvedOrClosed =
@@ -3451,12 +3451,32 @@ const getComplaintOverallStatus = (
   }
 
   // =====================================================
-  // REPLACEMENT RECEIVED
+  // ALL ITEMS REJECTED
   // =====================================================
   //
   // Important:
-  // Retail replacement receive kar chuka hai,
-  // lekin District ne abhi Resolve nahi kiya.
+  // Ek item reject hone par poori complaint reject
+  // nahi hogi.
+  //
+  // Complaint tabhi rejected hogi jab ALL items
+  // rejected hon.
+  //
+
+  const allRejected = statuses.every(
+    (status) => status === "rejected"
+  );
+
+  if (allRejected) {
+    return "rejected";
+  }
+
+  // =====================================================
+  // REPLACEMENT RECEIVED
+  // =====================================================
+  //
+  // Agar koi item replacement_received hai aur
+  // baaki items abhi pending hain, complaint ko
+  // replacement_received state mein rakhenge.
   //
 
   const hasReplacementReceived =
@@ -3472,15 +3492,29 @@ const getComplaintOverallStatus = (
   // =====================================================
   // REPLACEMENT DISPATCHED
   // =====================================================
+  //
+  // IMPORTANT:
+  //
+  // Sirf ek item replacement_dispatched hone par
+  // complaint replacement_dispatched nahi hogi.
+  //
+  // Complaint tabhi replacement_dispatched hogi jab
+  // saare required complaint items dispatch ho chuke hon.
+  //
 
-  const hasReplacementDispatched =
-    statuses.some(
+  const allReplacementDispatched =
+    statuses.length > 0 &&
+    statuses.every(
       (status) =>
-        status ===
-        "replacement_dispatched"
+        [
+          "replacement_dispatched",
+          "replacement_received",
+          "resolved",
+          "closed",
+        ].includes(status)
     );
 
-  if (hasReplacementDispatched) {
+  if (allReplacementDispatched) {
     return "replacement_dispatched";
   }
 
@@ -3497,16 +3531,20 @@ const getComplaintOverallStatus = (
   }
 
   // =====================================================
-  // REJECTED
+  // OPEN
   // =====================================================
 
-  const hasRejected = statuses.some(
-    (status) => status === "rejected"
+  const hasOpen = statuses.some(
+    (status) => status === "open"
   );
 
-  if (hasRejected) {
-    return "rejected";
+  if (hasOpen) {
+    return "open";
   }
+
+  // =====================================================
+  // FALLBACK
+  // =====================================================
 
   return "open";
 };
