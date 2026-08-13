@@ -1665,29 +1665,37 @@ export const updateTransferComplaintStatus = async (
     // closed       -> no further status update
     // =====================================================
 
-    const allowedTransitions = {
-      open: [
-        "under_review",
-        "resolved",
-        "rejected",
-      ],
+  const allowedTransitions = {
+  open: [
+    "under_review",
+    "rejected",
+  ],
 
-      under_review: [
-        "open",
-        "resolved",
-        "rejected",
-      ],
+  under_review: [
+    "open",
+    "replacement_dispatched",
+    "rejected",
+  ],
 
-      resolved: ["closed"],
+  replacement_dispatched: [
+    "replacement_received",
+  ],
 
-      rejected: [
-        "under_review",
-        "closed",
-      ],
+  replacement_received: [
+    "resolved",
+  ],
 
-      closed: [],
-    };
+  resolved: [
+    "closed",
+  ],
 
+  rejected: [
+    "under_review",
+    "closed",
+  ],
+
+  closed: [],
+};
     const validNextStatuses =
       allowedTransitions[oldStatus] || [];
 
@@ -3417,6 +3425,10 @@ const getComplaintOverallStatus = (
     getComplaintItemStatus
   );
 
+  // =====================================================
+  // ALL ITEMS CLOSED
+  // =====================================================
+
   const allClosed = statuses.every(
     (status) => status === "closed"
   );
@@ -3424,6 +3436,10 @@ const getComplaintOverallStatus = (
   if (allClosed) {
     return "closed";
   }
+
+  // =====================================================
+  // ALL ITEMS RESOLVED / CLOSED
+  // =====================================================
 
   const allResolvedOrClosed =
     statuses.every((status) =>
@@ -3433,6 +3449,29 @@ const getComplaintOverallStatus = (
   if (allResolvedOrClosed) {
     return "resolved";
   }
+
+  // =====================================================
+  // REPLACEMENT RECEIVED
+  // =====================================================
+  //
+  // Important:
+  // Retail replacement receive kar chuka hai,
+  // lekin District ne abhi Resolve nahi kiya.
+  //
+
+  const hasReplacementReceived =
+    statuses.some(
+      (status) =>
+        status === "replacement_received"
+    );
+
+  if (hasReplacementReceived) {
+    return "replacement_received";
+  }
+
+  // =====================================================
+  // REPLACEMENT DISPATCHED
+  // =====================================================
 
   const hasReplacementDispatched =
     statuses.some(
@@ -3445,6 +3484,10 @@ const getComplaintOverallStatus = (
     return "replacement_dispatched";
   }
 
+  // =====================================================
+  // UNDER REVIEW
+  // =====================================================
+
   const hasUnderReview = statuses.some(
     (status) => status === "under_review"
   );
@@ -3452,6 +3495,10 @@ const getComplaintOverallStatus = (
   if (hasUnderReview) {
     return "under_review";
   }
+
+  // =====================================================
+  // REJECTED
+  // =====================================================
 
   const hasRejected = statuses.some(
     (status) => status === "rejected"
@@ -3474,33 +3521,60 @@ const isValidComplaintStatusTransition = (
   const current =
     normalizeStatus(currentStatus);
 
-  const next = normalizeStatus(nextStatus);
+  const next =
+    normalizeStatus(nextStatus);
 
-  const allowedTransitions = {
-    open: [
-      "under_review",
-      "rejected",
-    ],
+ const allowedTransitions = {
+  // ===================================================
+  // OPEN
+  // ===================================================
+  open: [
+    "under_review",
+    "rejected",
+  ],
 
-    under_review: [
-      "replacement_dispatched",
-      "resolved",
-      "rejected",
-    ],
+  // ===================================================
+  // UNDER REVIEW
+  // ===================================================
+  under_review: [
+    "replacement_dispatched",
+    "rejected",
+  ],
 
-    replacement_dispatched: [
-      "resolved",
-      "closed",
-    ],
+  // ===================================================
+  // REPLACEMENT DISPATCHED
+  // ===================================================
+  replacement_dispatched: [
+    "replacement_received",
+  ],
 
-    resolved: [
-      "closed",
-    ],
+  // ===================================================
+  // REPLACEMENT RECEIVED
+  // ===================================================
+  replacement_received: [
+    "resolved",
+  ],
 
-    rejected: [],
+  // ===================================================
+  // RESOLVED
+  // ===================================================
+  resolved: [
+    "closed",
+  ],
 
-    closed: [],
-  };
+  // ===================================================
+  // REJECTED
+  // ===================================================
+  rejected: [
+    "under_review",
+    "closed",
+  ],
+
+  // ===================================================
+  // CLOSED
+  // ===================================================
+  closed: [],
+};
 
   if (current === next) {
     return true;
@@ -3853,13 +3927,13 @@ export const updateComplaintItemStatus = async (req, res) => {
 
     const requestedStatus = normalizeStatus(status);
 
-    const allowedStatuses = [
+  const allowedStatuses = [
   "under_review",
   "replacement_dispatched",
+  "replacement_received",
   "resolved",
   "rejected",
 ];
-
     if (!allowedStatuses.includes(requestedStatus)) {
       await safeRollback(transaction);
 
@@ -3876,13 +3950,13 @@ export const updateComplaintItemStatus = async (req, res) => {
       normalizeText(resolution_note);
 
     if (
-  [
-    "replacement_dispatched",
-    "resolved",
-    "rejected",
-  ].includes(requestedStatus) &&
-  !normalizedResolutionNote
-){
+      [
+        "replacement_dispatched",
+        "resolved",
+        "rejected",
+      ].includes(requestedStatus) &&
+      !normalizedResolutionNote
+    ) {
       await safeRollback(transaction);
 
       return res.status(400).json({
@@ -3965,13 +4039,16 @@ export const updateComplaintItemStatus = async (req, res) => {
       complaint.to_organization_id
     );
 
-    const headOfficeUser = isHeadOfficeUser(user);
+    const headOfficeUser =
+      isHeadOfficeUser(user);
 
     const isSourceStore =
-      loggedInOrganizationId === sourceOrganizationId;
+      loggedInOrganizationId ===
+      sourceOrganizationId;
 
     const isReceiverStore =
-      loggedInOrganizationId === receiverOrganizationId;
+      loggedInOrganizationId ===
+      receiverOrganizationId;
 
     let responseMessage =
       "Complaint item status updated successfully";
@@ -3984,7 +4061,9 @@ export const updateComplaintItemStatus = async (req, res) => {
      * =====================================================
      */
 
-    if (requestedStatus === "under_review") {
+    if (
+      requestedStatus === "under_review"
+    ) {
       if (!isSourceStore && !headOfficeUser) {
         await safeRollback(transaction);
 
@@ -4008,9 +4087,11 @@ export const updateComplaintItemStatus = async (req, res) => {
       complaintItem.resolution_status =
         "under_review";
 
-      complaintItem.reviewed_by = user.id;
+      complaintItem.reviewed_by =
+        user.id;
 
-      complaintItem.reviewed_at = new Date();
+      complaintItem.reviewed_at =
+        new Date();
 
       complaintItem.resolution_note =
         normalizedResolutionNote ||
@@ -4030,7 +4111,8 @@ export const updateComplaintItemStatus = async (req, res) => {
      */
 
     if (
-      requestedStatus === "replacement_dispatched"
+      requestedStatus ===
+      "replacement_dispatched"
     ) {
       if (!isSourceStore && !headOfficeUser) {
         await safeRollback(transaction);
@@ -4042,19 +4124,22 @@ export const updateComplaintItemStatus = async (req, res) => {
         });
       }
 
-      if (currentItemStatus !== "under_review") {
+      if (
+        currentItemStatus !==
+        "under_review"
+      ) {
         await safeRollback(transaction);
 
         return res.status(400).json({
           success: false,
           message: `Complaint item cannot move from ${currentItemStatus} to replacement_dispatched`,
-          required_current_status: "under_review",
+          required_current_status:
+            "under_review",
         });
       }
 
-      const parsedReplacementTransferId = Number(
-        replacement_transfer_id
-      );
+      const parsedReplacementTransferId =
+        Number(replacement_transfer_id);
 
       if (
         !parsedReplacementTransferId ||
@@ -4086,13 +4171,15 @@ export const updateComplaintItemStatus = async (req, res) => {
 
         return res.status(404).json({
           success: false,
-          message: "Replacement transfer not found",
+          message:
+            "Replacement transfer not found",
         });
       }
 
       if (
-        Number(linkedReplacementTransfer.id) ===
-        Number(originalTransfer.id)
+        Number(
+          linkedReplacementTransfer.id
+        ) === Number(originalTransfer.id)
       ) {
         await safeRollback(transaction);
 
@@ -4181,7 +4268,8 @@ export const updateComplaintItemStatus = async (req, res) => {
           success: false,
           message:
             "Replacement transfer does not contain the complaint item",
-          item_id: complaintItem.item_id,
+          item_id:
+            complaintItem.item_id,
         });
       }
 
@@ -4203,29 +4291,37 @@ export const updateComplaintItemStatus = async (req, res) => {
           )
         );
 
-      const shortageQty = roundNumber(
-        complaintItem.shortage_qty
-      );
+      const shortageQty =
+        roundNumber(
+          complaintItem.shortage_qty
+        );
 
-      const shortageWeight = roundNumber(
-        complaintItem.shortage_weight
-      );
+      const shortageWeight =
+        roundNumber(
+          complaintItem.shortage_weight
+        );
 
-      if (totalReplacementQty < shortageQty) {
+      if (
+        totalReplacementQty <
+        shortageQty
+      ) {
         await safeRollback(transaction);
 
         return res.status(400).json({
           success: false,
           message:
             "Replacement transfer quantity is less than complaint shortage quantity",
-          shortage_qty: shortageQty,
-          replacement_qty: totalReplacementQty,
+          shortage_qty:
+            shortageQty,
+          replacement_qty:
+            totalReplacementQty,
         });
       }
 
       if (
         shortageWeight > 0 &&
-        totalReplacementWeight < shortageWeight
+        totalReplacementWeight <
+          shortageWeight
       ) {
         await safeRollback(transaction);
 
@@ -4233,7 +4329,8 @@ export const updateComplaintItemStatus = async (req, res) => {
           success: false,
           message:
             "Replacement transfer weight is less than complaint shortage weight",
-          shortage_weight: shortageWeight,
+          shortage_weight:
+            shortageWeight,
           replacement_weight:
             totalReplacementWeight,
         });
@@ -4279,190 +4376,540 @@ export const updateComplaintItemStatus = async (req, res) => {
      * REPLACEMENT DISPATCHED -> SOLVED + CLOSED
      * =====================================================
      *
-     * Replacement transfer receive hone ke baad:
+     * IMPORTANT:
+     * District/source organization complaint resolve karega.
      *
-     * 1. Replacement transfer status received verify hoga.
-     * 2. Complaint item solved hoga.
-     * 3. Complaint item automatically closed hoga.
-     * 4. Agar saare complaint items closed hain to complaint
-     *    ka overall status bhi closed ho jayega.
+     * Flow:
+     *
+     * Retail Complaint
+     *       ↓
+     * District Review
+     *       ↓
+     * District Replacement Dispatch
+     *       ↓
+     * Retail Replacement Receive
+     *       ↓
+     * District Resolve
      */
 
-    if (requestedStatus === "resolved") {
-      if (!isReceiverStore && !headOfficeUser) {
+    /*
+ * =====================================================
+ * REPLACEMENT RECEIVED -> SOLVED + CLOSED
+ * =====================================================
+ *
+ * FINAL FLOW:
+ *
+ * Retail Complaint
+ *       ↓
+ * Under Review
+ *       ↓
+ * Replacement Dispatched
+ *       ↓
+ * Retail Receives Replacement
+ *       ↓
+ * replacement_received
+ *       ↓
+ * District Resolve
+ *       ↓
+ * closed
+ *
+ * IMPORTANT:
+ * Resolve tabhi allowed hai jab
+ * complaint item ka current status
+ * "replacement_received" ho.
+ */
+/*
+ * =====================================================
+ * REPLACEMENT DISPATCHED -> REPLACEMENT RECEIVED
+ * =====================================================
+ *
+ * Retail store replacement receive karega.
+ *
+ * Flow:
+ * replacement_dispatched
+ *        ↓
+ * replacement_received
+ *
+ * Is stage par complaint solve nahi hogi.
+ * Sirf replacement receive mark hoga.
+ */
+
+if (
+  requestedStatus === "replacement_received"
+) {
+
+  // ===================================================
+  // ONLY RECEIVER STORE / HEAD OFFICE CAN RECEIVE
+  // ===================================================
+
+  if (
+    !isReceiverStore &&
+    !headOfficeUser
+  ) {
+    await safeRollback(transaction);
+
+    return res.status(403).json({
+      success: false,
+      message:
+        "Only receiver store or Head Office can mark replacement as received",
+    });
+  }
+
+  // ===================================================
+  // CURRENT STATUS MUST BE REPLACEMENT DISPATCHED
+  // ===================================================
+
+  if (
+    currentItemStatus !==
+    "replacement_dispatched"
+  ) {
+    await safeRollback(transaction);
+
+    return res.status(400).json({
+      success: false,
+
+      message:
+        `Complaint item cannot move from ${currentItemStatus} to replacement_received`,
+
+      required_current_status:
+        "replacement_dispatched",
+
+      flow: [
+        "replacement_dispatched",
+        "replacement_received",
+        "resolved",
+        "closed",
+      ],
+    });
+  }
+
+  // ===================================================
+  // REPLACEMENT TRANSFER MUST BE LINKED
+  // ===================================================
+
+  const linkedReplacementTransferId =
+    Number(
+      complaintItem.replacement_transfer_id
+    );
+
+  if (!linkedReplacementTransferId) {
+    await safeRollback(transaction);
+
+    return res.status(400).json({
+      success: false,
+
+      message:
+        "Replacement transfer is not linked with this complaint item",
+    });
+  }
+
+  // ===================================================
+  // FETCH REPLACEMENT TRANSFER
+  // ===================================================
+
+  linkedReplacementTransfer =
+    await StockTransfer.findByPk(
+      linkedReplacementTransferId,
+      {
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      }
+    );
+
+  if (!linkedReplacementTransfer) {
+    await safeRollback(transaction);
+
+    return res.status(404).json({
+      success: false,
+
+      message:
+        "Replacement transfer not found",
+    });
+  }
+
+  // ===================================================
+  // TRANSFER MUST ACTUALLY BE RECEIVED
+  // ===================================================
+
+  if (
+    normalizeStatus(
+      linkedReplacementTransfer.status
+    ) !== "received"
+  ) {
+    await safeRollback(transaction);
+
+    return res.status(400).json({
+      success: false,
+
+      message:
+        "Replacement transfer must be received before marking complaint item as replacement received",
+
+      replacement_transfer: {
+        id:
+          linkedReplacementTransfer.id,
+
+        transfer_no:
+          linkedReplacementTransfer.transfer_no,
+
+        current_status:
+          linkedReplacementTransfer.status,
+
+        required_status:
+          "received",
+      },
+    });
+  }
+
+  // ===================================================
+  // MARK COMPLAINT ITEM AS RECEIVED
+  // ===================================================
+
+  const receivedAt =
+    linkedReplacementTransfer.received_at ||
+    linkedReplacementTransfer.receive_date ||
+    new Date();
+
+  complaintItem.replacement_received =
+    true;
+
+  complaintItem.replacement_received_at =
+    receivedAt;
+
+  complaintItem.replacement_received_by =
+    linkedReplacementTransfer.received_by ||
+    user.id;
+
+  complaintItem.resolution_status =
+    "replacement_received";
+
+  complaintItem.resolution_note =
+    normalizedResolutionNote ||
+    "Replacement received successfully";
+
+  responseMessage =
+    "Replacement received successfully";
+}
+if (
+  requestedStatus === "resolved"
+) {
+
+  // ===================================================
+  // SOURCE DISTRICT / HEAD OFFICE CAN RESOLVE
+  // ===================================================
+
+  if (
+    !isSourceStore &&
+    !headOfficeUser
+  ) {
+
+    await safeRollback(transaction);
+
+    return res.status(403).json({
+      success: false,
+
+      message:
+        "Only source store or Head Office can solve complaint after replacement is received",
+    });
+  }
+
+  // ===================================================
+  // REPLACEMENT MUST BE RECEIVED
+  // ===================================================
+  //
+  // Previously:
+  // replacement_dispatched -> resolved
+  //
+  // Now:
+  // replacement_received -> resolved
+  //
+
+  if (
+    currentItemStatus !==
+    "replacement_received"
+  ) {
+
+    await safeRollback(transaction);
+
+    return res.status(400).json({
+
+      success: false,
+
+      message:
+        `Complaint item cannot move from ${currentItemStatus} to resolved`,
+
+      required_current_status:
+        "replacement_received",
+
+      flow:
+        [
+          "replacement_dispatched",
+          "replacement_received",
+          "resolved",
+          "closed",
+        ],
+    });
+  }
+
+  // ===================================================
+  // REPLACEMENT TRANSFER MUST BE LINKED
+  // ===================================================
+
+  const linkedReplacementTransferId =
+    Number(
+      complaintItem.replacement_transfer_id
+    );
+
+  if (!linkedReplacementTransferId) {
+
+    await safeRollback(transaction);
+
+    return res.status(400).json({
+
+      success: false,
+
+      message:
+        "Replacement transfer is not linked with this complaint item",
+    });
+  }
+
+  // ===================================================
+  // FETCH REPLACEMENT TRANSFER
+  // ===================================================
+
+  linkedReplacementTransfer =
+    await StockTransfer.findByPk(
+      linkedReplacementTransferId,
+      {
+        transaction,
+
+        lock:
+          transaction.LOCK.UPDATE,
+      }
+    );
+
+  if (!linkedReplacementTransfer) {
+
+    await safeRollback(transaction);
+
+    return res.status(404).json({
+
+      success: false,
+
+      message:
+        "Replacement transfer not found",
+    });
+  }
+
+  // ===================================================
+  // DOUBLE CHECK:
+  // STOCK TRANSFER MUST ALSO BE RECEIVED
+  // ===================================================
+
+  if (
+    normalizeStatus(
+      linkedReplacementTransfer.status
+    ) !== "received"
+  ) {
+
+    await safeRollback(transaction);
+
+    return res.status(400).json({
+
+      success: false,
+
+      message:
+        "Replacement transfer must be received before complaint can be solved",
+
+      replacement_transfer: {
+
+        id:
+          linkedReplacementTransfer.id,
+
+        transfer_no:
+          linkedReplacementTransfer.transfer_no,
+
+        current_status:
+          linkedReplacementTransfer.status,
+
+        required_status:
+          "received",
+      },
+    });
+  }
+
+  // ===================================================
+  // DOUBLE CHECK:
+  // COMPLAINT FLAG MUST BE TRUE
+  // ===================================================
+
+  if (
+    complaintItem.replacement_received !==
+    true
+  ) {
+
+    await safeRollback(transaction);
+
+    return res.status(400).json({
+
+      success: false,
+
+      message:
+        "Replacement has not been marked as received for this complaint item",
+
+      replacement_received:
+        complaintItem.replacement_received ||
+        false,
+
+      required:
+        true,
+    });
+  }
+
+  // ===================================================
+  // RESOLVE TIME
+  // ===================================================
+
+  const solvedAt =
+    new Date();
+
+  // ===================================================
+  // RESOLVED INFORMATION
+  // ===================================================
+
+  complaintItem.resolved_by =
+    user.id;
+
+  complaintItem.resolved_at =
+    solvedAt;
+
+  // ===================================================
+  // CLOSE ITEM
+  // ===================================================
+
+  complaintItem.closed_by =
+    user.id;
+
+  complaintItem.closed_at =
+    solvedAt;
+
+  complaintItem.resolution_status =
+    "closed";
+
+  // ===================================================
+  // PRESERVE RECEIVED INFORMATION
+  // ===================================================
+
+  complaintItem.replacement_received =
+    true;
+
+  complaintItem.replacement_received_at =
+    complaintItem.replacement_received_at ||
+    linkedReplacementTransfer.received_at ||
+    linkedReplacementTransfer.receive_date ||
+    solvedAt;
+
+  complaintItem.replacement_received_by =
+    complaintItem.replacement_received_by ||
+    linkedReplacementTransfer.received_by ||
+    null;
+
+  // ===================================================
+  // RESOLUTION NOTE
+  // ===================================================
+
+  complaintItem.resolution_note =
+    normalizedResolutionNote;
+
+  responseMessage =
+    "Replacement received successfully. Complaint item solved and closed.";
+}
+
+    /*
+     * =====================================================
+     * OPEN / UNDER REVIEW -> REJECTED
+     * =====================================================
+     */
+
+    if (
+      requestedStatus === "rejected"
+    ) {
+      if (
+        !isSourceStore &&
+        !headOfficeUser
+      ) {
         await safeRollback(transaction);
 
         return res.status(403).json({
           success: false,
           message:
-            "Only receiver store or Head Office can solve complaint after replacement is received",
+            "Only source store or Head Office can reject complaint item",
         });
       }
 
       if (
-        currentItemStatus !==
-        "replacement_dispatched"
+        ![
+          "open",
+          "under_review",
+        ].includes(currentItemStatus)
       ) {
         await safeRollback(transaction);
 
         return res.status(400).json({
           success: false,
-          message: `Complaint item cannot move from ${currentItemStatus} to resolved`,
-          required_current_status:
-            "replacement_dispatched",
+          message: `Complaint item cannot move from ${currentItemStatus} to rejected`,
+          allowed_current_statuses: [
+            "open",
+            "under_review",
+          ],
         });
       }
 
-      const linkedReplacementTransferId = Number(
-        complaintItem.replacement_transfer_id
-      );
+      complaintItem.resolution_status =
+        "rejected";
 
-      if (!linkedReplacementTransferId) {
-        await safeRollback(transaction);
+      complaintItem.rejected_by =
+        user.id;
 
-        return res.status(400).json({
-          success: false,
-          message:
-            "Replacement transfer is not linked with this complaint item",
-        });
-      }
-
-      linkedReplacementTransfer =
-        await StockTransfer.findByPk(
-          linkedReplacementTransferId,
-          {
-            transaction,
-            lock: transaction.LOCK.UPDATE,
-          }
-        );
-
-      if (!linkedReplacementTransfer) {
-        await safeRollback(transaction);
-
-        return res.status(404).json({
-          success: false,
-          message: "Replacement transfer not found",
-        });
-      }
-
-      if (
-        normalizeStatus(
-          linkedReplacementTransfer.status
-        ) !== "received"
-      ) {
-        await safeRollback(transaction);
-
-        return res.status(400).json({
-          success: false,
-          message:
-            "Replacement transfer must be received before complaint can be solved",
-
-          replacement_transfer: {
-            id: linkedReplacementTransfer.id,
-
-            transfer_no:
-              linkedReplacementTransfer.transfer_no,
-
-            current_status:
-              linkedReplacementTransfer.status,
-
-            required_status: "received",
-          },
-        });
-      }
-
-      const solvedAt = new Date();
-
-      /*
-       * Pehle resolved information save hogi.
-       */
-
-      complaintItem.resolved_by = user.id;
-
-      complaintItem.resolved_at = solvedAt;
-
-      /*
-       * Latest change:
-       * Resolved ke baad alag close API call ki zarurat nahi.
-       * Complaint item automatically closed ho jayega.
-       */
-
-      complaintItem.closed_by = user.id;
-
-      complaintItem.closed_at = solvedAt;
-
-      complaintItem.resolution_status = "closed";
-
-      complaintItem.replacement_received = true;
-
-      complaintItem.replacement_received_at =
-        linkedReplacementTransfer.received_at ||
-        linkedReplacementTransfer.receive_date ||
-        solvedAt;
+      complaintItem.rejected_at =
+        new Date();
 
       complaintItem.resolution_note =
         normalizedResolutionNote;
 
       responseMessage =
-        "Replacement transfer received. Complaint item solved and closed automatically.";
-    }
-   /*
- /*
-* =====================================================
-* OPEN / UNDER REVIEW -> REJECTED
-* =====================================================
-*/
-
-if (requestedStatus === "rejected") {
-    if (!isSourceStore && !headOfficeUser) {
-        await safeRollback(transaction);
-
-        return res.status(403).json({
-            success: false,
-            message:
-                "Only source store or Head Office can reject complaint item",
-        });
+        "Complaint item rejected successfully";
     }
 
-    if (!["open", "under_review"].includes(currentItemStatus)) {
-        await safeRollback(transaction);
-
-        return res.status(400).json({
-            success: false,
-            message: `Complaint item cannot move from ${currentItemStatus} to rejected`,
-            allowed_current_statuses: ["open", "under_review"],
-        });
-    }
-
-    complaintItem.resolution_status = "rejected";
-    complaintItem.rejected_by = user.id;
-    complaintItem.rejected_at = new Date();
-    complaintItem.resolution_note = normalizedResolutionNote;
-
-    responseMessage = "Complaint item rejected successfully";
-}
     /*
-     * Updated item ko complaint items JSON me replace karna.
+     * =====================================================
+     * UPDATED ITEM KO COMPLAINT ITEMS JSON ME REPLACE KARNA
+     * =====================================================
      */
 
     complaintItems[complaintItemIndex] =
       complaintItem;
 
     /*
-     * Saare complaint items ke status ke hisaab se
-     * overall complaint status calculate hoga.
+     * =====================================================
+     * OVERALL COMPLAINT STATUS
+     * =====================================================
      */
 
     const overallComplaintStatus =
-      getComplaintOverallStatus(complaintItems);
+      getComplaintOverallStatus(
+        complaintItems
+      );
 
     const complaintUpdatePayload = {
       items: complaintItems,
-      status: overallComplaintStatus,
+      status:
+        overallComplaintStatus,
     };
 
     /*
-     * Optional model columns exist karte hain tabhi set honge.
+     * =====================================================
+     * OPTIONAL MODEL COLUMNS
+     * =====================================================
      */
 
     setIfModelHasAttribute(
@@ -4481,7 +4928,9 @@ if (requestedStatus === "rejected") {
         null
     );
 
-    if (requestedStatus === "under_review") {
+    if (
+      requestedStatus === "under_review"
+    ) {
       setIfModelHasAttribute(
         StockTransferComplaint,
         complaintUpdatePayload,
@@ -4497,44 +4946,54 @@ if (requestedStatus === "rejected") {
       );
     }
 
-    if (overallComplaintStatus === "resolved") {
-    setIfModelHasAttribute(
+    if (
+      overallComplaintStatus ===
+      "resolved"
+    ) {
+      setIfModelHasAttribute(
         StockTransferComplaint,
         complaintUpdatePayload,
         "resolved_by",
         user.id
-    );
+      );
 
-    setIfModelHasAttribute(
+      setIfModelHasAttribute(
         StockTransferComplaint,
         complaintUpdatePayload,
         "resolved_at",
         new Date()
-    );
-}
+      );
+    }
 
-if (overallComplaintStatus === "rejected") {
-    setIfModelHasAttribute(
+    if (
+      overallComplaintStatus ===
+      "rejected"
+    ) {
+      setIfModelHasAttribute(
         StockTransferComplaint,
         complaintUpdatePayload,
         "rejected_by",
         user.id
-    );
+      );
 
-    setIfModelHasAttribute(
+      setIfModelHasAttribute(
         StockTransferComplaint,
         complaintUpdatePayload,
         "rejected_at",
         new Date()
-    );
-}
+      );
+    }
 
-    if (overallComplaintStatus === "closed") {
-      const closedAt = new Date();
+    if (
+      overallComplaintStatus ===
+      "closed"
+    ) {
+      const closedAt =
+        new Date();
 
       /*
-       * Overall complaint closed hone par resolved aur closed
-       * dono details maintain ki ja rahi hain.
+       * Overall complaint closed hone par
+       * resolved aur closed dono details maintain.
        */
 
       setIfModelHasAttribute(
@@ -4572,16 +5031,30 @@ if (overallComplaintStatus === "rejected") {
         transaction,
       }
     );
-    const latestComplaint =
-  await StockTransferComplaint.findByPk(
-    parsedComplaintId,
-    { transaction }
-  );
 
-console.log(
-  "DB Items After Update:",
-  JSON.stringify(latestComplaint.items, null, 2)
-);
+    const latestComplaint =
+      await StockTransferComplaint.findByPk(
+        parsedComplaintId,
+        {
+          transaction,
+        }
+      );
+
+    console.log(
+      "DB Items After Update:",
+      JSON.stringify(
+        latestComplaint.items,
+        null,
+        2
+      )
+    );
+
+    /*
+     * =====================================================
+     * ACTIVITY LOG
+     * =====================================================
+     */
+
     await createComplaintActivity({
       transaction,
       user,
@@ -4595,11 +5068,12 @@ console.log(
         "Complaint item status updated",
 
       description:
-  requestedStatus === "resolved"
-    ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} solved and closed after replacement transfer receive`
-    : requestedStatus === "rejected"
-    ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} rejected`
-    : `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} changed from ${currentItemStatus} to ${complaintItem.resolution_status}`,
+        requestedStatus === "resolved"
+          ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} solved and closed after replacement transfer receive`
+          : requestedStatus === "rejected"
+          ? `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} rejected`
+          : `Complaint ${complaint.complaint_no} item ${parsedTransferItemId} changed from ${currentItemStatus} to ${complaintItem.resolution_status}`,
+
       meta: {
         transfer_item_id:
           parsedTransferItemId,
@@ -4620,7 +5094,8 @@ console.log(
           overallComplaintStatus,
 
         resolution_note:
-          normalizedResolutionNote || null,
+          normalizedResolutionNote ||
+          null,
 
         replacement_transfer_id:
           complaintItem.replacement_transfer_id ||
@@ -4642,33 +5117,34 @@ console.log(
       },
 
       icon:
-  requestedStatus === "resolved"
-    ? "check-circle"
-    : requestedStatus ===
-        "replacement_dispatched"
-    ? "truck"
-    : requestedStatus ===
-        "rejected"
-    ? "x-circle"
-    : "complaint",
+        requestedStatus === "resolved"
+          ? "check-circle"
+          : requestedStatus ===
+              "replacement_dispatched"
+          ? "truck"
+          : requestedStatus ===
+              "rejected"
+          ? "x-circle"
+          : "complaint",
 
       color:
-  requestedStatus === "resolved"
-    ? "green"
-    : requestedStatus ===
-        "replacement_dispatched"
-    ? "blue"
-    : requestedStatus ===
-        "rejected"
-    ? "red"
-    : "orange",
+        requestedStatus === "resolved"
+          ? "green"
+          : requestedStatus ===
+              "replacement_dispatched"
+          ? "blue"
+          : requestedStatus ===
+              "rejected"
+          ? "red"
+          : "orange",
     });
 
     await transaction.commit();
 
     return res.status(200).json({
       success: true,
-      message: responseMessage,
+      message:
+        responseMessage,
 
       data: {
         complaint_id:
@@ -4691,7 +5167,9 @@ console.log(
 
         updated_item: {
           rejected:
-  requestedStatus === "rejected",
+            requestedStatus ===
+            "rejected",
+
           ...complaintItem,
 
           requested_status:
@@ -4701,10 +5179,12 @@ console.log(
             complaintItem.resolution_status,
 
           auto_resolved:
-            requestedStatus === "resolved",
+            requestedStatus ===
+            "resolved",
 
           auto_closed:
-            requestedStatus === "resolved",
+            requestedStatus ===
+            "resolved",
 
           replacement_received:
             complaintItem.replacement_received ||
@@ -4741,7 +5221,9 @@ console.log(
       },
     });
   } catch (error) {
-    await safeRollback(transaction);
+    await safeRollback(
+      transaction
+    );
 
     console.error(
       "updateComplaintItemStatus error:",
