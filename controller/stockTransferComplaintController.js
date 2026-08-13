@@ -5325,25 +5325,25 @@ export const sendReplacementAgainstComplaint = async (req, res) => {
 
     const complaintRows = await sequelize.query(
       `
-      SELECT
-        id,
-        complaint_no,
-        transfer_id,
-        from_organization_id,
-        to_organization_id,
-        complaint_type,
-        description,
-        items,
-        status,
-        raised_by,
-        resolution_note,
-        resolved_by,
-        resolved_at,
-        created_at,
-        updated_at
-      FROM stock_transfer_complaints
-      WHERE id = :complaintId
-      FOR UPDATE
+        SELECT
+          id,
+          complaint_no,
+          transfer_id,
+          from_organization_id,
+          to_organization_id,
+          complaint_type,
+          description,
+          items,
+          status,
+          raised_by,
+          resolution_note,
+          resolved_by,
+          resolved_at,
+          created_at,
+          updated_at
+        FROM stock_transfer_complaints
+        WHERE id = :complaintId
+        FOR UPDATE
       `,
       {
         replacements: {
@@ -5416,6 +5416,27 @@ export const sendReplacementAgainstComplaint = async (req, res) => {
     // =====================================================
     // COMPLAINT STATUS VALIDATION
     // =====================================================
+    //
+    // IMPORTANT:
+    //
+    // A complaint can contain multiple items.
+    //
+    // Example:
+    //
+    // Item 1 -> replacement_dispatched
+    // Item 2 -> under_review
+    //
+    // In this situation the complaint may still need
+    // another replacement dispatch.
+    //
+    // Therefore both statuses are allowed here:
+    //
+    // under_review
+    // replacement_dispatched
+    //
+    // The overall complaint status is calculated again
+    // after the selected item is dispatched.
+    // =====================================================
 
     const complaintStatus = String(
       complaint.status || ""
@@ -5425,15 +5446,21 @@ export const sendReplacementAgainstComplaint = async (req, res) => {
       .replaceAll("-", "_")
       .replaceAll(" ", "_");
 
-    if (complaintStatus !== "under_review") {
+    if (
+      complaintStatus !== "under_review" &&
+      complaintStatus !== "replacement_dispatched"
+    ) {
       await transaction.rollback();
 
       return res.status(400).json({
         success: false,
         message:
-          "Replacement can only be dispatched when complaint is under review",
+          "Replacement can only be dispatched when complaint is under review or has another replacement already dispatched",
         current_status: complaintStatus,
-        required_status: "under_review",
+        required_statuses: [
+          "under_review",
+          "replacement_dispatched",
+        ],
       });
     }
 
@@ -5498,28 +5525,29 @@ export const sendReplacementAgainstComplaint = async (req, res) => {
           complaintItem.replacement_transfer_no || null,
       });
     }
-        // =====================================================
+
+    // =====================================================
     // FETCH ORIGINAL TRANSFER
     // =====================================================
 
     const originalTransferRows =
       await sequelize.query(
         `
-       SELECT
-    id,
-    transfer_no,
-    tracking_number,
-    request_id,
-    from_organization_id,
-    to_organization_id,
-    transfer_date,
-    dispatch_date,
-    receive_date,
-    status,
-    remarks
-FROM stock_transfers
-        WHERE id = :transferId
-        FOR UPDATE
+          SELECT
+            id,
+            transfer_no,
+            tracking_number,
+            request_id,
+            from_organization_id,
+            to_organization_id,
+            transfer_date,
+            dispatch_date,
+            receive_date,
+            status,
+            remarks
+          FROM stock_transfers
+          WHERE id = :transferId
+          FOR UPDATE
         `,
         {
           replacements: {
@@ -5551,20 +5579,20 @@ FROM stock_transfers
     const originalTransferItemRows =
       await sequelize.query(
         `
-        SELECT
-          id,
-          transfer_id,
-          item_id,
-          qty,
-          weight,
-          rate,
-          remarks,
-          parent_batch_id,
-          child_batch_id,
-          external_item_data
-        FROM stock_transfer_items
-        WHERE id = :transferItemId
-        FOR UPDATE
+          SELECT
+            id,
+            transfer_id,
+            item_id,
+            qty,
+            weight,
+            rate,
+            remarks,
+            parent_batch_id,
+            child_batch_id,
+            external_item_data
+          FROM stock_transfer_items
+          WHERE id = :transferItemId
+          FOR UPDATE
         `,
         {
           replacements: {
@@ -5650,30 +5678,30 @@ FROM stock_transfers
     const replacementItemRows =
       await sequelize.query(
         `
-        SELECT
-          id,
-          article_code,
-          sku_code,
-          item_name,
-          metal_type,
-          category,
-          purity,
-          gross_weight,
-          net_weight,
-          stone_weight,
-          stone_amount,
-          making_charge,
-          purchase_rate,
-          sale_rate,
-          hsn_code,
-          unit,
-          current_status,
-          organization_id,
-          "storeCode",
-          "storeName",
-          is_active
-        FROM items
-        WHERE id = :replacementItemId
+          SELECT
+            id,
+            article_code,
+            sku_code,
+            item_name,
+            metal_type,
+            category,
+            purity,
+            gross_weight,
+            net_weight,
+            stone_weight,
+            stone_amount,
+            making_charge,
+            purchase_rate,
+            sale_rate,
+            hsn_code,
+            unit,
+            current_status,
+            organization_id,
+            "storeCode",
+            "storeName",
+            is_active
+          FROM items
+          WHERE id = :replacementItemId
         `,
         {
           replacements: {
@@ -5798,7 +5826,8 @@ FROM stock_transfers
           "Replacement weight cannot exceed shortage weight",
       });
     }
-        // =====================================================
+
+    // =====================================================
     // FETCH SOURCE AND DESTINATION STORES
     // Only actual database columns are selected.
     // =====================================================
@@ -6132,7 +6161,8 @@ FROM stock_transfers
           replacementWeight,
       });
     }
-        // =====================================================
+
+    // =====================================================
     // GENERATE REPLACEMENT TRANSFER NUMBER
     // =====================================================
 
@@ -6152,57 +6182,57 @@ FROM stock_transfers
     const replacementTransferRows =
       await sequelize.query(
         `
-        INSERT INTO stock_transfers
-        (
-          transfer_no,
-          request_id,
-          from_organization_id,
-          to_organization_id,
-          transfer_date,
-          dispatch_date,
-          status,
-          remarks,
-          approved_by,
-          dispatched_by,
-          created_by,
-          driver_name,
-          driver_phone,
-          vehicle_number,
-          tracking_number,
-          pickup_address,
-          delivery_address,
-          expected_delivery_date,
-          expected_delivery_time,
-          additional_notes,
-          created_at,
-          updated_at
-        )
-        VALUES
-        (
-          :replacementTransferNo,
-          NULL,
-          :sourceOrganizationId,
-          :destinationOrganizationId,
-          CURRENT_DATE,
-          NOW(),
-          'in_transit',
-          :transferRemarks,
-          :userId,
-          :userId,
-          :userId,
-          :driverName,
-          :driverPhone,
-          :vehicleNumber,
-          :replacementTransferNo,
-          :pickupAddress,
-          :deliveryAddress,
-          :expectedDeliveryDate,
-          :expectedDeliveryTime,
-          :additionalNotes,
-          NOW(),
-          NOW()
-        )
-        RETURNING *
+          INSERT INTO stock_transfers
+          (
+            transfer_no,
+            request_id,
+            from_organization_id,
+            to_organization_id,
+            transfer_date,
+            dispatch_date,
+            status,
+            remarks,
+            approved_by,
+            dispatched_by,
+            created_by,
+            driver_name,
+            driver_phone,
+            vehicle_number,
+            tracking_number,
+            pickup_address,
+            delivery_address,
+            expected_delivery_date,
+            expected_delivery_time,
+            additional_notes,
+            created_at,
+            updated_at
+          )
+          VALUES
+          (
+            :replacementTransferNo,
+            NULL,
+            :sourceOrganizationId,
+            :destinationOrganizationId,
+            CURRENT_DATE,
+            NOW(),
+            'in_transit',
+            :transferRemarks,
+            :userId,
+            :userId,
+            :userId,
+            :driverName,
+            :driverPhone,
+            :vehicleNumber,
+            :replacementTransferNo,
+            :pickupAddress,
+            :deliveryAddress,
+            :expectedDeliveryDate,
+            :expectedDeliveryTime,
+            :additionalNotes,
+            NOW(),
+            NOW()
+          )
+          RETURNING *
         `,
         {
           replacements: {
@@ -6272,63 +6302,64 @@ FROM stock_transfers
       0
     );
 
-   const externalItemData = JSON.stringify({
-  complaint_id: complaintId,
-  complaint_no: complaint.complaint_no,
+    const externalItemData = JSON.stringify({
+      complaint_id: complaintId,
+      complaint_no: complaint.complaint_no,
 
-  original_transfer_id: Number(originalTransfer.id),
+      original_transfer_id:
+        Number(originalTransfer.id),
 
-  original_transfer_no:
-    originalTransfer.transfer_no,
+      original_transfer_no:
+        originalTransfer.transfer_no,
 
-  original_tracking_number:
-    originalTransfer.tracking_number ||
-    originalTransfer.transfer_no,
+      original_tracking_number:
+        originalTransfer.tracking_number ||
+        originalTransfer.transfer_no,
 
-  original_transfer_item_id:
-    transferItemId,
+      original_transfer_item_id:
+        transferItemId,
 
-  original_item_id:
-    originalItemId,
+      original_item_id:
+        originalItemId,
 
-  replacement_item_id:
-    replacementItemId,
+      replacement_item_id:
+        replacementItemId,
 
-  source_stock_id:
-    Number(sourceStock.id),
+      source_stock_id:
+        Number(sourceStock.id),
 
-  source_batch_id:
-    sourceStock.batch_id || null,
-});
+      source_batch_id:
+        sourceStock.batch_id || null,
+    });
 
     const replacementTransferItemRows =
       await sequelize.query(
         `
-        INSERT INTO stock_transfer_items
-        (
-          transfer_id,
-          item_id,
-          qty,
-          weight,
-          rate,
-          remarks,
-          parent_batch_id,
-          child_batch_id,
-          external_item_data
-        )
-        VALUES
-        (
-          :replacementTransferId,
-          :replacementItemId,
-          :replacementQty,
-          :replacementWeight,
-          :replacementRate,
-          :itemRemarks,
-          :parentBatchId,
-          NULL,
-          CAST(:externalItemData AS jsonb)
-        )
-        RETURNING *
+          INSERT INTO stock_transfer_items
+          (
+            transfer_id,
+            item_id,
+            qty,
+            weight,
+            rate,
+            remarks,
+            parent_batch_id,
+            child_batch_id,
+            external_item_data
+          )
+          VALUES
+          (
+            :replacementTransferId,
+            :replacementItemId,
+            :replacementQty,
+            :replacementWeight,
+            :replacementRate,
+            :itemRemarks,
+            :parentBatchId,
+            NULL,
+            CAST(:externalItemData AS jsonb)
+          )
+          RETURNING *
         `,
         {
           replacements: {
@@ -6365,7 +6396,8 @@ FROM stock_transfers
         "Replacement transfer item could not be created"
       );
     }
-        // =====================================================
+
+    // =====================================================
     // UPDATE SOURCE STOCK: AVAILABLE -> TRANSIT
     // =====================================================
 
@@ -6604,7 +6636,16 @@ FROM stock_transfers
     }
 
     // =====================================================
-    // UPDATE COMPLAINT ITEM JSONB
+    // UPDATE SELECTED COMPLAINT ITEM JSONB
+    // =====================================================
+    //
+    // IMPORTANT:
+    //
+    // complaintItems contains multiple items.
+    //
+    // We update ONLY complaintItemIndex.
+    //
+    // Other complaint items remain untouched.
     // =====================================================
 
     const dispatchedAt =
@@ -6613,7 +6654,8 @@ FROM stock_transfers
     const updatedComplaintItem = {
       ...complaintItem,
 
-      status: "replacement_dispatched",
+      status:
+        "replacement_dispatched",
 
       resolution_status:
         "replacement_dispatched",
@@ -6659,21 +6701,80 @@ FROM stock_transfers
         "Replacement item dispatched",
     };
 
+    // ONLY SELECTED ITEM IS UPDATED
     complaintItems[complaintItemIndex] =
       updatedComplaintItem;
 
-    /*
-      Complaint ka main status under_review hi rakha gaya hai.
+    // =====================================================
+    // CALCULATE OVERALL COMPLAINT STATUS
+    // =====================================================
+    //
+    // IMPORTANT:
+    //
+    // A complaint can contain multiple complaint items.
+    //
+    // Example:
+    //
+    // Item 1 -> replacement_dispatched
+    // Item 2 -> under_review
+    //
+    // In this case:
+    //
+    // Complaint -> under_review
+    //
+    // Only when every item that actually requires
+    // replacement has its own replacement transfer:
+    //
+    // Complaint -> replacement_dispatched
+    // =====================================================
 
-      Kyunki database ke complaint status constraint ki
-      complete allowed values abhi confirm nahi hain.
+    const replacementRequiredItems =
+      complaintItems.filter(
+        (item) => {
+          const shortageQty = Number(
+            item.shortage_qty || 0
+          );
 
-      Individual complaint item ke andar:
-      replacement_dispatched status save ho raha hai.
-    */
+          const missingQty = Number(
+            item.missing_qty || 0
+          );
+
+          const damagedQty = Number(
+            item.damaged_qty || 0
+          );
+
+          const hasWrongItem = Boolean(
+            item.wrong_item_id ||
+            item.wrong_item_code
+          );
+
+          return (
+            shortageQty > 0 ||
+            missingQty > 0 ||
+            damagedQty > 0 ||
+            hasWrongItem
+          );
+        }
+      );
+
+    const allReplacementItemsDispatched =
+      replacementRequiredItems.length > 0 &&
+      replacementRequiredItems.every(
+        (item) =>
+          Boolean(
+            item.replacement_transfer_id ||
+            item.replacement_transfer_item_id
+          )
+      );
 
     const updatedComplaintStatus =
-  "replacement_dispatched";
+      allReplacementItemsDispatched
+        ? "replacement_dispatched"
+        : "under_review";
+
+    // =====================================================
+    // UPDATE COMPLAINT
+    // =====================================================
 
     const updatedComplaintRows =
       await sequelize.query(
