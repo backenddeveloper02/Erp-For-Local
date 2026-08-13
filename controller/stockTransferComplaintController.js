@@ -6541,15 +6541,29 @@ export const getComplaintDetails = async (req, res) => {
       });
     }
 
-    // =====================================================
-    // AUTHORIZATION
-    // =====================================================
+   // =====================================================
+// AUTHORIZATION
+// =====================================================
 
-    const role = String(user.role || "").trim().toLowerCase();
+const role = String(user.role || "")
+  .trim()
+  .toLowerCase();
 
 const organizationLevel = String(
   user.organization_level || ""
-).trim().toLowerCase();
+)
+  .trim()
+  .toLowerCase();
+
+const userOrganizationId = Number(user.organization_id);
+
+const userDistrictId = Number(
+  user.district_id || user.districtId || 0
+);
+
+// =====================================================
+// HEAD OFFICE ROLES
+// =====================================================
 
 const allowedHeadRoles = [
   "super_admin",
@@ -6567,14 +6581,140 @@ const isHeadOfficeUser =
   organizationLevel === "head office" ||
   organizationLevel === "head";
 
-if (!isHeadOfficeUser) {
+// =====================================================
+// DISTRICT USER
+// =====================================================
+
+const isDistrictUser =
+  organizationLevel === "district" ||
+  organizationLevel === "district office" ||
+  role === "district" ||
+  role === "district_manager" ||
+  role === "district-manager";
+
+// =====================================================
+// HEAD OFFICE
+// =====================================================
+
+if (isHeadOfficeUser) {
+  // Head Office can view all complaints.
+}
+
+// =====================================================
+// DISTRICT
+// =====================================================
+
+else if (isDistrictUser) {
+  /*
+   * District should be able to view:
+   *
+   * 1. Complaint directly assigned to this District
+   * 2. Complaint raised by a Retail Store under this District
+   */
+
+  let districtAuthorized = false;
+
+  // ---------------------------------------------------
+  // CASE 1:
+  // Complaint directly belongs to this District
+  // ---------------------------------------------------
+
   if (
-    Number(user.organization_id) !==
+    Number(complaint.to_organization_id) ===
+    userOrganizationId
+  ) {
+    districtAuthorized = true;
+  }
+
+  // ---------------------------------------------------
+  // CASE 2:
+  // Complaint came from a Retail Store
+  // under this District
+  // ---------------------------------------------------
+
+  if (!districtAuthorized) {
+    const senderStoreForAuth =
+      await sequelize.query(
+        `
+        SELECT
+          id,
+          store_code,
+          store_name,
+          organization_level,
+          district_id
+        FROM stores
+        WHERE id = :id
+        LIMIT 1
+        `,
+        {
+          replacements: {
+            id: complaint.from_organization_id,
+          },
+          type: QueryTypes.SELECT,
+        }
+      );
+
+    const senderStore =
+      senderStoreForAuth[0] || null;
+
+    if (senderStore) {
+      const senderDistrictId = Number(
+        senderStore.district_id || 0
+      );
+
+      // District organization's ID matches
+      // the retail store's district_id
+      if (
+        senderDistrictId > 0 &&
+        senderDistrictId === userOrganizationId
+      ) {
+        districtAuthorized = true;
+      }
+
+      // In case auth middleware provides district_id
+      if (
+        !districtAuthorized &&
+        senderDistrictId > 0 &&
+        userDistrictId > 0 &&
+        senderDistrictId === userDistrictId
+      ) {
+        districtAuthorized = true;
+      }
+    }
+  }
+
+  // ---------------------------------------------------
+  // DENY
+  // ---------------------------------------------------
+
+  if (!districtAuthorized) {
+    return res.status(403).json({
+      success: false,
+      message:
+        "You are not authorized to view this complaint.",
+    });
+  }
+}
+
+// =====================================================
+// OTHER USERS
+// =====================================================
+
+else {
+  /*
+   * Existing behavior for other roles:
+   * only the organization receiving the complaint
+   * can view it.
+   */
+
+  if (
+    userOrganizationId !==
     Number(complaint.to_organization_id)
   ) {
     return res.status(403).json({
       success: false,
-      message: "You are not authorized to view this complaint.",
+      message:
+        "You are not authorized to view this complaint.",
     });
   }
 }
