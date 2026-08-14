@@ -28,6 +28,7 @@ import {
   // to pehle us controller ko add/export karna padega.
   transferDistrictRequestToRetail,
   dispatchDistrictToRetailDirectTransfer,
+  getRetailDistrictInventory,
 } from "../controller/stockRequest.controller.js";
 
 import {
@@ -284,7 +285,11 @@ router.get(
   auth,
   getHeadAllTransfers
 );
-
+router.get(
+  "/retail/district-inventory",
+  auth,
+  getRetailDistrictInventory
+);
 /* =====================================================
    HEAD REQUEST TRANSFER FLOW
    Head kisi request ko District ko forward/direct delivery de sakta hai
