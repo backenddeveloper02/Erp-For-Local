@@ -9319,3 +9319,299 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     }
   }
 };
+ export const getRetailDistrictInventory = async (req, res) => {
+  try {
+    // ============================================================
+    // 1. LOGGED-IN RETAIL STORE IDENTIFY
+    // ============================================================
+
+    const retailStoreId =
+      req.user?.organization_id ||
+      req.user?.organizationId ||
+      req.user?.store_id ||
+      req.user?.storeId;
+
+    if (!retailStoreId) {
+      return res.status(401).json({
+        success: false,
+        message: "Retail store organization not found in authenticated user",
+      });
+    }
+
+    // ============================================================
+    // 2. PAGINATION / SEARCH
+    // ============================================================
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 20, 1),
+      100
+    );
+
+    const offset = (page - 1) * limit;
+
+    const search = String(req.query.search || "").trim();
+
+    // ============================================================
+    // 3. FIND RETAIL STORE + ITS DISTRICT
+    //
+    // stores.district_id points to the District Store's stores.id
+    // ============================================================
+
+    const retailStore = await sequelize.query(
+      `
+      SELECT
+        r.id AS retail_store_id,
+        r.store_code AS retail_store_code,
+        r.store_name AS retail_store_name,
+
+        r.district_id AS district_store_id,
+
+        d.store_code AS district_store_code,
+        d.store_name AS district_store_name
+
+      FROM stores r
+
+      LEFT JOIN stores d
+        ON d.id = r.district_id
+
+      WHERE r.id = :retailStoreId
+        AND r.is_active = true
+
+      LIMIT 1
+      `,
+      {
+        replacements: {
+          retailStoreId,
+        },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    if (!retailStore || retailStore.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Retail store not found",
+      });
+    }
+
+    const store = retailStore[0];
+
+    if (!store.district_store_id) {
+      return res.status(404).json({
+        success: false,
+        message: "Retail store is not assigned to any district",
+      });
+    }
+
+    // ============================================================
+    // 4. SEARCH CONDITION
+    // ============================================================
+
+    const searchCondition = search
+      ? `
+        AND (
+          i.sku_code ILIKE :search
+          OR i.article_code ILIKE :search
+          OR i.item_name ILIKE :search
+          OR i.category ILIKE :search
+          OR i.purity ILIKE :search
+        )
+      `
+      : "";
+
+    // ============================================================
+    // 5. TOTAL COUNT
+    //
+    // current_organization_id = District Store
+    //
+    // is_leaf = true prevents parent batches from being
+    // double-counted when batches are split.
+    // ============================================================
+
+    const countResult = await sequelize.query(
+      `
+      SELECT COUNT(DISTINCT ib.item_id) AS total
+
+      FROM inventory_batches ib
+
+      INNER JOIN items i
+        ON i.id = ib.item_id
+
+      WHERE ib.current_organization_id = :districtStoreId
+        AND ib.is_leaf = true
+        AND ib.available_qty > 0
+        AND i.is_active = true
+
+        ${searchCondition}
+      `,
+      {
+        replacements: {
+          districtStoreId: store.district_store_id,
+          search: `%${search}%`,
+        },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    const total = Number(countResult[0]?.total || 0);
+
+    // ============================================================
+    // 6. FETCH DISTRICT INVENTORY
+    // ============================================================
+
+    const inventory = await sequelize.query(
+      `
+      SELECT
+        i.id AS item_id,
+        i.article_code,
+        i.sku_code,
+        i.item_name,
+        i.metal_type,
+        i.category,
+        i.subcategory,
+        i.details,
+        i.purity,
+
+        i.gross_weight,
+        i.net_weight,
+        i.stone_weight,
+        i.stone_amount,
+
+        i.making_charge,
+        i.purchase_rate,
+        i.sale_rate,
+
+        i.hsn_code,
+        i.unit,
+
+        i.current_status,
+
+        i.image_url,
+        i.image_public_id,
+
+        i.qr_code_url,
+        i.qr_code_value,
+
+        COALESCE(
+          SUM(ib.total_qty),
+          0
+        ) AS total_qty,
+
+        COALESCE(
+          SUM(ib.available_qty),
+          0
+        ) AS available_qty,
+
+        COALESCE(
+          SUM(ib.total_weight),
+          0
+        ) AS total_weight,
+
+        COALESCE(
+          SUM(ib.available_weight),
+          0
+        ) AS available_weight
+
+      FROM inventory_batches ib
+
+      INNER JOIN items i
+        ON i.id = ib.item_id
+
+      WHERE ib.current_organization_id = :districtStoreId
+        AND ib.is_leaf = true
+        AND ib.available_qty > 0
+        AND i.is_active = true
+
+        ${searchCondition}
+
+      GROUP BY
+        i.id,
+        i.article_code,
+        i.sku_code,
+        i.item_name,
+        i.metal_type,
+        i.category,
+        i.subcategory,
+        i.details,
+        i.purity,
+        i.gross_weight,
+        i.net_weight,
+        i.stone_weight,
+        i.stone_amount,
+        i.making_charge,
+        i.purchase_rate,
+        i.sale_rate,
+        i.hsn_code,
+        i.unit,
+        i.current_status,
+        i.image_url,
+        i.image_public_id,
+        i.qr_code_url,
+        i.qr_code_value
+
+      ORDER BY i.id DESC
+
+      LIMIT :limit
+      OFFSET :offset
+      `,
+      {
+        replacements: {
+          districtStoreId: store.district_store_id,
+          search: `%${search}%`,
+          limit,
+          offset,
+        },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    // ============================================================
+    // 7. RESPONSE
+    // ============================================================
+
+    return res.status(200).json({
+      success: true,
+
+      message: "District inventory fetched successfully",
+
+      retail_store: {
+        id: store.retail_store_id,
+        code: store.retail_store_code,
+        name: store.retail_store_name,
+      },
+
+      district: {
+        id: store.district_store_id,
+        code: store.district_store_code,
+        name: store.district_store_name,
+      },
+
+      inventory,
+
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+        hasNextPage: page < Math.ceil(total / limit),
+        hasPreviousPage: page > 1,
+      },
+    });
+  } catch (error) {
+    console.error(
+      "Get Retail District Inventory Error:",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to fetch district inventory",
+      error:
+        process.env.NODE_ENV === "development"
+          ? error.message
+          : undefined,
+    });
+  }
+};
