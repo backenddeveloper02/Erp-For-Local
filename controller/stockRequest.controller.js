@@ -9322,7 +9322,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
  export const getRetailDistrictInventory = async (req, res) => {
   try {
     // ============================================================
-    // 1. LOGGED-IN RETAIL STORE IDENTIFY
+    // 1. GET LOGGED-IN RETAIL STORE ID
     // ============================================================
 
     const retailStoreId =
@@ -9334,50 +9334,66 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     if (!retailStoreId) {
       return res.status(401).json({
         success: false,
-        message: "Retail store organization not found in authenticated user",
+        message: "Retail store organization not found",
       });
     }
 
     // ============================================================
-    // 2. PAGINATION / SEARCH
+    // 2. GET QUERY PARAMETERS
+    //
+    // Example:
+    // /request/retail/district-inventory?category=Ring
+    //
+    // If category is not passed:
+    // /request/retail/district-inventory
+    //
+    // Then all categories will be returned.
     // ============================================================
 
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const category = String(req.query.category || "").trim();
+
+    const search = String(req.query.search || "").trim();
+
+    const page = Math.max(
+      parseInt(req.query.page, 10) || 1,
+      1
+    );
 
     const limit = Math.min(
-      Math.max(parseInt(req.query.limit, 10) || 20, 1),
+      Math.max(
+        parseInt(req.query.limit, 10) || 20,
+        1
+      ),
       100
     );
 
     const offset = (page - 1) * limit;
 
-    const search = String(req.query.search || "").trim();
-
     // ============================================================
-    // 3. FIND RETAIL STORE + ITS DISTRICT
+    // 3. FIND RETAIL STORE AND ITS DISTRICT
     //
-    // stores.district_id points to the District Store's stores.id
+    // stores.district_id -> stores.id
     // ============================================================
 
-    const retailStore = await sequelize.query(
+    const retailStoreResult = await sequelize.query(
       `
       SELECT
-        r.id AS retail_store_id,
-        r.store_code AS retail_store_code,
-        r.store_name AS retail_store_name,
+        retail.id AS retail_store_id,
+        retail.store_code AS retail_store_code,
+        retail.store_name AS retail_store_name,
 
-        r.district_id AS district_store_id,
+        retail.district_id AS district_store_id,
 
-        d.store_code AS district_store_code,
-        d.store_name AS district_store_name
+        district.store_code AS district_store_code,
+        district.store_name AS district_store_name
 
-      FROM stores r
+      FROM stores AS retail
 
-      LEFT JOIN stores d
-        ON d.id = r.district_id
+      LEFT JOIN stores AS district
+        ON district.id = retail.district_id
 
-      WHERE r.id = :retailStoreId
-        AND r.is_active = true
+      WHERE retail.id = :retailStoreId
+        AND retail.is_active = true
 
       LIMIT 1
       `,
@@ -9389,24 +9405,49 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
       }
     );
 
-    if (!retailStore || retailStore.length === 0) {
+    if (
+      !retailStoreResult ||
+      retailStoreResult.length === 0
+    ) {
       return res.status(404).json({
         success: false,
         message: "Retail store not found",
       });
     }
 
-    const store = retailStore[0];
+    const retailStore = retailStoreResult[0];
 
-    if (!store.district_store_id) {
+    // ============================================================
+    // 4. CHECK DISTRICT ASSIGNMENT
+    // ============================================================
+
+    if (!retailStore.district_store_id) {
       return res.status(404).json({
         success: false,
-        message: "Retail store is not assigned to any district",
+        message:
+          "This retail store is not assigned to any district",
       });
     }
 
     // ============================================================
-    // 4. SEARCH CONDITION
+    // 5. BUILD CATEGORY FILTER
+    //
+    // category=Ring
+    //     -> only Ring
+    //
+    // category not passed
+    //     -> all categories
+    // ============================================================
+
+    const categoryCondition = category
+      ? `AND LOWER(TRIM(i.category)) = LOWER(TRIM(:category))`
+      : "";
+
+    // ============================================================
+    // 6. BUILD SEARCH FILTER
+    //
+    // Optional:
+    // ?category=Ring&search=Gold
     // ============================================================
 
     const searchCondition = search
@@ -9422,76 +9463,110 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
       : "";
 
     // ============================================================
-    // 5. TOTAL COUNT
-    //
-    // current_organization_id = District Store
-    //
-    // is_leaf = true prevents parent batches from being
-    // double-counted when batches are split.
+    // 7. COUNT TOTAL ITEMS
     // ============================================================
 
     const countResult = await sequelize.query(
       `
-      SELECT COUNT(DISTINCT ib.item_id) AS total
+      SELECT
+        COUNT(DISTINCT ib.item_id) AS total
 
-      FROM inventory_batches ib
+      FROM inventory_batches AS ib
 
-      INNER JOIN items i
+      INNER JOIN items AS i
         ON i.id = ib.item_id
 
-      WHERE ib.current_organization_id = :districtStoreId
+      WHERE
+        ib.current_organization_id = :districtStoreId
+
         AND ib.is_leaf = true
+
         AND ib.available_qty > 0
+
         AND i.is_active = true
+
+        ${categoryCondition}
 
         ${searchCondition}
       `,
       {
         replacements: {
-          districtStoreId: store.district_store_id,
+          districtStoreId:
+            retailStore.district_store_id,
+
+          category,
+
           search: `%${search}%`,
         },
+
         type: QueryTypes.SELECT,
       }
     );
 
-    const total = Number(countResult[0]?.total || 0);
+    const total = Number(
+      countResult?.[0]?.total || 0
+    );
 
     // ============================================================
-    // 6. FETCH DISTRICT INVENTORY
+    // 8. FETCH DISTRICT INVENTORY
     // ============================================================
 
     const inventory = await sequelize.query(
       `
       SELECT
+
         i.id AS item_id,
+
         i.article_code,
+
         i.sku_code,
+
         i.item_name,
+
         i.metal_type,
+
         i.category,
+
         i.subcategory,
+
         i.details,
+
         i.purity,
 
         i.gross_weight,
+
         i.net_weight,
+
         i.stone_weight,
+
         i.stone_amount,
 
         i.making_charge,
+
         i.purchase_rate,
+
         i.sale_rate,
 
         i.hsn_code,
+
         i.unit,
 
         i.current_status,
 
+        i.store_id,
+
+        i."storeCode" AS store_code,
+
+        i."storeName" AS store_name,
+
+        i.organization_id,
+
         i.image_url,
+
         i.image_public_id,
 
         i.qr_code_url,
+
         i.qr_code_value,
 
         COALESCE(
@@ -9514,91 +9589,168 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
           0
         ) AS available_weight
 
-      FROM inventory_batches ib
+      FROM inventory_batches AS ib
 
-      INNER JOIN items i
+      INNER JOIN items AS i
         ON i.id = ib.item_id
 
-      WHERE ib.current_organization_id = :districtStoreId
+      WHERE
+
+        ib.current_organization_id =
+          :districtStoreId
+
         AND ib.is_leaf = true
+
         AND ib.available_qty > 0
+
         AND i.is_active = true
+
+        ${categoryCondition}
 
         ${searchCondition}
 
       GROUP BY
+
         i.id,
+
         i.article_code,
+
         i.sku_code,
+
         i.item_name,
+
         i.metal_type,
+
         i.category,
+
         i.subcategory,
+
         i.details,
+
         i.purity,
+
         i.gross_weight,
+
         i.net_weight,
+
         i.stone_weight,
+
         i.stone_amount,
+
         i.making_charge,
+
         i.purchase_rate,
+
         i.sale_rate,
+
         i.hsn_code,
+
         i.unit,
+
         i.current_status,
+
+        i.store_id,
+
+        i."storeCode",
+
+        i."storeName",
+
+        i.organization_id,
+
         i.image_url,
+
         i.image_public_id,
+
         i.qr_code_url,
+
         i.qr_code_value
 
-      ORDER BY i.id DESC
+      ORDER BY
+        i.id DESC
 
       LIMIT :limit
+
       OFFSET :offset
       `,
       {
         replacements: {
-          districtStoreId: store.district_store_id,
+          districtStoreId:
+            retailStore.district_store_id,
+
+          category,
+
           search: `%${search}%`,
+
           limit,
+
           offset,
         },
+
         type: QueryTypes.SELECT,
       }
     );
 
     // ============================================================
-    // 7. RESPONSE
+    // 9. PAGINATION
+    // ============================================================
+
+    const totalPages =
+      total > 0
+        ? Math.ceil(total / limit)
+        : 0;
+
+    // ============================================================
+    // 10. RESPONSE
     // ============================================================
 
     return res.status(200).json({
       success: true,
 
-      message: "District inventory fetched successfully",
+      message: category
+        ? `${category} category district inventory fetched successfully`
+        : "District inventory fetched successfully",
 
       retail_store: {
-        id: store.retail_store_id,
-        code: store.retail_store_code,
-        name: store.retail_store_name,
+        id: retailStore.retail_store_id,
+
+        code: retailStore.retail_store_code,
+
+        name: retailStore.retail_store_name,
       },
 
       district: {
-        id: store.district_store_id,
-        code: store.district_store_code,
-        name: store.district_store_name,
+        id: retailStore.district_store_id,
+
+        code: retailStore.district_store_code,
+
+        name: retailStore.district_store_name,
+      },
+
+      filter: {
+        category: category || null,
+
+        search: search || null,
       },
 
       inventory,
 
       pagination: {
         page,
+
         limit,
+
         total,
-        totalPages: Math.ceil(total / limit),
-        hasNextPage: page < Math.ceil(total / limit),
-        hasPreviousPage: page > 1,
+
+        totalPages,
+
+        hasNextPage:
+          page < totalPages,
+
+        hasPreviousPage:
+          page > 1,
       },
     });
+
   } catch (error) {
     console.error(
       "Get Retail District Inventory Error:",
@@ -9607,7 +9759,10 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
 
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch district inventory",
+
+      message:
+        "Failed to fetch district inventory",
+
       error:
         process.env.NODE_ENV === "development"
           ? error.message
