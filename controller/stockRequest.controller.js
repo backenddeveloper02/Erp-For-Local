@@ -9319,7 +9319,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     }
   }
 };
- export const getRetailDistrictInventory = async (req, res) => {
+  export const getRetailDistrictInventory = async (req, res) => {
   try {
     // ============================================================
     // 1. GET LOGGED-IN RETAIL STORE ID
@@ -9342,32 +9342,19 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     // 2. GET QUERY PARAMETERS
     //
     // Example:
-    // /request/retail/district-inventory?category=Ring
+    // ?category=Ring
     //
-    // If category is not passed:
-    // /request/retail/district-inventory
-    //
-    // Then all categories will be returned.
+    // Optional:
+    // ?category=Ring&search=Gold
     // ============================================================
 
-    const category = String(req.query.category || "").trim();
+    const category = String(
+      req.query.category || ""
+    ).trim();
 
-    const search = String(req.query.search || "").trim();
-
-    const page = Math.max(
-      parseInt(req.query.page, 10) || 1,
-      1
-    );
-
-    const limit = Math.min(
-      Math.max(
-        parseInt(req.query.limit, 10) || 20,
-        1
-      ),
-      100
-    );
-
-    const offset = (page - 1) * limit;
+    const search = String(
+      req.query.search || ""
+    ).trim();
 
     // ============================================================
     // 3. FIND RETAIL STORE AND ITS DISTRICT
@@ -9379,12 +9366,15 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
       `
       SELECT
         retail.id AS retail_store_id,
+
         retail.store_code AS retail_store_code,
+
         retail.store_name AS retail_store_name,
 
         retail.district_id AS district_store_id,
 
         district.store_code AS district_store_code,
+
         district.store_name AS district_store_name
 
       FROM stores AS retail
@@ -9393,6 +9383,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
         ON district.id = retail.district_id
 
       WHERE retail.id = :retailStoreId
+
         AND retail.is_active = true
 
       LIMIT 1
@@ -9401,9 +9392,14 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
         replacements: {
           retailStoreId,
         },
+
         type: QueryTypes.SELECT,
       }
     );
+
+    // ============================================================
+    // 4. RETAIL STORE NOT FOUND
+    // ============================================================
 
     if (
       !retailStoreResult ||
@@ -9418,7 +9414,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     const retailStore = retailStoreResult[0];
 
     // ============================================================
-    // 4. CHECK DISTRICT ASSIGNMENT
+    // 5. CHECK DISTRICT ASSIGNMENT
     // ============================================================
 
     if (!retailStore.district_store_id) {
@@ -9430,82 +9426,48 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     }
 
     // ============================================================
-    // 5. BUILD CATEGORY FILTER
+    // 6. CATEGORY FILTER
     //
     // category=Ring
-    //     -> only Ring
+    //     -> Only Ring items
     //
     // category not passed
-    //     -> all categories
+    //     -> All categories
     // ============================================================
 
     const categoryCondition = category
-      ? `AND LOWER(TRIM(i.category)) = LOWER(TRIM(:category))`
+      ? `
+        AND LOWER(TRIM(i.category))
+            = LOWER(TRIM(:category))
+      `
       : "";
 
     // ============================================================
-    // 6. BUILD SEARCH FILTER
+    // 7. SEARCH FILTER
     //
-    // Optional:
-    // ?category=Ring&search=Gold
+    // Optional search across:
+    // SKU
+    // Article Code
+    // Item Name
+    // Category
+    // Purity
     // ============================================================
 
     const searchCondition = search
       ? `
         AND (
           i.sku_code ILIKE :search
+
           OR i.article_code ILIKE :search
+
           OR i.item_name ILIKE :search
+
           OR i.category ILIKE :search
+
           OR i.purity ILIKE :search
         )
       `
       : "";
-
-    // ============================================================
-    // 7. COUNT TOTAL ITEMS
-    // ============================================================
-
-    const countResult = await sequelize.query(
-      `
-      SELECT
-        COUNT(DISTINCT ib.item_id) AS total
-
-      FROM inventory_batches AS ib
-
-      INNER JOIN items AS i
-        ON i.id = ib.item_id
-
-      WHERE
-        ib.current_organization_id = :districtStoreId
-
-        AND ib.is_leaf = true
-
-        AND ib.available_qty > 0
-
-        AND i.is_active = true
-
-        ${categoryCondition}
-
-        ${searchCondition}
-      `,
-      {
-        replacements: {
-          districtStoreId:
-            retailStore.district_store_id,
-
-          category,
-
-          search: `%${search}%`,
-        },
-
-        type: QueryTypes.SELECT,
-      }
-    );
-
-    const total = Number(
-      countResult?.[0]?.total || 0
-    );
 
     // ============================================================
     // 8. FETCH DISTRICT INVENTORY
@@ -9667,10 +9629,6 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
 
       ORDER BY
         i.id DESC
-
-      LIMIT :limit
-
-      OFFSET :offset
       `,
       {
         replacements: {
@@ -9680,10 +9638,6 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
           category,
 
           search: `%${search}%`,
-
-          limit,
-
-          offset,
         },
 
         type: QueryTypes.SELECT,
@@ -9691,16 +9645,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     );
 
     // ============================================================
-    // 9. PAGINATION
-    // ============================================================
-
-    const totalPages =
-      total > 0
-        ? Math.ceil(total / limit)
-        : 0;
-
-    // ============================================================
-    // 10. RESPONSE
+    // 9. RESPONSE
     // ============================================================
 
     return res.status(200).json({
@@ -9733,22 +9678,6 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
       },
 
       inventory,
-
-      pagination: {
-        page,
-
-        limit,
-
-        total,
-
-        totalPages,
-
-        hasNextPage:
-          page < totalPages,
-
-        hasPreviousPage:
-          page > 1,
-      },
     });
 
   } catch (error) {
