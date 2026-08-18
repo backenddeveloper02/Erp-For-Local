@@ -12,7 +12,7 @@ import Store from "../../model/Store.js";
 import Stock from "../../model/stockrecord.js"
 import fs from "fs";
 import ActivityLog from "../../model/activityLog.js";
-// number convert
+import StockTransferComplaint from "../../model/stockTransferComplaint.js";
 const toNumber = (val) => {
   const num = Number(val);
   return isNaN(num) ? 0 : num;
@@ -1261,9 +1261,13 @@ const transferHasSelectedStore = (transfer, selectedStore) => {
   );
 };
 
-export const  getHeadAllTransfers = async (req, res) => {
+export const getHeadAllTransfers = async (req, res) => {
   try {
     const user = req.user;
+
+    // =====================================================
+    // AUTHORIZATION
+    // =====================================================
 
     if (!user?.organization_id) {
       return res.status(401).json({
@@ -1275,9 +1279,14 @@ export const  getHeadAllTransfers = async (req, res) => {
     if (!isHeadOfficeUser(user)) {
       return res.status(403).json({
         success: false,
-        message: "Only head office users can access all transfers",
+        message:
+          "Only head office users can access all transfers",
       });
     }
+
+    // =====================================================
+    // FILTERS
+    // =====================================================
 
     const {
       page = 1,
@@ -1285,53 +1294,151 @@ export const  getHeadAllTransfers = async (req, res) => {
       status,
       search,
 
-      // dropdown selected values
       district_store_code,
       retail_store_code,
 
-      // optional exact side filters
       from_store_code,
       to_store_code,
     } = req.query;
 
-    const pageNo = Math.max(Number(page) || 1, 1);
-    const limitNo = Math.max(Number(limit) || 10, 1);
-    const offset = (pageNo - 1) * limitNo;
+    const pageNo = Math.max(
+      Number(page) || 1,
+      1
+    );
+
+    const limitNo = Math.max(
+      Number(limit) || 10,
+      1
+    );
+
+    const offset =
+      (pageNo - 1) * limitNo;
 
     const transferWhere = {};
 
-    if (status && status !== "all") {
-      transferWhere.status = status;
+    // =====================================================
+    // ALLOWED STATUSES
+    // =====================================================
+
+    const allowedStatuses = [
+      "draft",
+      "approved",
+      "dispatched",
+      "in_transit",
+      "received",
+      "cancelled",
+    ];
+
+    // =====================================================
+    // STATUS FILTER
+    // =====================================================
+
+    // my_transits actual DB status nahi hai.
+    // UI filter hai = dispatched + in_transit
+
+    if (
+      status &&
+      status !== "all"
+    ) {
+      if (status === "my_transits") {
+        transferWhere.status = {
+          [Op.in]: [
+            "dispatched",
+            "in_transit",
+          ],
+        };
+      } else if (
+        allowedStatuses.includes(status)
+      ) {
+        transferWhere.status =
+          status;
+      } else {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Invalid transfer status",
+
+          allowed_statuses: [
+            "all",
+            "my_transits",
+            ...allowedStatuses,
+          ],
+        });
+      }
     }
+
+    // =====================================================
+    // SEARCH
+    // =====================================================
 
     if (search) {
       transferWhere[Op.or] = [
-        { transfer_no: { [Op.iLike]: `%${search}%` } },
-        { tracking_number: { [Op.iLike]: `%${search}%` } },
-        { remarks: { [Op.iLike]: `%${search}%` } },
-        { driver_name: { [Op.iLike]: `%${search}%` } },
-        { vehicle_number: { [Op.iLike]: `%${search}%` } },
+        {
+          transfer_no: {
+            [Op.iLike]: `%${search}%`,
+          },
+        },
+
+        {
+          tracking_number: {
+            [Op.iLike]: `%${search}%`,
+          },
+        },
+
+        {
+          remarks: {
+            [Op.iLike]: `%${search}%`,
+          },
+        },
+
+        {
+          driver_name: {
+            [Op.iLike]: `%${search}%`,
+          },
+        },
+
+        {
+          vehicle_number: {
+            [Op.iLike]: `%${search}%`,
+          },
+        },
       ];
     }
 
+    // =====================================================
+    // NORMALIZE STORE FILTER CODES
+    // =====================================================
+
     const selectedDistrictCode =
-      district_store_code && district_store_code !== "all"
-        ? normalizeCode(district_store_code)
+      district_store_code &&
+      district_store_code !== "all"
+        ? normalizeCode(
+            district_store_code
+          )
         : null;
 
     const selectedRetailCode =
-      retail_store_code && retail_store_code !== "all"
-        ? normalizeCode(retail_store_code)
+      retail_store_code &&
+      retail_store_code !== "all"
+        ? normalizeCode(
+            retail_store_code
+          )
         : null;
 
     const selectedFromCode =
-      from_store_code && from_store_code !== "all"
-        ? normalizeCode(from_store_code)
+      from_store_code &&
+      from_store_code !== "all"
+        ? normalizeCode(
+            from_store_code
+          )
         : null;
 
     const selectedToCode =
-      to_store_code && to_store_code !== "all"
-        ? normalizeCode(to_store_code)
+      to_store_code &&
+      to_store_code !== "all"
+        ? normalizeCode(
+            to_store_code
+          )
         : null;
 
     const selectedCodes = [
@@ -1341,237 +1448,802 @@ export const  getHeadAllTransfers = async (req, res) => {
       selectedToCode,
     ].filter(Boolean);
 
-    const selectedStores = selectedCodes.length
-      ? await Store.findAll({
-          where: {
-            store_code: {
-              [Op.in]: selectedCodes,
+    // =====================================================
+    // LOAD SELECTED STORES
+    // =====================================================
+    //
+    // IMPORTANT:
+    // Actual stores table ke confirmed relevant columns:
+    //
+    // id
+    // store_code
+    // store_name
+    // organization_level
+    //
+    // State / district / parent organization
+    // ki zarurat nahi hai.
+    //
+
+    const selectedStores =
+      selectedCodes.length
+        ? await Store.findAll({
+            where: {
+              store_code: {
+                [Op.in]:
+                  selectedCodes,
+              },
             },
+
+            attributes: [
+              "id",
+              "store_code",
+              "store_name",
+              "organization_level",
+            ],
+
+            raw: true,
+          })
+        : [];
+
+    // =====================================================
+    // SELECTED STORE MAP
+    // =====================================================
+
+    const selectedStoreByCode =
+      new Map(
+        selectedStores.map(
+          (store) => [
+            normalizeCode(
+              store.store_code
+            ),
+            store,
+          ]
+        )
+      );
+
+    const selectedDistrictStore =
+      selectedDistrictCode
+        ? selectedStoreByCode.get(
+            selectedDistrictCode
+          )
+        : null;
+
+    const selectedRetailStore =
+      selectedRetailCode
+        ? selectedStoreByCode.get(
+            selectedRetailCode
+          )
+        : null;
+
+    const selectedFromStore =
+      selectedFromCode
+        ? selectedStoreByCode.get(
+            selectedFromCode
+          )
+        : null;
+
+    const selectedToStore =
+      selectedToCode
+        ? selectedStoreByCode.get(
+            selectedToCode
+          )
+        : null;
+
+    // =====================================================
+    // FETCH TRANSFERS
+    // =====================================================
+
+    const transfers =
+      await StockTransfer.findAll({
+        where: transferWhere,
+
+        include: [
+          {
+            model: StockTransferItem,
+            as: "transfer_items",
+            required: false,
           },
-          raw: true,
-        })
-      : [];
+        ],
 
-    const selectedStoreByCode = new Map(
-      selectedStores.map((s) => [normalizeCode(s.store_code), s])
-    );
+        order: [
+          ["created_at", "DESC"],
+        ],
+      });
 
-    const selectedDistrictStore = selectedDistrictCode
-      ? selectedStoreByCode.get(selectedDistrictCode)
-      : null;
+    // =====================================================
+    // PLAIN TRANSFERS
+    // =====================================================
 
-    const selectedRetailStore = selectedRetailCode
-      ? selectedStoreByCode.get(selectedRetailCode)
-      : null;
+    const plainTransfers =
+      transfers.map(
+        (transfer) =>
+          transfer.get({
+            plain: true,
+          })
+      );
 
-    const selectedFromStore = selectedFromCode
-      ? selectedStoreByCode.get(selectedFromCode)
-      : null;
-
-    const selectedToStore = selectedToCode
-      ? selectedStoreByCode.get(selectedToCode)
-      : null;
-
-    const transfers = await StockTransfer.findAll({
-      where: transferWhere,
-      include: [
-        {
-          model: StockTransferItem,
-          as: "transfer_items",
-          required: false,
-        },
-      ],
-      order: [["created_at", "DESC"]],
-    });
-
-    const plainTransfers = transfers.map((tr) => tr.get({ plain: true }));
+    // =====================================================
+    // GET STORE IDS
+    // =====================================================
 
     const transferStoreIds = [
       ...new Set(
         plainTransfers
-          .flatMap((tr) => [
-            Number(tr.from_organization_id),
-            Number(tr.to_organization_id),
-          ])
+          .flatMap(
+            (transfer) => [
+              Number(
+                transfer.from_organization_id
+              ),
+
+              Number(
+                transfer.to_organization_id
+              ),
+            ]
+          )
           .filter(Boolean)
       ),
     ];
 
-    const stores = transferStoreIds.length
-      ? await Store.findAll({
-          where: {
-            id: {
-              [Op.in]: transferStoreIds,
+    // =====================================================
+    // LOAD TRANSFER STORES
+    // =====================================================
+    //
+    // ONLY these columns:
+    // id
+    // store_code
+    // store_name
+    // organization_level
+    //
+
+    const stores =
+      transferStoreIds.length
+        ? await Store.findAll({
+            where: {
+              id: {
+                [Op.in]:
+                  transferStoreIds,
+              },
             },
-          },
-          raw: true,
-        })
-      : [];
 
-    const storeMap = new Map(stores.map((s) => [Number(s.id), s]));
+            attributes: [
+              "id",
+              "store_code",
+              "store_name",
+              "organization_level",
+            ],
 
-    let data = plainTransfers.map((tr) => {
-      const fromStore = storeMap.get(Number(tr.from_organization_id));
-      const toStore = storeMap.get(Number(tr.to_organization_id));
+            raw: true,
+          })
+        : [];
 
-      const fromStoreLevel = getStoreLevel(fromStore);
-      const toStoreLevel = getStoreLevel(toStore);
+    // =====================================================
+    // STORE MAP
+    // =====================================================
 
-      let transferType = "other";
+    const storeMap =
+      new Map(
+        stores.map(
+          (store) => [
+            Number(store.id),
+            store,
+          ]
+        )
+      );
 
+    // =====================================================
+    // LOAD COMPLAINTS
+    // =====================================================
+    //
+    // Same working logic as Incoming / Outgoing.
+    //
+    // Agar ek transfer ki multiple complaints hain,
+    // latest complaint return hogi.
+    //
+
+    const transferIds =
+      plainTransfers
+        .map(
+          (transfer) =>
+            Number(transfer.id)
+        )
+        .filter(Boolean);
+
+    let complaintMap =
+      new Map();
+
+    if (transferIds.length) {
+      const complaints =
+        await StockTransferComplaint.findAll(
+          {
+            where: {
+              transfer_id: {
+                [Op.in]:
+                  transferIds,
+              },
+            },
+
+            attributes: [
+              "id",
+              "transfer_id",
+              "complaint_no",
+              "complaint_type",
+              "status",
+              "created_at",
+            ],
+
+            order: [
+              [
+                "created_at",
+                "DESC",
+              ],
+            ],
+
+            raw: true,
+          }
+        );
+
+      complaintMap =
+        new Map();
+
+      for (
+        const complaint of complaints
+      ) {
+        const transferId =
+          Number(
+            complaint.transfer_id
+          );
+
+        // Latest complaint only
+        if (
+          !complaintMap.has(
+            transferId
+          )
+        ) {
+          complaintMap.set(
+            transferId,
+            complaint
+          );
+        }
+      }
+    }
+
+    // =====================================================
+    // BUILD RESPONSE
+    // =====================================================
+
+    let data =
+      plainTransfers.map(
+        (transfer) => {
+          // -------------------------------------------------
+          // FROM STORE
+          // -------------------------------------------------
+
+          const fromStore =
+            storeMap.get(
+              Number(
+                transfer.from_organization_id
+              )
+            );
+
+          // -------------------------------------------------
+          // TO STORE
+          // -------------------------------------------------
+
+          const toStore =
+            storeMap.get(
+              Number(
+                transfer.to_organization_id
+              )
+            );
+
+          // -------------------------------------------------
+          // STORE LEVEL
+          // -------------------------------------------------
+
+          const fromStoreLevel =
+            getStoreLevel(
+              fromStore
+            );
+
+          const toStoreLevel =
+            getStoreLevel(
+              toStore
+            );
+
+          // -------------------------------------------------
+          // TRANSFER TYPE
+          // -------------------------------------------------
+
+          let transferType =
+            "other";
+
+          // =================================================
+          // HEAD OFFICE -> DISTRICT
+          // =================================================
+
+          if (
+            (
+              fromStoreLevel ===
+                "head" ||
+              fromStoreLevel ===
+                "head_office"
+            ) &&
+            toStoreLevel ===
+              "district"
+          ) {
+            transferType =
+              "head_to_district";
+          }
+
+          // =================================================
+          // HEAD OFFICE -> RETAIL
+          // =================================================
+
+          else if (
+            (
+              fromStoreLevel ===
+                "head" ||
+              fromStoreLevel ===
+                "head_office"
+            ) &&
+            toStoreLevel ===
+              "retail"
+          ) {
+            transferType =
+              "head_to_retail";
+          }
+
+          // =================================================
+          // DISTRICT -> RETAIL
+          // =================================================
+
+          else if (
+            fromStoreLevel ===
+              "district" &&
+            toStoreLevel ===
+              "retail"
+          ) {
+            transferType =
+              "district_to_retail";
+          }
+
+          // =================================================
+          // RETAIL -> DISTRICT
+          // =================================================
+
+          else if (
+            fromStoreLevel ===
+              "retail" &&
+            toStoreLevel ===
+              "district"
+          ) {
+            transferType =
+              "retail_to_district";
+          }
+
+          // =================================================
+          // DISTRICT -> DISTRICT
+          // =================================================
+
+          else if (
+            fromStoreLevel ===
+              "district" &&
+            toStoreLevel ===
+              "district"
+          ) {
+            transferType =
+              "district_to_district";
+          }
+
+          // =================================================
+          // RETAIL -> RETAIL
+          // =================================================
+
+          else if (
+            fromStoreLevel ===
+              "retail" &&
+            toStoreLevel ===
+              "retail"
+          ) {
+            transferType =
+              "retail_to_retail";
+          }
+
+          // -------------------------------------------------
+          // COMPLAINT
+          // -------------------------------------------------
+
+          const complaint =
+            complaintMap.get(
+              Number(transfer.id)
+            ) || null;
+
+          // -------------------------------------------------
+          // FINAL TRANSFER OBJECT
+          // -------------------------------------------------
+
+          return {
+            ...transfer,
+
+            // ===============================================
+            // DIRECTION
+            // ===============================================
+
+            direction: "all",
+
+            direction_label:
+              "All Transfer",
+
+            // ===============================================
+            // TRANSFER TYPE
+            // ===============================================
+
+            transfer_type:
+              transferType,
+
+            transfer_type_label:
+              transferType.replaceAll(
+                "_",
+                " → "
+              ),
+
+            // ===============================================
+            // FROM STORE
+            // ===============================================
+
+            from_store_code:
+              fromStore?.store_code ||
+              null,
+
+            from_store_name:
+              pickStoreName(
+                fromStore
+              ),
+
+            from_store_level:
+              fromStoreLevel,
+
+            // ===============================================
+            // TO STORE
+            // ===============================================
+
+            to_store_code:
+              toStore?.store_code ||
+              null,
+
+            to_store_name:
+              pickStoreName(
+                toStore
+              ),
+
+            to_store_level:
+              toStoreLevel,
+
+            // ===============================================
+            // TRANSFER ITEMS
+            // ===============================================
+
+            transfer_items:
+              transfer.transfer_items ||
+              [],
+
+            // ===============================================
+            // COMPLAINT
+            // ===============================================
+
+            complaint,
+          };
+        }
+      );
+
+    // =====================================================
+    // DISTRICT STORE FILTER
+    // =====================================================
+
+    if (
+      selectedDistrictCode
+    ) {
       if (
-        (fromStoreLevel === "head" || fromStoreLevel === "head_office") &&
-        toStoreLevel === "district"
+        !selectedDistrictStore
       ) {
-        transferType = "head_to_district";
-      } else if (
-        (fromStoreLevel === "head" || fromStoreLevel === "head_office") &&
-        toStoreLevel === "retail"
+        return res.status(404).json({
+          success: false,
+          message:
+            "Selected district store not found",
+        });
+      }
+
+      data =
+        data.filter(
+          (transfer) =>
+            transferHasSelectedStore(
+              transfer,
+              selectedDistrictStore
+            )
+        );
+    }
+
+    // =====================================================
+    // RETAIL STORE FILTER
+    // =====================================================
+
+    if (
+      selectedRetailCode
+    ) {
+      if (
+        !selectedRetailStore
       ) {
-        transferType = "head_to_retail";
-      } else if (fromStoreLevel === "district" && toStoreLevel === "retail") {
-        transferType = "district_to_retail";
-      } else if (fromStoreLevel === "retail" && toStoreLevel === "district") {
-        transferType = "retail_to_district";
-      } else if (fromStoreLevel === "district" && toStoreLevel === "district") {
-        transferType = "district_to_district";
-      } else if (fromStoreLevel === "retail" && toStoreLevel === "retail") {
-        transferType = "retail_to_retail";
-      }
-
-      return {
-        ...tr,
-
-        direction: "all",
-        direction_label: "All Transfer",
-
-        transfer_type: transferType,
-        transfer_type_label: transferType.replaceAll("_", " → "),
-
-        from_store_code: fromStore?.store_code || null,
-        from_store_name: pickStoreName(fromStore),
-        from_store_level: fromStoreLevel,
-
-        to_store_code: toStore?.store_code || null,
-        to_store_name: pickStoreName(toStore),
-        to_store_level: toStoreLevel,
-
-        transfer_items: tr.transfer_items || [],
-      };
-    });
-
-    // district dropdown filter
-    if (selectedDistrictCode) {
-      if (!selectedDistrictStore) {
         return res.status(404).json({
           success: false,
-          message: "Selected district store not found",
+          message:
+            "Selected retail store not found",
         });
       }
 
-      data = data.filter((tr) =>
-        transferHasSelectedStore(tr, selectedDistrictStore)
-      );
+      data =
+        data.filter(
+          (transfer) =>
+            transferHasSelectedStore(
+              transfer,
+              selectedRetailStore
+            )
+        );
     }
 
-    // retail dropdown filter
-    if (selectedRetailCode) {
-      if (!selectedRetailStore) {
+    // =====================================================
+    // FROM STORE FILTER
+    // =====================================================
+
+    if (
+      selectedFromCode
+    ) {
+      if (
+        !selectedFromStore
+      ) {
         return res.status(404).json({
           success: false,
-          message: "Selected retail store not found",
+          message:
+            "Selected from store not found",
         });
       }
 
-      data = data.filter((tr) =>
-        transferHasSelectedStore(tr, selectedRetailStore)
-      );
+      const selectedFromStoreId =
+        getSelectedStoreId(
+          selectedFromStore
+        );
+
+      data =
+        data.filter(
+          (transfer) =>
+            Number(
+              transfer.from_organization_id
+            ) ===
+            selectedFromStoreId
+        );
     }
 
-    // exact from side filter
-    if (selectedFromCode) {
-      if (!selectedFromStore) {
+    // =====================================================
+    // TO STORE FILTER
+    // =====================================================
+
+    if (
+      selectedToCode
+    ) {
+      if (
+        !selectedToStore
+      ) {
         return res.status(404).json({
           success: false,
-          message: "Selected from store not found",
+          message:
+            "Selected to store not found",
         });
       }
 
-      const selectedFromStoreId = getSelectedStoreId(selectedFromStore);
+      const selectedToStoreId =
+        getSelectedStoreId(
+          selectedToStore
+        );
 
-      data = data.filter(
-        (tr) => Number(tr.from_organization_id) === selectedFromStoreId
-      );
+      data =
+        data.filter(
+          (transfer) =>
+            Number(
+              transfer.to_organization_id
+            ) ===
+            selectedToStoreId
+        );
     }
 
-    // exact to side filter
-    if (selectedToCode) {
-      if (!selectedToStore) {
-        return res.status(404).json({
-          success: false,
-          message: "Selected to store not found",
-        });
-      }
+    // =====================================================
+    // SUMMARY
+    // =====================================================
 
-      const selectedToStoreId = getSelectedStoreId(selectedToStore);
-
-      data = data.filter(
-        (tr) => Number(tr.to_organization_id) === selectedToStoreId
-      );
-    }
-
-    const summarySource = data;
+    const summarySource =
+      data;
 
     const summary = {
-      total: summarySource.length,
+      total:
+        summarySource.length,
 
-      draft: summarySource.filter((t) => t.status === "draft").length,
-      approved: summarySource.filter((t) => t.status === "approved").length,
-      dispatched: summarySource.filter((t) => t.status === "dispatched").length,
-      in_transit: summarySource.filter((t) => t.status === "in_transit").length,
-      received: summarySource.filter((t) => t.status === "received").length,
-      cancelled: summarySource.filter((t) => t.status === "cancelled").length,
+      draft:
+        summarySource.filter(
+          (transfer) =>
+            transfer.status ===
+            "draft"
+        ).length,
 
-      inTransit: summarySource.filter((t) => t.status === "in_transit").length,
+      approved:
+        summarySource.filter(
+          (transfer) =>
+            transfer.status ===
+            "approved"
+        ).length,
 
-      shipments: summarySource.filter((t) =>
-        ["approved", "dispatched", "in_transit"].includes(t.status)
-      ).length,
+      dispatched:
+        summarySource.filter(
+          (transfer) =>
+            transfer.status ===
+            "dispatched"
+        ).length,
 
-      goodsReceipt: summarySource.filter((t) => t.status === "received").length,
+      in_transit:
+        summarySource.filter(
+          (transfer) =>
+            transfer.status ===
+            "in_transit"
+        ).length,
 
-      districtTransfers: summarySource.filter(
-        (t) =>
-          normalize(t.from_store_level) === "district" ||
-          normalize(t.to_store_level) === "district"
-      ).length,
+      received:
+        summarySource.filter(
+          (transfer) =>
+            transfer.status ===
+            "received"
+        ).length,
 
-      retailTransfers: summarySource.filter(
-        (t) =>
-          normalize(t.from_store_level) === "retail" ||
-          normalize(t.to_store_level) === "retail"
-      ).length,
+      cancelled:
+        summarySource.filter(
+          (transfer) =>
+            transfer.status ===
+            "cancelled"
+        ).length,
+
+      // =================================================
+      // MY TRANSITS
+      // =================================================
+
+      my_transits:
+        summarySource.filter(
+          (transfer) =>
+            [
+              "dispatched",
+              "in_transit",
+            ].includes(
+              transfer.status
+            )
+        ).length,
+
+      // =================================================
+      // IN TRANSIT
+      // =================================================
+
+      inTransit:
+        summarySource.filter(
+          (transfer) =>
+            transfer.status ===
+            "in_transit"
+        ).length,
+
+      // =================================================
+      // SHIPMENTS
+      // =================================================
+
+      shipments:
+        summarySource.filter(
+          (transfer) =>
+            [
+              "approved",
+              "dispatched",
+              "in_transit",
+            ].includes(
+              transfer.status
+            )
+        ).length,
+
+      // =================================================
+      // GOODS RECEIPT
+      // =================================================
+
+      goodsReceipt:
+        summarySource.filter(
+          (transfer) =>
+            transfer.status ===
+            "received"
+        ).length,
+
+      // =================================================
+      // DISTRICT TRANSFERS
+      // =================================================
+
+      districtTransfers:
+        summarySource.filter(
+          (transfer) =>
+            normalize(
+              transfer.from_store_level
+            ) === "district" ||
+            normalize(
+              transfer.to_store_level
+            ) === "district"
+        ).length,
+
+      // =================================================
+      // RETAIL TRANSFERS
+      // =================================================
+
+      retailTransfers:
+        summarySource.filter(
+          (transfer) =>
+            normalize(
+              transfer.from_store_level
+            ) === "retail" ||
+            normalize(
+              transfer.to_store_level
+            ) === "retail"
+        ).length,
     };
 
-    const totalCount = data.length;
-    const paginatedData = data.slice(offset, offset + limitNo);
+    // =====================================================
+    // PAGINATION
+    // =====================================================
+
+    const totalCount =
+      data.length;
+
+    const paginatedData =
+      data.slice(
+        offset,
+        offset + limitNo
+      );
+
+    // =====================================================
+    // FINAL RESPONSE
+    // =====================================================
 
     return res.status(200).json({
       success: true,
+
       summary,
-      count: paginatedData.length,
-      total_count: totalCount,
-      current_page: pageNo,
-      total_pages: Math.ceil(totalCount / limitNo),
-      data: paginatedData,
+
+      count:
+        paginatedData.length,
+
+      total_count:
+        totalCount,
+
+      current_page:
+        pageNo,
+
+      total_pages:
+        Math.ceil(
+          totalCount / limitNo
+        ),
+
+      data:
+        paginatedData,
     });
   } catch (error) {
-    console.error("getHeadAllTransfers error:", error);
+    console.error(
+      "getHeadAllTransfers error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch head all transfers",
-      error: error.message,
+
+      message:
+        "Failed to fetch head all transfers",
+
+      error:
+        error.message,
     });
   }
 };
@@ -1841,8 +2513,8 @@ export const getAnyTransferDetailsForHead = async (req, res) => {
       Number(user.organization_id) ===
         Number(plainTransfer.to_organization_id);
 
-    // ✅ Head can view any transfer
-    // ✅ Normal district/retail can view only own incoming/outgoing transfer
+    //  Head can view any transfer
+    //  Normal district/retail can view only own incoming/outgoing transfer
     if (!isHeadUser && !isOwnTransfer) {
       return res.status(403).json({
         success: false,
