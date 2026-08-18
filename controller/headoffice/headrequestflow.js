@@ -12,7 +12,7 @@ import Store from "../../model/Store.js";
 import Stock from "../../model/stockrecord.js"
 import fs from "fs";
 import ActivityLog from "../../model/activityLog.js";
-import StockTransferComplaint from "../../model/stockTransferComplaint.js";
+import StockTransferComplaint from "../../model/StockTransferComplaint.js";
 const toNumber = (val) => {
   const num = Number(val);
   return isNaN(num) ? 0 : num;
