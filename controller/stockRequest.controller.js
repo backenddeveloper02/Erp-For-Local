@@ -10995,7 +10995,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     }
   }
 };
- export const getRetailDistrictInventory = async (req, res) => {
+export const getRetailDistrictInventory = async (req, res) => {
   try {
     // ============================================================
     // 1. GET LOGGED-IN RETAIL STORE ID
@@ -11136,25 +11136,47 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     // ============================================================
     // 8. FETCH COMPLETE DISTRICT CATEGORY SUMMARY
     //
-    // THIS IS THE IMPORTANT FIX.
+    // IMPORTANT FIX:
     //
-    // This query:
-    // - Uses parent district inventory
-    // - Does NOT apply category filter
-    // - Does NOT apply search filter
-    // - Groups Ring/ring together
-    // - Calculates total available quantity
-    // - Calculates number of unique items
+    // We DO NOT use:
+    //
+    //     ib.is_leaf = true
+    //
+    // here.
+    //
+    // Reason:
+    //
+    // When a partial quantity is transferred from a District
+    // batch, the parent batch can become:
+    //
+    //     is_leaf = false
+    //     status = partial
+    //
+    // while still having available stock.
     //
     // Example:
     //
-    // Ring
-    // quantity: 150
-    // item_count: 15
+    // Parent Batch:
+    // total_qty      = 10
+    // available_qty  = 5
+    // is_leaf         = false
     //
-    // Amit Kumar
-    // quantity: 55
-    // item_count: 3
+    // Child Batch:
+    // total_qty       = 5
+    // available_qty   = 5
+    // current_org     = Retail Store
+    //
+    // The remaining 5 belongs to the District and MUST be
+    // included in District inventory.
+    //
+    // Therefore inventory ownership is determined by:
+    //
+    //     current_organization_id
+    //
+    // and available stock by:
+    //
+    //     available_qty > 0
+    //
     // ============================================================
 
     const categorySummary = await sequelize.query(
@@ -11179,8 +11201,6 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
 
         ib.current_organization_id =
           :districtStoreId
-
-        AND ib.is_leaf = true
 
         AND ib.available_qty > 0
 
@@ -11233,8 +11253,20 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     //
     // EXISTING FLOW PRESERVED.
     //
-    // IMPORTANT:
-    // Inventory is fetched from parent District.
+    // IMPORTANT FIX:
+    //
+    // Removed:
+    //
+    //     AND ib.is_leaf = true
+    //
+    // because remaining stock can exist in a parent/partial batch
+    // where is_leaf is false.
+    //
+    // We only need:
+    //
+    //     current_organization_id = District
+    //     available_qty > 0
+    //
     // ============================================================
 
     const inventory = await sequelize.query(
@@ -11325,8 +11357,6 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
         ib.current_organization_id =
           :districtStoreId
 
-        AND ib.is_leaf = true
-
         AND ib.available_qty > 0
 
         AND i.is_active = true
@@ -11408,13 +11438,41 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     );
 
     // ============================================================
-    // 11. RESPONSE
+    // 11. NORMALIZE INVENTORY NUMERIC VALUES
+    //
+    // PostgreSQL numeric values can come as strings.
+    // Convert quantity/weight values to numbers.
+    //
+    // This does NOT change the existing response structure.
+    // ============================================================
+
+    const normalizedInventory = (
+      inventory || []
+    ).map((item) => ({
+      ...item,
+
+      total_qty: Number(
+        item.total_qty || 0
+      ),
+
+      available_qty: Number(
+        item.available_qty || 0
+      ),
+
+      total_weight: Number(
+        item.total_weight || 0
+      ),
+
+      available_weight: Number(
+        item.available_weight || 0
+      ),
+    }));
+
+    // ============================================================
+    // 12. RESPONSE
     //
     // EXISTING RESPONSE FIELDS PRESERVED.
     //
-    // NEW:
-    // - total_categories
-    // - categories
     // ============================================================
 
     return res.status(200).json({
@@ -11460,11 +11518,10 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
 
       // ========================================================
       // COMPLETE CATEGORY SUMMARY
-      //
-      // Frontend category cards/dropdown can directly use this.
       // ========================================================
 
-      total_categories: categories.length,
+      total_categories:
+        categories.length,
 
       categories,
 
@@ -11474,7 +11531,8 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
       // DO NOT REMOVE THIS.
       // ========================================================
 
-      inventory,
+      inventory:
+        normalizedInventory,
     });
   } catch (error) {
     console.error(
