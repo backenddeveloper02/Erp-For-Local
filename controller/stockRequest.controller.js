@@ -2537,11 +2537,20 @@ if (String(itemDetails.current_status || "").toLowerCase() === "sold") {
 // ==========================================
 export const approveAndDispatchRequest = async (req, res) => {
   const transaction = await sequelize.transaction();
+
   const uploadedLocalPaths = [];
   let challanPdf = null;
 
   try {
+    // ============================================================
+    // REQUEST PARAMS
+    // ============================================================
+
     const { requestId } = req.params;
+
+    // ============================================================
+    // BODY
+    // ============================================================
 
     const {
       remarks,
@@ -2557,711 +2566,1935 @@ export const approveAndDispatchRequest = async (req, res) => {
     } = req.body;
 
     const user = req.user;
-    const parsedItems = parseItemsFromBody(req.body);
+
+    const parsedItems =
+      parseItemsFromBody(req.body);
+
+    // ============================================================
+    // DEBUG
+    // ============================================================
 
     console.log(
       "approveAndDispatchRequest req.body keys:",
       Object.keys(req.body || {})
     );
-    console.log("approveAndDispatchRequest raw items:", req.body?.items);
-    console.log("approveAndDispatchRequest parsedItems:", parsedItems);
-    console.log("approveAndDispatchRequest files:", {
-      driver_photo: req.files?.driver_photo?.length || 0,
-      dispatch_images: req.files?.dispatch_images?.length || 0,
-      dispatch_video: req.files?.dispatch_video?.length || 0,
-      e_way_bill: req.files?.e_way_bill?.length || 0,
-    });
 
-    if (!Array.isArray(parsedItems) || parsedItems.length === 0) {
+    console.log(
+      "approveAndDispatchRequest raw items:",
+      req.body?.items
+    );
+
+    console.log(
+      "approveAndDispatchRequest parsedItems:",
+      parsedItems
+    );
+
+    console.log(
+      "approveAndDispatchRequest files:",
+      {
+        driver_photo:
+          req.files?.driver_photo?.length || 0,
+
+        dispatch_images:
+          req.files?.dispatch_images?.length || 0,
+
+        dispatch_video:
+          req.files?.dispatch_video?.length || 0,
+
+        e_way_bill:
+          req.files?.e_way_bill?.length || 0,
+      }
+    );
+
+    // ============================================================
+    // VALIDATE ITEMS
+    // ============================================================
+
+    if (
+      !Array.isArray(parsedItems) ||
+      parsedItems.length === 0
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
+
         message:
           "Approved items are required. Send items as JSON string or items[0][item_id], items[0][qty] format.",
       });
     }
 
-    if (!driver_name || !driver_phone || !vehicle_number) {
+    // ============================================================
+    // DRIVER VALIDATION
+    // ============================================================
+
+    if (
+      !driver_name ||
+      !driver_phone ||
+      !vehicle_number
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "Driver name, driver phone, and vehicle number are required",
+
+        message:
+          "Driver name, driver phone, and vehicle number are required",
       });
     }
 
-    const approvedRows = parsedItems.filter((row) => Number(row.qty || 0) > 0);
+    // ============================================================
+    // APPROVED ROWS
+    // ============================================================
 
-    if (approvedRows.length === 0) {
+    const approvedRows =
+      parsedItems.filter(
+        (row) =>
+          Number(row.qty || 0) > 0
+      );
+
+    if (
+      approvedRows.length === 0
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "At least one item must have qty greater than 0 for approval",
+
+        message:
+          "At least one item must have qty greater than 0 for approval",
       });
     }
 
-    if (!pickup_address || !delivery_address) {
+    // ============================================================
+    // ADDRESS VALIDATION
+    // ============================================================
+
+    if (
+      !pickup_address ||
+      !delivery_address
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "Pickup and delivery address are required",
+
+        message:
+          "Pickup and delivery address are required",
       });
     }
 
-    if (!expected_delivery_date || !expected_delivery_time) {
+    // ============================================================
+    // DELIVERY DATE / TIME
+    // ============================================================
+
+    if (
+      !expected_delivery_date ||
+      !expected_delivery_time
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "Expected delivery date and time are required",
+
+        message:
+          "Expected delivery date and time are required",
       });
     }
 
-    const driverPhotoFile = req.files?.driver_photo?.[0] || null;
-    const dispatchImageFiles = req.files?.dispatch_images || [];
-    const dispatchVideoFile = req.files?.dispatch_video?.[0] || null;
-    const eWayBillFile = req.files?.e_way_bill?.[0] || null;
+    // ============================================================
+    // FILES
+    // ============================================================
 
-    if (dispatchImageFiles.length > 3) {
+    const driverPhotoFile =
+      req.files?.driver_photo?.[0] ||
+      null;
+
+    const dispatchImageFiles =
+      req.files?.dispatch_images ||
+      [];
+
+    const dispatchVideoFile =
+      req.files?.dispatch_video?.[0] ||
+      null;
+
+    const eWayBillFile =
+      req.files?.e_way_bill?.[0] ||
+      null;
+
+    // ============================================================
+    // MAX DISPATCH IMAGES
+    // ============================================================
+
+    if (
+      dispatchImageFiles.length > 3
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "Maximum 3 dispatch images allowed",
+
+        message:
+          "Maximum 3 dispatch images allowed",
       });
     }
 
-    if (driverPhotoFile?.path) uploadedLocalPaths.push(driverPhotoFile.path);
+    // ============================================================
+    // TRACK LOCAL FILES
+    // ============================================================
 
-    for (const file of dispatchImageFiles) {
-      if (file?.path) uploadedLocalPaths.push(file.path);
+    if (
+      driverPhotoFile?.path
+    ) {
+      uploadedLocalPaths.push(
+        driverPhotoFile.path
+      );
     }
 
-    if (dispatchVideoFile?.path) uploadedLocalPaths.push(dispatchVideoFile.path);
-    if (eWayBillFile?.path) uploadedLocalPaths.push(eWayBillFile.path);
+    for (
+      const file of dispatchImageFiles
+    ) {
+      if (file?.path) {
+        uploadedLocalPaths.push(
+          file.path
+        );
+      }
+    }
 
-    const request = await StockRequest.findByPk(requestId, {
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
+    if (
+      dispatchVideoFile?.path
+    ) {
+      uploadedLocalPaths.push(
+        dispatchVideoFile.path
+      );
+    }
+
+    if (
+      eWayBillFile?.path
+    ) {
+      uploadedLocalPaths.push(
+        eWayBillFile.path
+      );
+    }
+
+    // ============================================================
+    // GET REQUEST
+    // ============================================================
+
+    const request =
+      await StockRequest.findByPk(
+        requestId,
+        {
+          transaction,
+
+          lock:
+            transaction.LOCK.UPDATE,
+        }
+      );
 
     if (!request) {
       await transaction.rollback();
+
       return res.status(404).json({
         success: false,
-        message: "Stock request not found",
+
+        message:
+          "Stock request not found",
       });
     }
 
-    const requestItems = await StockRequestItem.findAll({
-      where: { request_id: request.id },
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
+    // ============================================================
+    // GET REQUEST ITEMS
+    // ============================================================
 
-    if (Number(request.to_organization_id) !== Number(user.organization_id)) {
+    const requestItems =
+      await StockRequestItem.findAll(
+        {
+          where: {
+            request_id:
+              request.id,
+          },
+
+          transaction,
+
+          lock:
+            transaction.LOCK.UPDATE,
+        }
+      );
+
+    // ============================================================
+    // APPROVER AUTHORIZATION
+    //
+    // District user approves the request.
+    // ============================================================
+
+    if (
+      Number(
+        request.to_organization_id
+      ) !==
+      Number(
+        user.organization_id
+      )
+    ) {
       await transaction.rollback();
+
       return res.status(403).json({
         success: false,
-        message: "You are not allowed to approve this request",
+
+        message:
+          "You are not allowed to approve this request",
       });
     }
 
-    if (request.status !== "pending") {
+    // ============================================================
+    // REQUEST STATUS
+    // ============================================================
+
+    if (
+      request.status !==
+      "pending"
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "Only pending request can be approved",
+
+        message:
+          "Only pending request can be approved",
       });
     }
 
-    const existingTransfer = await StockTransfer.findOne({
-      where: { request_id: request.id },
-      transaction,
-      lock: transaction.LOCK.UPDATE,
-    });
+    // ============================================================
+    // CHECK EXISTING TRANSFER
+    // ============================================================
+
+    const existingTransfer =
+      await StockTransfer.findOne(
+        {
+          where: {
+            request_id:
+              request.id,
+          },
+
+          transaction,
+
+          lock:
+            transaction.LOCK.UPDATE,
+        }
+      );
 
     if (existingTransfer) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "Transfer already created for this request",
+
+        message:
+          "Transfer already created for this request",
       });
     }
 
-    const requestItemMap = new Map(
-      requestItems.map((x) => [Number(x.item_id), x])
-    );
+    // ============================================================
+    // REQUEST ITEM MAP
+    // ============================================================
 
-    for (const row of parsedItems) {
-      const item_id = toNumber(row.item_id);
-      const qty = toNumber(row.qty);
-      const parent_batch_id = toNumber(row.parent_batch_id || row.batch_id);
+    const requestItemMap =
+      new Map(
+        requestItems.map(
+          (x) => [
+            Number(x.item_id),
+            x,
+          ]
+        )
+      );
 
-      if (!item_id || qty < 0) {
+    // ============================================================
+    // VALIDATE PARSED ITEMS
+    // ============================================================
+
+    for (
+      const row of parsedItems
+    ) {
+      const item_id =
+        toNumber(
+          row.item_id
+        );
+
+      const qty =
+        toNumber(
+          row.qty
+        );
+
+      const parent_batch_id =
+        toNumber(
+          row.parent_batch_id ||
+          row.batch_id
+        );
+
+      // ----------------------------------------------------------
+      // ITEM ID / QTY
+      // ----------------------------------------------------------
+
+      if (
+        !item_id ||
+        qty < 0
+      ) {
         await transaction.rollback();
+
         return res.status(400).json({
           success: false,
-          message: "Each item must have valid item_id and qty",
+
+          message:
+            "Each item must have valid item_id and qty",
         });
       }
 
-      if (qty > 0 && !parent_batch_id) {
+      // ----------------------------------------------------------
+      // PARENT BATCH
+      // ----------------------------------------------------------
+
+      if (
+        qty > 0 &&
+        !parent_batch_id
+      ) {
         await transaction.rollback();
+
         return res.status(400).json({
           success: false,
-          message: `parent_batch_id is required for item ${item_id}`,
+
+          message:
+            `parent_batch_id is required for item ${item_id}`,
         });
       }
 
-      const requestItem = requestItemMap.get(item_id);
+      // ----------------------------------------------------------
+      // REQUEST ITEM
+      // ----------------------------------------------------------
+
+      const requestItem =
+        requestItemMap.get(
+          item_id
+        );
 
       if (!requestItem) {
         await transaction.rollback();
+
         return res.status(400).json({
           success: false,
-          message: `Requested item not found for item_id ${item_id}`,
+
+          message:
+            `Requested item not found for item_id ${item_id}`,
         });
       }
 
-      const requestedQty = toNumber(requestItem.request_qty);
+      // ----------------------------------------------------------
+      // REQUESTED QTY
+      // ----------------------------------------------------------
 
-      if (qty > requestedQty) {
+      const requestedQty =
+        toNumber(
+          requestItem.request_qty
+        );
+
+      if (
+        qty >
+        requestedQty
+      ) {
         await transaction.rollback();
+
         return res.status(400).json({
           success: false,
-          message: `Approved qty cannot exceed requested qty for item ${item_id}`,
+
+          message:
+            `Approved qty cannot exceed requested qty for item ${item_id}`,
         });
       }
     }
 
-    let driver_photo_url = null;
-    let dispatch_image_urls = [];
-    let dispatch_video_url = null;
-    let e_way_bill_url = null;
+    // ============================================================
+    // UPLOAD FILE URL HOLDERS
+    // ============================================================
 
-    if (driverPhotoFile?.path) {
-      const uploadedDriverPhoto = await uploadToCloudinary(
-        driverPhotoFile.path,
-        "stock-transfer/driver-photo",
-        "image"
-      );
-      driver_photo_url = uploadedDriverPhoto.secure_url;
-    }
+    let driver_photo_url =
+      null;
 
-    if (dispatchImageFiles.length > 0) {
-      for (const file of dispatchImageFiles) {
-        const uploadedImage = await uploadToCloudinary(
-          file.path,
-          "stock-transfer/dispatch-images",
+    let dispatch_image_urls =
+      [];
+
+    let dispatch_video_url =
+      null;
+
+    let e_way_bill_url =
+      null;
+
+    // ============================================================
+    // DRIVER PHOTO
+    // ============================================================
+
+    if (
+      driverPhotoFile?.path
+    ) {
+      const uploadedDriverPhoto =
+        await uploadToCloudinary(
+          driverPhotoFile.path,
+          "stock-transfer/driver-photo",
           "image"
         );
-        dispatch_image_urls.push(uploadedImage.secure_url);
-      }
+
+      driver_photo_url =
+        uploadedDriverPhoto.secure_url;
     }
 
-    if (dispatchVideoFile?.path) {
-      const uploadedVideo = await uploadToCloudinary(
-        dispatchVideoFile.path,
-        "stock-transfer/dispatch-video",
-        "video"
-      );
-      dispatch_video_url = uploadedVideo.secure_url;
-    }
+    // ============================================================
+    // DISPATCH IMAGES
+    // ============================================================
 
-    if (eWayBillFile?.path) {
-      const isPdf =
-        eWayBillFile.mimetype === "application/pdf" ||
-        eWayBillFile.originalname?.toLowerCase().endsWith(".pdf");
+    if (
+      dispatchImageFiles.length > 0
+    ) {
+      for (
+        const file of dispatchImageFiles
+      ) {
+        const uploadedImage =
+          await uploadToCloudinary(
+            file.path,
+            "stock-transfer/dispatch-images",
+            "image"
+          );
 
-      const uploadedEWayBill = await uploadToCloudinary(
-        eWayBillFile.path,
-        "stock-transfer/e-way-bills",
-        isPdf ? "raw" : "image"
-      );
-
-      e_way_bill_url = uploadedEWayBill.secure_url;
-    }
-
-    const transfer = await StockTransfer.create(
-      {
-        transfer_no: generateTransferNo(),
-        request_id: request.id,
-        from_organization_id: user.organization_id,
-        to_organization_id: request.from_organization_id,
-        transfer_date: new Date(),
-        dispatch_date: new Date(),
-        status: "in_transit",
-        approved_by: user.id,
-        dispatched_by: user.id,
-        created_by: user.id,
-        remarks: remarks || null,
-        driver_name: driver_name || null,
-        driver_phone: driver_phone || null,
-        vehicle_number: vehicle_number || null,
-        tracking_number: tracking_number || null,
-        driver_photo_url: driver_photo_url || null,
-        dispatch_image_url:
-          dispatch_image_urls.length > 0
-            ? JSON.stringify(dispatch_image_urls)
-            : null,
-        dispatch_video_url: dispatch_video_url || null,
-        e_way_bill_url: e_way_bill_url || null,
-        pickup_address: pickup_address || null,
-        delivery_address: delivery_address || null,
-        expected_delivery_date: expected_delivery_date || null,
-        expected_delivery_time: expected_delivery_time || null,
-        additional_notes: additional_notes || null,
-      },
-      { transaction }
-    );
-
-    let totalRequested = 0;
-    let totalApproved = 0;
-    let totalWeight = 0;
-    let estimatedValue = 0;
-    let approvedItemsCount = 0;
-
-    const challanItems = [];
-    const dispatchedBatches = [];
-
-    for (const row of parsedItems) {
-      const item_id = toNumber(row.item_id);
-      const qty = toNumber(row.qty);
-      const weight = toNumber(row.weight);
-      const rate = toNumber(row.rate);
-      const parent_batch_id = toNumber(row.parent_batch_id || row.batch_id);
-
-      const requestItem = requestItemMap.get(item_id);
-      const requestedQty = toNumber(requestItem.request_qty);
-
-      totalRequested += requestedQty;
-      totalApproved += qty;
-
-      if (qty === 0) {
-        await requestItem.update(
-          {
-            approved_qty: 0,
-            approved_weight: 0,
-            status: "rejected",
-          },
-          { transaction }
+        dispatch_image_urls.push(
+          uploadedImage.secure_url
         );
-        continue;
       }
-      console.log("========== ITEM DEBUG ==========");
-console.log("item_id:", item_id);
-console.log("user.organization_id:", user.organization_id);
-console.log("request.from_organization_id:", request.from_organization_id);
-console.log("request.to_organization_id:", request.to_organization_id);
-console.log("req.user:", user);
-      const itemDetails = await Item.findOne({
-        where: {
-          id: item_id,
-          organization_id: user.organization_id,
-          is_active: true,
-        },
-        transaction,
-        lock: transaction.LOCK.UPDATE,
-      });
-console.log("itemDetails:", itemDetails);
+    }
 
-      if (!itemDetails) {
-        await transaction.rollback();
-        return res.status(404).json({
-          success: false,
-          message: `Item not found for item_id ${item_id}`,
-        });
-      }
+    // ============================================================
+    // DISPATCH VIDEO
+    // ============================================================
 
-      const batchRows = await sequelize.query(
-        `
-        SELECT
-          id,
-          batch_no,
-          item_id,
-          organization_id,
-          current_organization_id,
-          available_qty,
-          available_weight,
-          status
-        FROM public.inventory_batches
-        WHERE id = :parent_batch_id
-        FOR UPDATE
-        `,
+    if (
+      dispatchVideoFile?.path
+    ) {
+      const uploadedVideo =
+        await uploadToCloudinary(
+          dispatchVideoFile.path,
+          "stock-transfer/dispatch-video",
+          "video"
+        );
+
+      dispatch_video_url =
+        uploadedVideo.secure_url;
+    }
+
+    // ============================================================
+    // E-WAY BILL
+    // ============================================================
+
+    if (
+      eWayBillFile?.path
+    ) {
+      const isPdf =
+        eWayBillFile.mimetype ===
+          "application/pdf" ||
+        eWayBillFile.originalname
+          ?.toLowerCase()
+          .endsWith(".pdf");
+
+      const uploadedEWayBill =
+        await uploadToCloudinary(
+          eWayBillFile.path,
+          "stock-transfer/e-way-bills",
+          isPdf
+            ? "raw"
+            : "image"
+        );
+
+      e_way_bill_url =
+        uploadedEWayBill.secure_url;
+    }
+
+    // ============================================================
+    // CREATE TRANSFER
+    // ============================================================
+
+    const transfer =
+      await StockTransfer.create(
         {
-          replacements: { parent_batch_id },
-          type: QueryTypes.SELECT,
+          transfer_no:
+            generateTransferNo(),
+
+          request_id:
+            request.id,
+
+          from_organization_id:
+            user.organization_id,
+
+          to_organization_id:
+            request.from_organization_id,
+
+          transfer_date:
+            new Date(),
+
+          dispatch_date:
+            new Date(),
+
+          status:
+            "in_transit",
+
+          approved_by:
+            user.id,
+
+          dispatched_by:
+            user.id,
+
+          created_by:
+            user.id,
+
+          remarks:
+            remarks || null,
+
+          driver_name:
+            driver_name || null,
+
+          driver_phone:
+            driver_phone || null,
+
+          vehicle_number:
+            vehicle_number || null,
+
+          tracking_number:
+            tracking_number || null,
+
+          driver_photo_url:
+            driver_photo_url ||
+            null,
+
+          dispatch_image_url:
+            dispatch_image_urls.length >
+            0
+              ? JSON.stringify(
+                  dispatch_image_urls
+                )
+              : null,
+
+          dispatch_video_url:
+            dispatch_video_url ||
+            null,
+
+          e_way_bill_url:
+            e_way_bill_url ||
+            null,
+
+          pickup_address:
+            pickup_address ||
+            null,
+
+          delivery_address:
+            delivery_address ||
+            null,
+
+          expected_delivery_date:
+            expected_delivery_date ||
+            null,
+
+          expected_delivery_time:
+            expected_delivery_time ||
+            null,
+
+          additional_notes:
+            additional_notes ||
+            null,
+        },
+        {
           transaction,
         }
       );
 
-      const parentBatch = batchRows?.[0];
-      
-      if (!parentBatch) {
-        await transaction.rollback();
-        return res.status(404).json({
-          success: false,
-          message: `Parent batch not found for item ${item_id}`,
-        });
-      }
+    // ============================================================
+    // SUMMARY VARIABLES
+    // ============================================================
 
-      if (Number(parentBatch.item_id) !== Number(item_id)) {
-        await transaction.rollback();
-        return res.status(400).json({
-          success: false,
-          message: `Parent batch ${parent_batch_id} does not belong to item ${item_id}`,
-        });
-      }
+    let totalRequested = 0;
 
-      const parentBatchOrgId = Number(
-        parentBatch.current_organization_id || parentBatch.organization_id || 0
-      );
+    let totalApproved = 0;
 
-      if (parentBatchOrgId !== Number(user.organization_id)) {
-        await transaction.rollback();
-        return res.status(403).json({
-          success: false,
-          message: `Parent batch ${parent_batch_id} does not belong to your organization`,
-        });
-      }
+    let totalWeight = 0;
+
+    let estimatedValue = 0;
+
+    let approvedItemsCount = 0;
+
+    // ============================================================
+    // CHALLAN
+    // ============================================================
+
+    const challanItems =
+      [];
+
+    // ============================================================
+    // DISPATCHED BATCHES
+    // ============================================================
+
+    const dispatchedBatches =
+      [];
+
+    // ============================================================
+    // PROCESS ITEMS
+    // ============================================================
+
+    for (
+      const row of parsedItems
+    ) {
+      const item_id =
+        toNumber(
+          row.item_id
+        );
+
+      const qty =
+        toNumber(
+          row.qty
+        );
+
+      /*
+       * IMPORTANT:
+       *
+       * DO NOT TRUST row.weight FROM FRONTEND.
+       *
+       * Frontend may send:
+       *
+       * qty = 5
+       * weight = 40
+       *
+       * But parent batch says:
+       *
+       * available_qty = 10
+       * available_weight = 20
+       *
+       * Therefore actual dispatch weight is:
+       *
+       * 20 / 10 * 5 = 10
+       */
+
+      const frontendWeight =
+        toNumber(
+          row.weight
+        );
+
+      const rate =
+        toNumber(
+          row.rate
+        );
+
+      const parent_batch_id =
+        toNumber(
+          row.parent_batch_id ||
+          row.batch_id
+        );
+
+      // ==========================================================
+      // REQUEST ITEM
+      // ==========================================================
+
+      const requestItem =
+        requestItemMap.get(
+          item_id
+        );
+
+      const requestedQty =
+        toNumber(
+          requestItem.request_qty
+        );
+
+      totalRequested +=
+        requestedQty;
+
+      totalApproved +=
+        qty;
+
+      // ==========================================================
+      // ZERO QTY = REJECT
+      // ==========================================================
 
       if (
-        ["sold", "damaged", "dead"].includes(
-          String(parentBatch.status || "").toLowerCase()
+        qty === 0
+      ) {
+        await requestItem.update(
+          {
+            approved_qty:
+              0,
+
+            approved_weight:
+              0,
+
+            status:
+              "rejected",
+          },
+          {
+            transaction,
+          }
+        );
+
+        continue;
+      }
+
+      // ==========================================================
+      // DEBUG
+      // ==========================================================
+
+      console.log(
+        "========== ITEM DEBUG =========="
+      );
+
+      console.log(
+        "item_id:",
+        item_id
+      );
+
+      console.log(
+        "qty:",
+        qty
+      );
+
+      console.log(
+        "frontend weight:",
+        frontendWeight
+      );
+
+      console.log(
+        "parent_batch_id:",
+        parent_batch_id
+      );
+
+      console.log(
+        "user.organization_id:",
+        user.organization_id
+      );
+
+      console.log(
+        "request.from_organization_id:",
+        request.from_organization_id
+      );
+
+      console.log(
+        "request.to_organization_id:",
+        request.to_organization_id
+      );
+
+      console.log(
+        "================================"
+      );
+
+      // ==========================================================
+      // GET ITEM
+      // ==========================================================
+
+      const itemDetails =
+        await Item.findOne(
+          {
+            where: {
+              id: item_id,
+
+              organization_id:
+                user.organization_id,
+
+              is_active: true,
+            },
+
+            transaction,
+
+            lock:
+              transaction.LOCK.UPDATE,
+          }
+        );
+
+      console.log(
+        "itemDetails:",
+        itemDetails
+      );
+
+      if (!itemDetails) {
+        await transaction.rollback();
+
+        return res.status(404).json({
+          success: false,
+
+          message:
+            `Item not found for item_id ${item_id}`,
+        });
+      }
+
+      // ==========================================================
+      // GET PARENT BATCH
+      // ==========================================================
+
+      const batchRows =
+        await sequelize.query(
+          `
+          SELECT
+
+            id,
+
+            batch_no,
+
+            item_id,
+
+            organization_id,
+
+            current_organization_id,
+
+            available_qty,
+
+            available_weight,
+
+            status
+
+          FROM public.inventory_batches
+
+          WHERE id = :parent_batch_id
+
+          FOR UPDATE
+          `,
+          {
+            replacements: {
+              parent_batch_id,
+            },
+
+            type:
+              QueryTypes.SELECT,
+
+            transaction,
+          }
+        );
+
+      const parentBatch =
+        batchRows?.[0];
+
+      // ==========================================================
+      // BATCH NOT FOUND
+      // ==========================================================
+
+      if (!parentBatch) {
+        await transaction.rollback();
+
+        return res.status(404).json({
+          success: false,
+
+          message:
+            `Parent batch not found for item ${item_id}`,
+        });
+      }
+
+      // ==========================================================
+      // BATCH ITEM VALIDATION
+      // ==========================================================
+
+      if (
+        Number(
+          parentBatch.item_id
+        ) !==
+        Number(item_id)
+      ) {
+        await transaction.rollback();
+
+        return res.status(400).json({
+          success: false,
+
+          message:
+            `Parent batch ${parent_batch_id} does not belong to item ${item_id}`,
+        });
+      }
+
+      // ==========================================================
+      // BATCH ORGANIZATION VALIDATION
+      // ==========================================================
+
+      const parentBatchOrgId =
+        Number(
+          parentBatch.current_organization_id ||
+            parentBatch.organization_id ||
+            0
+        );
+
+      if (
+        parentBatchOrgId !==
+        Number(
+          user.organization_id
         )
       ) {
         await transaction.rollback();
-        return res.status(409).json({
+
+        return res.status(403).json({
           success: false,
-          message: `Parent batch ${parent_batch_id} is already ${parentBatch.status}`,
+
+          message:
+            `Parent batch ${parent_batch_id} does not belong to your organization`,
         });
       }
 
-      if (Number(parentBatch.available_qty || 0) < qty) {
+      // ==========================================================
+      // BATCH STATUS
+      // ==========================================================
+
+      if (
+        [
+          "sold",
+          "damaged",
+          "dead",
+        ].includes(
+          String(
+            parentBatch.status ||
+              ""
+          ).toLowerCase()
+        )
+      ) {
         await transaction.rollback();
+
         return res.status(409).json({
           success: false,
-          message: `Insufficient batch qty for item ${item_id}`,
+
+          message:
+            `Parent batch ${parent_batch_id} is already ${parentBatch.status}`,
         });
       }
 
-      if (weight > 0 && Number(parentBatch.available_weight || 0) < weight) {
+      // ==========================================================
+      // ACTUAL BATCH STOCK
+      // ==========================================================
+
+      const batchAvailableQty =
+        toNumber(
+          parentBatch.available_qty
+        );
+
+      const batchAvailableWeight =
+        toNumber(
+          parentBatch.available_weight
+        );
+
+      // ==========================================================
+      // QUANTITY VALIDATION
+      // ==========================================================
+
+      if (
+        batchAvailableQty <
+        qty
+      ) {
         await transaction.rollback();
+
         return res.status(409).json({
           success: false,
-          message: `Insufficient batch weight for item ${item_id}`,
+
+          message:
+            `Insufficient batch qty for item ${item_id}`,
+
+          debug: {
+            item_id,
+
+            parent_batch_id,
+
+            requested_qty:
+              qty,
+
+            available_qty:
+              batchAvailableQty,
+
+            available_weight:
+              batchAvailableWeight,
+          },
         });
       }
 
-      approvedItemsCount += 1;
-      totalWeight += weight;
-      estimatedValue += weight * rate;
+      // ==========================================================
+      // SERVER-SIDE WEIGHT CALCULATION
+      //
+      // THIS IS THE ACTUAL FIX.
+      //
+      // Example:
+      //
+      // available_qty    = 10
+      // available_weight = 20
+      // approved qty     = 5
+      //
+      // 20 / 10 * 5 = 10
+      // ==========================================================
 
-      const fromStock = await getOrCreateStock(
-        user.organization_id,
-        item_id,
-        transaction
+      let weight = 0;
+
+      if (
+        qty > 0 &&
+        batchAvailableQty > 0 &&
+        batchAvailableWeight > 0
+      ) {
+        weight =
+          (
+            batchAvailableWeight /
+            batchAvailableQty
+          ) * qty;
+      }
+
+      // ==========================================================
+      // ROUND WEIGHT
+      //
+      // Keep reasonable precision.
+      // ==========================================================
+
+      weight =
+        Math.round(
+          weight * 1000
+        ) / 1000;
+
+      // ==========================================================
+      // WEIGHT VALIDATION
+      // ==========================================================
+
+      if (
+        weight >
+        batchAvailableWeight
+      ) {
+        await transaction.rollback();
+
+        return res.status(409).json({
+          success: false,
+
+          message:
+            `Insufficient batch weight for item ${item_id}`,
+
+          debug: {
+            item_id,
+
+            parent_batch_id,
+
+            requested_qty:
+              qty,
+
+            calculated_weight:
+              weight,
+
+            available_qty:
+              batchAvailableQty,
+
+            available_weight:
+              batchAvailableWeight,
+
+            frontend_weight:
+              frontendWeight,
+          },
+        });
+      }
+
+      // ==========================================================
+      // DEBUG ACTUAL WEIGHT
+      // ==========================================================
+
+      console.log(
+        "========== WEIGHT CALCULATION =========="
       );
 
-      const availableQty = toNumber(fromStock.available_qty);
-      const availableWeight = toNumber(fromStock.available_weight);
-      const reservedQty = toNumber(fromStock.reserved_qty);
-      const reservedWeight = toNumber(fromStock.reserved_weight);
-      const transitQty = toNumber(fromStock.transit_qty);
-      const transitWeight = toNumber(fromStock.transit_weight);
-      const damagedQty = toNumber(fromStock.damaged_qty);
-      const damagedWeight = toNumber(fromStock.damaged_weight);
+      console.log({
+        item_id,
 
-      if (availableQty < qty) {
+        parent_batch_id,
+
+        requested_qty:
+          qty,
+
+        batch_available_qty:
+          batchAvailableQty,
+
+        batch_available_weight:
+          batchAvailableWeight,
+
+        frontend_weight:
+          frontendWeight,
+
+        calculated_weight:
+          weight,
+
+        weight_per_unit:
+          batchAvailableQty > 0
+            ? batchAvailableWeight /
+              batchAvailableQty
+            : 0,
+      });
+
+      console.log(
+        "========================================="
+      );
+
+      // ==========================================================
+      // APPROVED ITEM COUNT
+      // ==========================================================
+
+      approvedItemsCount += 1;
+
+      totalWeight +=
+        weight;
+
+      estimatedValue +=
+        weight * rate;
+
+      // ==========================================================
+      // GET STOCK
+      // ==========================================================
+
+      const fromStock =
+        await getOrCreateStock(
+          user.organization_id,
+          item_id,
+          transaction
+        );
+
+      const availableQty =
+        toNumber(
+          fromStock.available_qty
+        );
+
+      const availableWeight =
+        toNumber(
+          fromStock.available_weight
+        );
+
+      const reservedQty =
+        toNumber(
+          fromStock.reserved_qty
+        );
+
+      const reservedWeight =
+        toNumber(
+          fromStock.reserved_weight
+        );
+
+      const transitQty =
+        toNumber(
+          fromStock.transit_qty
+        );
+
+      const transitWeight =
+        toNumber(
+          fromStock.transit_weight
+        );
+
+      const damagedQty =
+        toNumber(
+          fromStock.damaged_qty
+        );
+
+      const damagedWeight =
+        toNumber(
+          fromStock.damaged_weight
+        );
+
+      // ==========================================================
+      // STOCK QTY VALIDATION
+      // ==========================================================
+
+      if (
+        availableQty <
+        qty
+      ) {
         await transaction.rollback();
+
         return res.status(400).json({
           success: false,
-          message: `Insufficient available qty for item ${item_id}`,
+
+          message:
+            `Insufficient available qty for item ${item_id}`,
+
+          debug: {
+            item_id,
+
+            stock_available_qty:
+              availableQty,
+
+            requested_qty:
+              qty,
+
+            batch_available_qty:
+              batchAvailableQty,
+          },
         });
       }
 
-      if (weight > 0 && availableWeight < weight) {
+      // ==========================================================
+      // STOCK WEIGHT VALIDATION
+      // ==========================================================
+
+      if (
+        weight > 0 &&
+        availableWeight <
+          weight
+      ) {
         await transaction.rollback();
+
         return res.status(400).json({
           success: false,
-          message: `Insufficient available weight for item ${item_id}`,
+
+          message:
+            `Insufficient available weight for item ${item_id}`,
+
+          debug: {
+            item_id,
+
+            stock_available_weight:
+              availableWeight,
+
+            calculated_dispatch_weight:
+              weight,
+
+            batch_available_weight:
+              batchAvailableWeight,
+          },
         });
       }
+
+      // ==========================================================
+      // CREATE TRANSFER ITEM
+      // ==========================================================
 
       await StockTransferItem.create(
         {
-          transfer_id: transfer.id,
+          transfer_id:
+            transfer.id,
+
           item_id,
+
           qty,
+
           weight,
+
           rate,
-          remarks: row.remarks || null,
+
+          remarks:
+            row.remarks ||
+            null,
         },
-        { transaction }
+        {
+          transaction,
+        }
       );
+
+      // ==========================================================
+      // UPDATE REQUEST ITEM
+      // ==========================================================
 
       await requestItem.update(
         {
-          approved_qty: qty,
-          approved_weight: weight,
-          status: qty < requestedQty ? "partially_approved" : "approved",
+          approved_qty:
+            qty,
+
+          approved_weight:
+            weight,
+
+          status:
+            qty <
+            requestedQty
+              ? "partially_approved"
+              : "approved",
         },
-        { transaction }
+        {
+          transaction,
+        }
       );
 
-      const newAvailableQty = availableQty - qty;
-      const newAvailableWeight = availableWeight - weight;
-      const newTransitQty = transitQty + qty;
-      const newTransitWeight = transitWeight + weight;
+      // ==========================================================
+      // UPDATE STOCK
+      // ==========================================================
+
+      const newAvailableQty =
+        availableQty -
+        qty;
+
+      const newAvailableWeight =
+        availableWeight -
+        weight;
+
+      const newTransitQty =
+        transitQty +
+        qty;
+
+      const newTransitWeight =
+        transitWeight +
+        weight;
 
       await fromStock.update(
         {
-          available_qty: newAvailableQty,
-          available_weight: newAvailableWeight,
-          transit_qty: newTransitQty,
-          transit_weight: newTransitWeight,
+          available_qty:
+            newAvailableQty,
+
+          available_weight:
+            newAvailableWeight,
+
+          transit_qty:
+            newTransitQty,
+
+          transit_weight:
+            newTransitWeight,
         },
-        { transaction }
+        {
+          transaction,
+        }
       );
 
+      // ==========================================================
+      // CREATE STOCK MOVEMENT
+      // ==========================================================
+
       await createMovement({
-        organization_id: user.organization_id,
+        organization_id:
+          user.organization_id,
+
         item_id,
-        movement_type: "dispatch",
-        reference_type: "stock_transfer",
-        reference_id: transfer.id,
+
+        movement_type:
+          "dispatch",
+
+        reference_type:
+          "stock_transfer",
+
+        reference_id:
+          transfer.id,
+
         qty,
+
         weight,
+
         stockBefore: {
-          available_qty: availableQty,
-          reserved_qty: reservedQty,
-          transit_qty: transitQty,
-          damaged_qty: damagedQty,
-          available_weight: availableWeight,
-          reserved_weight: reservedWeight,
-          transit_weight: transitWeight,
-          damaged_weight: damagedWeight,
+          available_qty:
+            availableQty,
+
+          reserved_qty:
+            reservedQty,
+
+          transit_qty:
+            transitQty,
+
+          damaged_qty:
+            damagedQty,
+
+          available_weight:
+            availableWeight,
+
+          reserved_weight:
+            reservedWeight,
+
+          transit_weight:
+            transitWeight,
+
+          damaged_weight:
+            damagedWeight,
         },
+
         stockAfter: {
-          available_qty: newAvailableQty,
-          reserved_qty: reservedQty,
-          transit_qty: newTransitQty,
-          damaged_qty: damagedQty,
-          available_weight: newAvailableWeight,
-          reserved_weight: reservedWeight,
-          transit_weight: newTransitWeight,
-          damaged_weight: damagedWeight,
+          available_qty:
+            newAvailableQty,
+
+          reserved_qty:
+            reservedQty,
+
+          transit_qty:
+            newTransitQty,
+
+          damaged_qty:
+            damagedQty,
+
+          available_weight:
+            newAvailableWeight,
+
+          reserved_weight:
+            reservedWeight,
+
+          transit_weight:
+            newTransitWeight,
+
+          damaged_weight:
+            damagedWeight,
         },
-        remarks: `Dispatched via ${transfer.transfer_no}`,
-        created_by: user.id,
+
+        remarks:
+          `Dispatched via ${transfer.transfer_no}`,
+
+        created_by:
+          user.id,
+
         transaction,
       });
 
-      const childBatch = await InventoryTrackingService.distributeBatch(
-        {
-          parent_batch_id,
-          to_organization_id: request.from_organization_id,
-          quantity: qty,
-          weight,
-          reference_type: "STOCK_TRANSFER",
-          reference_id: transfer.id,
-          remarks: `Dispatched via ${transfer.transfer_no}`,
-          handled_by: user.id,
-          batch_status: "in_transit",
-        },
-        { transaction }
-      );
+      // ==========================================================
+      // DISTRIBUTE PARENT BATCH
+      // ==========================================================
+
+      const childBatch =
+        await InventoryTrackingService.distributeBatch(
+          {
+            parent_batch_id,
+
+            to_organization_id:
+              request.from_organization_id,
+
+            quantity:
+              qty,
+
+            weight,
+
+            reference_type:
+              "STOCK_TRANSFER",
+
+            reference_id:
+              transfer.id,
+
+            remarks:
+              `Dispatched via ${transfer.transfer_no}`,
+
+            handled_by:
+              user.id,
+
+            batch_status:
+              "in_transit",
+          },
+          {
+            transaction,
+          }
+        );
+
+      // ==========================================================
+      // DISPATCHED BATCH RESPONSE
+      // ==========================================================
 
       dispatchedBatches.push({
         item_id,
+
         parent_batch_id,
-        parent_batch_no: parentBatch.batch_no,
-        child_batch_id: childBatch.id,
-        child_batch_no: childBatch.batch_no,
-        dispatched_qty: Number(childBatch.total_qty || 0),
-        dispatched_weight: Number(childBatch.total_weight || 0),
-        status: childBatch.status,
+
+        parent_batch_no:
+          parentBatch.batch_no,
+
+        child_batch_id:
+          childBatch.id,
+
+        child_batch_no:
+          childBatch.batch_no,
+
+        dispatched_qty:
+          Number(
+            childBatch.total_qty ||
+              0
+          ),
+
+        dispatched_weight:
+          Number(
+            childBatch.total_weight ||
+              0
+          ),
+
+        status:
+          childBatch.status,
       });
+
+      // ==========================================================
+      // CHALLAN ITEMS
+      // ==========================================================
 
       challanItems.push({
         item_id,
-        item_name: itemDetails.item_name,
-        product_code: itemDetails.article_code || itemDetails.sku_code,
-        hsn_code: itemDetails.hsn_code,
-        purity: itemDetails.purity,
+
+        item_name:
+          itemDetails.item_name,
+
+        product_code:
+          itemDetails.article_code ||
+          itemDetails.sku_code,
+
+        hsn_code:
+          itemDetails.hsn_code,
+
+        purity:
+          itemDetails.purity,
+
         qty,
+
         weight,
+
         rate,
-        making_charge: itemDetails.making_charge || 0,
-        huid_code: itemDetails.huid_code || "-",
-        base_value: weight > 0 ? weight * rate : qty * rate,
+
+        making_charge:
+          itemDetails.making_charge ||
+          0,
+
+        huid_code:
+          itemDetails.huid_code ||
+          "-",
+
+        base_value:
+          weight > 0
+            ? weight * rate
+            : qty * rate,
       });
     }
 
-    let finalStatus = "approved";
+    // ============================================================
+    // FINAL REQUEST STATUS
+    // ============================================================
 
-    if (approvedItemsCount === 0) {
-      finalStatus = "rejected";
-    } else if (totalApproved < totalRequested) {
-      finalStatus = "partially_approved";
+    let finalStatus =
+      "approved";
+
+    if (
+      approvedItemsCount === 0
+    ) {
+      finalStatus =
+        "rejected";
+    } else if (
+      totalApproved <
+      totalRequested
+    ) {
+      finalStatus =
+        "partially_approved";
     }
+
+    // ============================================================
+    // UPDATE REQUEST
+    // ============================================================
 
     await request.update(
       {
-        status: finalStatus,
-        approved_by: user.id,
-        approved_at: new Date(),
-      },
-      { transaction }
-    );
+        status:
+          finalStatus,
 
-    await Task.update(
-      { status: finalStatus },
+        approved_by:
+          user.id,
+
+        approved_at:
+          new Date(),
+      },
       {
-        where: {
-          task_type: "stock_request_approval",
-          reference_id: request.id,
-        },
         transaction,
       }
     );
+
+    // ============================================================
+    // UPDATE TASK
+    // ============================================================
+
+    await Task.update(
+      {
+        status:
+          finalStatus,
+      },
+      {
+        where: {
+          task_type:
+            "stock_request_approval",
+
+          reference_id:
+            request.id,
+        },
+
+        transaction,
+      }
+    );
+
+    // ============================================================
+    // SYSTEM ACTIVITY
+    // ============================================================
 
     await SystemActivity.create(
       {
         title:
-          finalStatus === "approved"
+          finalStatus ===
+          "approved"
             ? "Stock request approved and dispatched"
-            : finalStatus === "partially_approved"
-            ? "Stock request partially approved and dispatched"
-            : "Stock request rejected",
+            : finalStatus ===
+              "partially_approved"
+              ? "Stock request partially approved and dispatched"
+              : "Stock request rejected",
+
         description:
-          finalStatus === "rejected"
+          finalStatus ===
+          "rejected"
             ? `Request ${request.request_no} was rejected by receiving organization`
             : `Request ${request.request_no} processed via ${transfer.transfer_no}`,
-        activity_type: "stock_request_dispatch",
-        module_name: "stock_transfer",
-        reference_id: transfer.id,
-        reference_no: transfer.transfer_no,
-        district_code: request.to_district_code || null,
-        store_code: request.from_store_code || null,
-        store_name: request.from_store_name || null,
-        created_by: user.id,
-        created_at: new Date(),
+
+        activity_type:
+          "stock_request_dispatch",
+
+        module_name:
+          "stock_transfer",
+
+        reference_id:
+          transfer.id,
+
+        reference_no:
+          transfer.transfer_no,
+
+        district_code:
+          request.to_district_code ||
+          null,
+
+        store_code:
+          request.from_store_code ||
+          null,
+
+        store_name:
+          request.from_store_name ||
+          null,
+
+        created_by:
+          user.id,
+
+        created_at:
+          new Date(),
       },
-      { transaction }
+      {
+        transaction,
+      }
     );
 
+    // ============================================================
+    // USER ACTIVITY
+    // ============================================================
+
     await createActivity({
-      user_id: user.id,
-      action: "stock_request_dispatch",
+      user_id:
+        user.id,
+
+      action:
+        "stock_request_dispatch",
+
       title:
-        finalStatus === "approved"
+        finalStatus ===
+        "approved"
           ? "Stock request approved and dispatched"
-          : finalStatus === "partially_approved"
-          ? "Stock request partially approved and dispatched"
-          : "Stock request rejected",
+          : finalStatus ===
+            "partially_approved"
+            ? "Stock request partially approved and dispatched"
+            : "Stock request rejected",
+
       description:
-        finalStatus === "rejected"
+        finalStatus ===
+        "rejected"
           ? `Request ${request.request_no} rejected`
           : `Request ${request.request_no} dispatched via ${transfer.transfer_no}`,
+
       meta: {
-        request_id: request.id,
-        request_no: request.request_no,
-        transfer_id: transfer.id,
-        transfer_no: transfer.transfer_no,
-        final_status: finalStatus,
+        request_id:
+          request.id,
+
+        request_no:
+          request.request_no,
+
+        transfer_id:
+          transfer.id,
+
+        transfer_no:
+          transfer.transfer_no,
+
+        final_status:
+          finalStatus,
+
         driver_photo_url,
+
         dispatch_image_urls,
+
         dispatch_video_url,
+
         e_way_bill_url,
-        dispatched_batches: dispatchedBatches,
+
+        dispatched_batches:
+          dispatchedBatches,
       },
+
       transaction,
     });
 
-    if (finalStatus !== "rejected") {
-      const fromStore = await Store.findOne({
-        where: { id: user.organization_id },
-        transaction,
-      });
+    // ============================================================
+    // GENERATE CHALLAN
+    // ============================================================
 
-      const toStore = await Store.findOne({
-        where: { id: request.from_organization_id },
-        transaction,
-      });
+    if (
+      finalStatus !==
+      "rejected"
+    ) {
+      const fromStore =
+        await Store.findOne({
+          where: {
+            id:
+              user.organization_id,
+          },
 
-      challanPdf = await generateDeliveryChallanPdf({
-        transfer,
-        request,
-        fromStore,
-        toStore,
-        challanItems,
-        driver: {
-          driver_name,
-          driver_phone,
-          vehicle_number,
-          pickup_address,
-          delivery_address,
-        },
-      });
+          transaction,
+        });
+
+      const toStore =
+        await Store.findOne({
+          where: {
+            id:
+              request.from_organization_id,
+          },
+
+          transaction,
+        });
+
+      challanPdf =
+        await generateDeliveryChallanPdf(
+          {
+            transfer,
+
+            request,
+
+            fromStore,
+
+            toStore,
+
+            challanItems,
+
+            driver: {
+              driver_name,
+
+              driver_phone,
+
+              vehicle_number,
+
+              pickup_address,
+
+              delivery_address,
+            },
+          }
+        );
     }
+
+    // ============================================================
+    // COMMIT
+    // ============================================================
 
     await transaction.commit();
 
-    for (const filePath of uploadedLocalPaths) {
-      safeUnlink(filePath);
+    // ============================================================
+    // CLEAN TEMP FILES
+    // ============================================================
+
+    for (
+      const filePath of uploadedLocalPaths
+    ) {
+      safeUnlink(
+        filePath
+      );
     }
 
-    if (challanPdf && String(req.query.download_challan || "") === "true") {
-      res.setHeader("Content-Type", "application/pdf");
+    // ============================================================
+    // DOWNLOAD CHALLAN
+    // ============================================================
+
+    if (
+      challanPdf &&
+      String(
+        req.query.download_challan ||
+          ""
+      ) === "true"
+    ) {
+      res.setHeader(
+        "Content-Type",
+        "application/pdf"
+      );
+
       res.setHeader(
         "Content-Disposition",
         `attachment; filename="${challanPdf.fileName}"`
       );
 
-      return res.sendFile(challanPdf.filePath);
+      return res.sendFile(
+        challanPdf.filePath
+      );
     }
+
+    // ============================================================
+    // SUCCESS RESPONSE
+    // ============================================================
 
     return res.status(200).json({
       success: true,
+
       message:
-        finalStatus === "rejected"
+        finalStatus ===
+        "rejected"
           ? "Request rejected successfully"
           : "Request approved and stock dispatched successfully",
+
       data: {
         transfer: {
           ...transfer.toJSON(),
-          dispatch_image_url: dispatch_image_urls,
+
+          dispatch_image_url:
+            dispatch_image_urls,
+
           e_way_bill_url,
         },
+
         uploaded_files: {
           driver_photo_url,
+
           dispatch_image_urls,
+
           dispatch_video_url,
+
           e_way_bill_url,
         },
+
         summary: {
-          request_id: request.id,
-          request_no: request.request_no,
-          total_requested: totalRequested,
-          total_approved: totalApproved,
-          total_weight: totalWeight,
-          estimated_value: estimatedValue,
-          final_status: finalStatus,
+          request_id:
+            request.id,
+
+          request_no:
+            request.request_no,
+
+          total_requested:
+            totalRequested,
+
+          total_approved:
+            totalApproved,
+
+          total_weight:
+            totalWeight,
+
+          estimated_value:
+            estimatedValue,
+
+          final_status:
+            finalStatus,
         },
       },
     });
   } catch (error) {
+    // ============================================================
+    // ROLLBACK
+    // ============================================================
+
     await transaction.rollback();
 
-    for (const filePath of uploadedLocalPaths) {
-      safeUnlink(filePath);
+    // ============================================================
+    // CLEAN TEMP FILES
+    // ============================================================
+
+    for (
+      const filePath of uploadedLocalPaths
+    ) {
+      safeUnlink(
+        filePath
+      );
     }
 
-    console.error("approveAndDispatchRequest error:", error);
+    console.error(
+      "approveAndDispatchRequest error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to approve and dispatch request",
-      error: error.message,
+
+      message:
+        "Failed to approve and dispatch request",
+
+      error:
+        error.message,
     });
   }
 };
