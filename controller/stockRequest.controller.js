@@ -9319,7 +9319,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     }
   }
 };
-  export const getRetailDistrictInventory = async (req, res) => {
+ export const getRetailDistrictInventory = async (req, res) => {
   try {
     // ============================================================
     // 1. GET LOGGED-IN RETAIL STORE ID
@@ -9340,12 +9340,6 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
 
     // ============================================================
     // 2. GET QUERY PARAMETERS
-    //
-    // Example:
-    // ?category=Ring
-    //
-    // Optional:
-    // ?category=Ring&search=Gold
     // ============================================================
 
     const category = String(
@@ -9357,9 +9351,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     ).trim();
 
     // ============================================================
-    // 3. FIND RETAIL STORE AND ITS DISTRICT
-    //
-    // stores.district_id -> stores.id
+    // 3. FIND RETAIL STORE + ITS PARENT DISTRICT
     // ============================================================
 
     const retailStoreResult = await sequelize.query(
@@ -9425,14 +9417,17 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
       });
     }
 
+    const districtStoreId =
+      retailStore.district_store_id;
+
     // ============================================================
     // 6. CATEGORY FILTER
     //
-    // category=Ring
-    //     -> Only Ring items
+    // IMPORTANT:
+    // This filter is ONLY applied to inventory listing.
     //
-    // category not passed
-    //     -> All categories
+    // Category summary below remains COMPLETE and does not
+    // depend on selected category.
     // ============================================================
 
     const categoryCondition = category
@@ -9444,13 +9439,6 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
 
     // ============================================================
     // 7. SEARCH FILTER
-    //
-    // Optional search across:
-    // SKU
-    // Article Code
-    // Item Name
-    // Category
-    // Purity
     // ============================================================
 
     const searchCondition = search
@@ -9470,7 +9458,107 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
       : "";
 
     // ============================================================
-    // 8. FETCH DISTRICT INVENTORY
+    // 8. FETCH COMPLETE DISTRICT CATEGORY SUMMARY
+    //
+    // THIS IS THE IMPORTANT FIX.
+    //
+    // This query:
+    // - Uses parent district inventory
+    // - Does NOT apply category filter
+    // - Does NOT apply search filter
+    // - Groups Ring/ring together
+    // - Calculates total available quantity
+    // - Calculates number of unique items
+    //
+    // Example:
+    //
+    // Ring
+    // quantity: 150
+    // item_count: 15
+    //
+    // Amit Kumar
+    // quantity: 55
+    // item_count: 3
+    // ============================================================
+
+    const categorySummary = await sequelize.query(
+      `
+      SELECT
+        MIN(TRIM(i.category)) AS category,
+
+        SUM(
+          COALESCE(ib.available_qty, 0)
+        ) AS quantity,
+
+        COUNT(
+          DISTINCT i.id
+        ) AS item_count
+
+      FROM inventory_batches AS ib
+
+      INNER JOIN items AS i
+        ON i.id = ib.item_id
+
+      WHERE
+
+        ib.current_organization_id =
+          :districtStoreId
+
+        AND ib.is_leaf = true
+
+        AND ib.available_qty > 0
+
+        AND i.is_active = true
+
+        AND i.category IS NOT NULL
+
+        AND TRIM(i.category) <> ''
+
+      GROUP BY
+        LOWER(TRIM(i.category))
+
+      ORDER BY
+        LOWER(TRIM(MIN(i.category)))
+      `,
+      {
+        replacements: {
+          districtStoreId,
+        },
+
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    // ============================================================
+    // 9. NORMALIZE CATEGORY SUMMARY
+    //
+    // PostgreSQL numeric values may come as strings.
+    // Convert them to numbers for frontend.
+    // ============================================================
+
+    const categories = (
+      categorySummary || []
+    ).map((row) => ({
+      category: String(
+        row.category || ""
+      ).trim(),
+
+      quantity: Number(
+        row.quantity || 0
+      ),
+
+      item_count: Number(
+        row.item_count || 0
+      ),
+    }));
+
+    // ============================================================
+    // 10. FETCH DISTRICT INVENTORY
+    //
+    // EXISTING FLOW PRESERVED.
+    //
+    // IMPORTANT:
+    // Inventory is fetched from parent District.
     // ============================================================
 
     const inventory = await sequelize.query(
@@ -9632,8 +9720,7 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
       `,
       {
         replacements: {
-          districtStoreId:
-            retailStore.district_store_id,
+          districtStoreId,
 
           category,
 
@@ -9645,7 +9732,13 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
     );
 
     // ============================================================
-    // 9. RESPONSE
+    // 11. RESPONSE
+    //
+    // EXISTING RESPONSE FIELDS PRESERVED.
+    //
+    // NEW:
+    // - total_categories
+    // - categories
     // ============================================================
 
     return res.status(200).json({
@@ -9655,6 +9748,10 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
         ? `${category} category district inventory fetched successfully`
         : "District inventory fetched successfully",
 
+      // ========================================================
+      // RETAIL STORE
+      // ========================================================
+
       retail_store: {
         id: retailStore.retail_store_id,
 
@@ -9662,6 +9759,10 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
 
         name: retailStore.retail_store_name,
       },
+
+      // ========================================================
+      // PARENT DISTRICT
+      // ========================================================
 
       district: {
         id: retailStore.district_store_id,
@@ -9671,15 +9772,34 @@ export const dispatchDistrictToRetailDirectTransfer = async (req, res) => {
         name: retailStore.district_store_name,
       },
 
+      // ========================================================
+      // CATEGORY FILTER
+      // ========================================================
+
       filter: {
         category: category || null,
 
         search: search || null,
       },
 
+      // ========================================================
+      // COMPLETE CATEGORY SUMMARY
+      //
+      // Frontend category cards/dropdown can directly use this.
+      // ========================================================
+
+      total_categories: categories.length,
+
+      categories,
+
+      // ========================================================
+      // EXISTING INVENTORY
+      //
+      // DO NOT REMOVE THIS.
+      // ========================================================
+
       inventory,
     });
-
   } catch (error) {
     console.error(
       "Get Retail District Inventory Error:",
