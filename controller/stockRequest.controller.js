@@ -369,267 +369,710 @@ export const createStockRequest = async (req, res) => {
 
   try {
     const user = req.user;
-    const { store_id, items, priority, category, notes } = req.body;
 
-    // ================= VALIDATION =================
-    if (!store_id || !Array.isArray(items) || items.length === 0) {
+    const {
+      store_id,
+      items,
+      priority,
+      category,
+      notes,
+    } = req.body;
+
+    // ============================================================
+    // VALIDATION
+    // ============================================================
+
+    if (
+      !store_id ||
+      !Array.isArray(items) ||
+      items.length === 0
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "store_id and items are required",
+        message:
+          "store_id and items are required",
       });
     }
 
-    // ================= GET RETAIL STORE =================
-    const store = await Store.findOne({
-      where: {
-        id: store_id,
-        is_active: true,
-      },
-      transaction,
-    });
+    // ============================================================
+    // GET RETAIL STORE
+    // ============================================================
+
+    const store =
+      await Store.findOne({
+        where: {
+          id: store_id,
+          is_active: true,
+        },
+
+        transaction,
+      });
 
     if (!store) {
       await transaction.rollback();
+
       return res.status(404).json({
         success: false,
         message: "Store not found",
       });
     }
 
-    // ================= DISTRICT STORE RESOLUTION =================
+    // ============================================================
+    // DISTRICT STORE RESOLUTION
+    // ============================================================
+
     let districtStore = null;
 
     if (store.district_id) {
-      districtStore = await Store.findOne({
-        where: {
-          id: store.district_id,
-          organizationlevel: "District",
-          is_active: true,
-        },
-        transaction,
-      });
+      districtStore =
+        await Store.findOne({
+          where: {
+            id: store.district_id,
+
+            organizationlevel:
+              "District",
+
+            is_active: true,
+          },
+
+          transaction,
+        });
     }
 
     if (!districtStore) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "Cannot resolve district for this store",
+
+        message:
+          "Cannot resolve district for this store",
+
         debug: {
           store_id: store.id,
-          store_code: store.store_code,
-          store_name: store.store_name,
-          district_id: store.district_id,
+
+          store_code:
+            store.store_code,
+
+          store_name:
+            store.store_name,
+
+          district_id:
+            store.district_id,
         },
       });
     }
 
-    // ================= VALID ITEMS FORMAT =================
+    // ============================================================
+    // VALID ITEMS FORMAT
+    // ============================================================
+
     const validItems = items
       .filter(
         (item) =>
           item.item_id &&
-          Number.isFinite(Number(item.request_qty)) &&
+          Number.isFinite(
+            Number(item.request_qty)
+          ) &&
           Number(item.request_qty) > 0
       )
       .map((item) => ({
-        item_id: Number(item.item_id),
-        request_qty: Number(item.request_qty),
+        item_id:
+          Number(item.item_id),
+
+        request_qty:
+          Number(item.request_qty),
+
         approved_qty: 0,
+
         status: "pending",
       }));
 
     if (validItems.length === 0) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "No valid items found",
+        message:
+          "No valid items found",
       });
     }
 
-    // ================= MERGE SAME ITEMS =================
+    // ============================================================
+    // MERGE SAME ITEMS
+    // ============================================================
+
     const itemMap = new Map();
 
     for (const item of validItems) {
-      if (itemMap.has(item.item_id)) {
-        itemMap.get(item.item_id).request_qty += item.request_qty;
+      if (
+        itemMap.has(item.item_id)
+      ) {
+        itemMap.get(
+          item.item_id
+        ).request_qty +=
+          item.request_qty;
       } else {
-        itemMap.set(item.item_id, item);
+        itemMap.set(
+          item.item_id,
+          item
+        );
       }
     }
 
-    const finalItems = Array.from(itemMap.values());
-
-    // ================= ITEM EXISTENCE CHECK =================
-    const itemIds = finalItems.map((item) => item.item_id);
-
-    const existingItems = await Item.findAll({
-      where: {
-        id: {
-          [Op.in]: itemIds,
-        },
-        is_active: true,
-      },
-      attributes: [
-        "id",
-        "item_name",
-        "article_code",
-        "sku_code",
-        "store_id",
-        "storeCode",
-        "organization_id",
-      ],
-      transaction,
-      raw: true,
-    });
-
-    const existingItemIds = existingItems.map((item) => Number(item.id));
-
-    const invalidItemIds = itemIds.filter(
-      (id) => !existingItemIds.includes(Number(id))
-    );
-
-    if (invalidItemIds.length > 0) {
-      await transaction.rollback();
-      return res.status(400).json({
-        success: false,
-        message: "Invalid item_id found",
-        invalid_item_ids: invalidItemIds,
-      });
-    }
-
-    // ================= ITEM STORE VALIDATION =================
-    const invalidStoreItems = existingItems.filter((item) => {
-      const itemStoreId = Number(item.store_id || 0);
-      const itemOrgId = Number(item.organization_id || 0);
-      const itemStoreCode = String(item.storeCode || "").trim().toUpperCase();
-
-      return (
-        itemStoreId !== Number(store.id) &&
-        itemOrgId !== Number(store.id) &&
-        itemStoreCode !== String(store.store_code).trim().toUpperCase()
+    const finalItems =
+      Array.from(
+        itemMap.values()
       );
-    });
 
-    if (invalidStoreItems.length > 0) {
+    // ============================================================
+    // ITEM EXISTENCE CHECK
+    // ============================================================
+
+    const itemIds =
+      finalItems.map(
+        (item) =>
+          item.item_id
+      );
+
+    const existingItems =
+      await Item.findAll({
+        where: {
+          id: {
+            [Op.in]: itemIds,
+          },
+
+          is_active: true,
+        },
+
+        attributes: [
+          "id",
+          "item_name",
+          "article_code",
+          "sku_code",
+          "store_id",
+          "storeCode",
+          "organization_id",
+        ],
+
+        transaction,
+
+        raw: true,
+      });
+
+    const existingItemIds =
+      existingItems.map(
+        (item) =>
+          Number(item.id)
+      );
+
+    const invalidItemIds =
+      itemIds.filter(
+        (id) =>
+          !existingItemIds.includes(
+            Number(id)
+          )
+      );
+
+    if (
+      invalidItemIds.length > 0
+    ) {
       await transaction.rollback();
+
       return res.status(400).json({
         success: false,
-        message: "Some items do not belong to selected store",
-        invalid_items: invalidStoreItems.map((item) => ({
-          id: item.id,
-          item_name: item.item_name,
-          article_code: item.article_code,
-          sku_code: item.sku_code,
-          store_id: item.store_id,
-          storeCode: item.storeCode,
-          organization_id: item.organization_id,
-        })),
+
+        message:
+          "Invalid item_id found",
+
+        invalid_item_ids:
+          invalidItemIds,
       });
     }
 
-    // ================= REQUEST NO =================
-    const request_no = `REQ-${store.id}-${Date.now()}`;
+    // ============================================================
+    // IMPORTANT:
+    // RETAIL REQUESTS USE PARENT DISTRICT INVENTORY
+    //
+    // DO NOT VALIDATE:
+    //
+    // item.store_id === retailStore.id
+    //
+    // OR:
+    //
+    // item.organization_id === retailStore.id
+    //
+    // Instead, verify that the requested item has an
+    // AVAILABLE LEAF INVENTORY BATCH at the parent district.
+    // ============================================================
 
-    const finalDistrictId = districtStore.id;
-    const finalDistrictCode = districtStore.store_code;
-    const finalDistrictName = districtStore.store_name;
+    const districtInventory =
+      await sequelize.query(
+        `
+        SELECT
 
-    // ================= CREATE REQUEST =================
-    const stockRequest = await StockRequest.create(
+          ib.item_id,
+
+          COALESCE(
+            SUM(
+              ib.available_qty
+            ),
+            0
+          ) AS available_qty
+
+        FROM inventory_batches AS ib
+
+        WHERE
+
+          ib.item_id IN (:itemIds)
+
+          AND ib.current_organization_id =
+            :districtStoreId
+
+          AND ib.is_leaf = true
+
+          AND ib.available_qty > 0
+
+        GROUP BY
+
+          ib.item_id
+        `,
+        {
+          replacements: {
+            itemIds,
+
+            districtStoreId:
+              districtStore.id,
+          },
+
+          type:
+            QueryTypes.SELECT,
+
+          transaction,
+        }
+      );
+
+    // ============================================================
+    // CREATE MAP OF DISTRICT AVAILABLE STOCK
+    // ============================================================
+
+    const districtInventoryMap =
+      new Map();
+
+    for (
+      const row of districtInventory
+    ) {
+      districtInventoryMap.set(
+        Number(row.item_id),
+        Number(
+          row.available_qty || 0
+        )
+      );
+    }
+
+    // ============================================================
+    // CHECK REQUESTED QUANTITY AGAINST DISTRICT STOCK
+    // ============================================================
+
+    const invalidDistrictItems =
+      [];
+
+    for (
+      const requestedItem of finalItems
+    ) {
+      const availableQty =
+        districtInventoryMap.get(
+          requestedItem.item_id
+        ) || 0;
+
+      const requestedQty =
+        Number(
+          requestedItem.request_qty
+        );
+
+      // --------------------------------------------------------
+      // Item does not exist in district inventory
+      // --------------------------------------------------------
+
+      if (
+        availableQty <= 0
+      ) {
+        const itemDetails =
+          existingItems.find(
+            (item) =>
+              Number(item.id) ===
+              Number(
+                requestedItem.item_id
+              )
+          );
+
+        invalidDistrictItems.push(
+          {
+            id:
+              requestedItem.item_id,
+
+            item_name:
+              itemDetails?.item_name ||
+              null,
+
+            article_code:
+              itemDetails?.article_code ||
+              null,
+
+            sku_code:
+              itemDetails?.sku_code ||
+              null,
+
+            requested_qty:
+              requestedQty,
+
+            available_qty:
+              availableQty,
+
+            district_id:
+              districtStore.id,
+
+            district_code:
+              districtStore.store_code,
+
+            district_name:
+              districtStore.store_name,
+          }
+        );
+
+        continue;
+      }
+
+      // --------------------------------------------------------
+      // Requested quantity exceeds district stock
+      // --------------------------------------------------------
+
+      if (
+        requestedQty >
+        availableQty
+      ) {
+        const itemDetails =
+          existingItems.find(
+            (item) =>
+              Number(item.id) ===
+              Number(
+                requestedItem.item_id
+              )
+          );
+
+        invalidDistrictItems.push(
+          {
+            id:
+              requestedItem.item_id,
+
+            item_name:
+              itemDetails?.item_name ||
+              null,
+
+            article_code:
+              itemDetails?.article_code ||
+              null,
+
+            sku_code:
+              itemDetails?.sku_code ||
+              null,
+
+            requested_qty:
+              requestedQty,
+
+            available_qty:
+              availableQty,
+
+            district_id:
+              districtStore.id,
+
+            district_code:
+              districtStore.store_code,
+
+            district_name:
+              districtStore.store_name,
+          }
+        );
+      }
+    }
+
+    // ============================================================
+    // INVALID DISTRICT INVENTORY ITEMS
+    // ============================================================
+
+    if (
+      invalidDistrictItems.length > 0
+    ) {
+      await transaction.rollback();
+
+      return res.status(400).json({
+        success: false,
+
+        message:
+          "Some requested items are not available in the parent district inventory",
+
+        invalid_items:
+          invalidDistrictItems,
+
+        district: {
+          id:
+            districtStore.id,
+
+          store_code:
+            districtStore.store_code,
+
+          store_name:
+            districtStore.store_name,
+        },
+      });
+    }
+
+    // ============================================================
+    // REQUEST NO
+    // ============================================================
+
+    const request_no =
+      `REQ-${store.id}-${Date.now()}`;
+
+    // ============================================================
+    // FINAL DISTRICT DATA
+    // ============================================================
+
+    const finalDistrictId =
+      districtStore.id;
+
+    const finalDistrictCode =
+      districtStore.store_code;
+
+    const finalDistrictName =
+      districtStore.store_name;
+
+    // ============================================================
+    // CREATE REQUEST
+    // ============================================================
+
+    const stockRequest =
+      await StockRequest.create(
+        {
+          request_no,
+
+          // ------------------------------------------------------
+          // REQUESTER = RETAIL STORE
+          // ------------------------------------------------------
+
+          from_organization_id:
+            store.id,
+
+          from_store_code:
+            store.store_code,
+
+          from_store_name:
+            store.store_name,
+
+          // ------------------------------------------------------
+          // RECEIVER / APPROVER = DISTRICT
+          // ------------------------------------------------------
+
+          to_organization_id:
+            finalDistrictId,
+
+          to_store_code:
+            finalDistrictCode,
+
+          to_store_name:
+            finalDistrictName,
+
+          to_district_code:
+            finalDistrictCode,
+
+          to_district_name:
+            finalDistrictName,
+
+          priority:
+            priority ||
+            "medium",
+
+          category:
+            category ||
+            null,
+
+          notes:
+            notes ||
+            null,
+
+          status:
+            "pending",
+
+          created_by:
+            user?.id ||
+            null,
+        },
+        {
+          transaction,
+        }
+      );
+
+    // ============================================================
+    // REQUEST ITEMS
+    // ============================================================
+
+    const requestItemsPayload =
+      finalItems.map(
+        (item) => ({
+          request_id:
+            stockRequest.id,
+
+          item_id:
+            item.item_id,
+
+          request_qty:
+            item.request_qty,
+
+          approved_qty: 0,
+
+          status:
+            "pending",
+        })
+      );
+
+    await StockRequestItem.bulkCreate(
+      requestItemsPayload,
       {
-        request_no,
-
-        from_organization_id: store.id,
-        from_store_code: store.store_code,
-        from_store_name: store.store_name,
-
-        to_organization_id: finalDistrictId,
-        to_store_code: finalDistrictCode,
-        to_store_name: finalDistrictName,
-
-        to_district_code: finalDistrictCode,
-        to_district_name: finalDistrictName,
-
-        priority: priority || "medium",
-        category: category || null,
-        notes: notes || null,
-        status: "pending",
-        created_by: user?.id || null,
-      },
-      { transaction }
+        transaction,
+      }
     );
 
-    // ================= ITEMS =================
-    const requestItemsPayload = finalItems.map((item) => ({
-      request_id: stockRequest.id,
-      item_id: item.item_id,
-      request_qty: item.request_qty,
-      approved_qty: 0,
-      status: "pending",
-    }));
+    // ============================================================
+    // CREATE APPROVAL TASK
+    // ============================================================
 
-    await StockRequestItem.bulkCreate(requestItemsPayload, {
-      transaction,
-    });
-
-    // ================= TASK =================
     await Task.create(
       {
-        title: "Stock request approval required",
-        description: `${store.store_name} sent request ${stockRequest.request_no} to ${finalDistrictName}`,
-        priority: priority || "medium",
-        status: "pending",
-        task_type: "stock_request_approval",
-        reference_id: stockRequest.id,
-        reference_no: stockRequest.request_no,
+        title:
+          "Stock request approval required",
 
-        district_code: finalDistrictCode,
-        store_code: store.store_code,
-        store_name: store.store_name,
+        description:
+          `${store.store_name} sent request ${stockRequest.request_no} to ${finalDistrictName}`,
 
-        created_by: user?.id || null,
+        priority:
+          priority ||
+          "medium",
+
+        status:
+          "pending",
+
+        task_type:
+          "stock_request_approval",
+
+        reference_id:
+          stockRequest.id,
+
+        reference_no:
+          stockRequest.request_no,
+
+        district_code:
+          finalDistrictCode,
+
+        store_code:
+          store.store_code,
+
+        store_name:
+          store.store_name,
+
+        created_by:
+          user?.id ||
+          null,
       },
-      { transaction }
+      {
+        transaction,
+      }
     );
+
+    // ============================================================
+    // COMMIT
+    // ============================================================
 
     await transaction.commit();
 
+    // ============================================================
+    // RESPONSE
+    // ============================================================
+
     return res.status(201).json({
       success: true,
-      message: "Stock request created successfully",
+
+      message:
+        "Stock request created successfully",
+
       data: {
-        request_id: stockRequest.id,
-        request_no: stockRequest.request_no,
-        total_items: requestItemsPayload.length,
+        request_id:
+          stockRequest.id,
+
+        request_no:
+          stockRequest.request_no,
+
+        total_items:
+          requestItemsPayload.length,
 
         from_store: {
-          id: store.id,
-          store_code: store.store_code,
-          store_name: store.store_name,
+          id:
+            store.id,
+
+          store_code:
+            store.store_code,
+
+          store_name:
+            store.store_name,
         },
 
         district: {
-          id: finalDistrictId,
-          store_code: finalDistrictCode,
-          store_name: finalDistrictName,
+          id:
+            finalDistrictId,
+
+          store_code:
+            finalDistrictCode,
+
+          store_name:
+            finalDistrictName,
         },
 
-        items: requestItemsPayload.map((item) => ({
-          item_id: item.item_id,
-          request_qty: item.request_qty,
-          status: item.status,
-        })),
+        items:
+          requestItemsPayload.map(
+            (item) => ({
+              item_id:
+                item.item_id,
+
+              request_qty:
+                item.request_qty,
+
+              status:
+                item.status,
+            })
+          ),
       },
     });
   } catch (error) {
+    // ============================================================
+    // ROLLBACK
+    // ============================================================
+
     await transaction.rollback();
+
+    console.error(
+      "CREATE STOCK REQUEST ERROR:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Server error",
-      error: error.message,
+
+      message:
+        "Server error",
+
+      error:
+        error.message,
     });
   }
 };
