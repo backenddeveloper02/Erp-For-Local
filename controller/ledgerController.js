@@ -269,6 +269,10 @@ export const getLedger = async (req, res) => {
 };
 export const downloadLedgerExcel = async (req, res) => {
   try {
+    // ============================================================
+    // 1. AUTH CHECK
+    // ============================================================
+
     if (!req.user) {
       return res.status(401).json({
         success: false,
@@ -288,471 +292,1527 @@ export const downloadLedgerExcel = async (req, res) => {
 
     const cleanSearch = String(search || "").trim();
 
-    const ledgerWhere = { organization_id };
-    const customerWhere = { organization_id };
+    // ============================================================
+    // 2. HEAD OFFICE DETAILS
+    // ============================================================
 
-    if (cleanSearch) {
-      customerWhere[Op.or] = [
-        { name: { [Op.iLike]: `%${cleanSearch}%` } },
-        { phone: { [Op.iLike]: `%${cleanSearch}%` } },
-      ];
+    const storeResult = await sequelize.query(
+      `
+      SELECT
+        id,
+        store_name,
+        store_code,
+        organization_level
+      FROM stores
+      WHERE id = :organization_id
+      LIMIT 1
+      `,
+      {
+        replacements: {
+          organization_id,
+        },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    const store = storeResult?.[0] || null;
+
+    // ============================================================
+    // 3. GET ALL DISTRICT + RETAIL STORES
+    //
+    // IMPORTANT:
+    // Head Office ke andar saare District + Retail stores
+    // yahan se liye jayenge.
+    //
+    // organization_id = Head Office ka id hone ki wajah se
+    // ledger_entries ko directly Head Office id se filter
+    // nahi karna hai.
+    //
+    // Instead:
+    //
+    // stores.id
+    //     ↓
+    // ledger_entries.organization_id
+    // ============================================================
+
+    const childStoreRows = await sequelize.query(
+      `
+      SELECT
+        s.id,
+        s.store_code,
+        s.store_name,
+        s.organization_level
+      FROM stores s
+      WHERE
+        LOWER(s.organization_level::text) IN (
+          'district',
+          'retail'
+        )
+      ORDER BY
+        s.store_code ASC
+      `,
+      {
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    const childStoreIds = (childStoreRows || [])
+      .map((row) => Number(row.id))
+      .filter((id) => Number.isFinite(id));
+
+    // ============================================================
+    // 4. LEDGER ORGANIZATION CONDITION
+    //
+    // Head Office:
+    //     All District + Retail stores
+    //
+    // Fallback:
+    //     Logged-in organization
+    // ============================================================
+
+    let ledgerOrganizationCondition = "";
+
+    let ledgerOrganizationReplacements = {};
+
+    if (childStoreIds.length > 0) {
+      ledgerOrganizationCondition = `
+        le.organization_id IN (:ledgerOrganizationIds)
+      `;
+
+      ledgerOrganizationReplacements = {
+        ledgerOrganizationIds: childStoreIds,
+      };
+    } else {
+      ledgerOrganizationCondition = `
+        le.organization_id = :organization_id
+      `;
+
+      ledgerOrganizationReplacements = {
+        organization_id,
+      };
     }
 
-    const store = await Store.findOne({
-      where: { id: organization_id },
-      attributes: ["id", "store_name", "store_code", "organization_level"],
-      raw: true,
-    });
+    // ============================================================
+    // 5. DASHBOARD SUMMARY
+    //
+    // IMPORTANT:
+    //
+    // Total Sales:
+    // District + Retail ke COMBINED sales/deals count.
+    //
+    // Reference ID ke basis par DISTINCT count rakha hai,
+    // taaki same bill/reference ki multiple ledger entries
+    // hone par duplicate sale count na ho.
+    //
+    // Baaki summary values bhi District + Retail combined
+    // ledger se calculate honge.
+    // ============================================================
 
-    const summaryRaw = await LedgerEntry.findOne({
-      where: ledgerWhere,
-      attributes: [
-        [
-          fn(
-            "COALESCE",
-            fn(
-              "SUM",
-              literal(
-                `CASE WHEN "LedgerEntry"."type" = 'DEBIT' THEN 1 ELSE 0 END`
-              )
-            ),
-            0
-          ),
-          "total_sales",
-        ],
-        [
-          fn(
-            "COALESCE",
-            fn(
-              "SUM",
-              literal(
-                `CASE WHEN "LedgerEntry"."type" = 'CREDIT' THEN 1 ELSE 0 END`
-              )
-            ),
-            0
-          ),
-          "goods_receipt",
-        ],
-      ],
-      raw: true,
-    });
+    const summaryResult = await sequelize.query(
+      `
+      SELECT
 
-    const clientRows = await LedgerEntry.findAll({
-      where: ledgerWhere,
-      attributes: [
-        "customer_id",
-        [
-          fn(
-            "COUNT",
-            literal(
-              `DISTINCT CASE WHEN "LedgerEntry"."type" = 'DEBIT' THEN "LedgerEntry"."reference_id" END`
-            )
+        /* ========================================================
+           TOTAL SALES
+           District + Retail Combined
+           ======================================================== */
+
+        COUNT(
+          DISTINCT
+          CASE
+            WHEN le.type = 'DEBIT'
+            THEN le.reference_id
+          END
+        ) AS total_sales,
+
+        /* ========================================================
+           GOODS RECEIPT
+           District + Retail Combined
+           ======================================================== */
+
+        COUNT(
+          DISTINCT
+          CASE
+            WHEN le.type = 'CREDIT'
+            THEN le.reference_id
+          END
+        ) AS goods_receipt,
+
+        /* ========================================================
+           TOTAL AMOUNT
+           ======================================================== */
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN le.type = 'DEBIT'
+              THEN COALESCE(le.amount, 0)
+              ELSE 0
+            END
           ),
-          "total_deals",
-        ],
-        [
-          fn(
-            "COALESCE",
-            fn(
-              "SUM",
-              literal(
-                `CASE WHEN "LedgerEntry"."type" = 'DEBIT' THEN "LedgerEntry"."amount" ELSE 0 END`
-              )
-            ),
-            0
+          0
+        ) AS total_amount,
+
+        /* ========================================================
+           RECEIVED AMOUNT
+           ======================================================== */
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN le.type = 'CREDIT'
+              THEN COALESCE(le.amount, 0)
+              ELSE 0
+            END
           ),
-          "total_amount",
-        ],
-        [
-          fn(
-            "COALESCE",
-            fn(
-              "SUM",
-              literal(
-                `CASE WHEN "LedgerEntry"."type" = 'CREDIT' THEN "LedgerEntry"."amount" ELSE 0 END`
-              )
-            ),
-            0
-          ),
-          "received_amount",
-        ],
-        [
-          literal(`
-            COALESCE(SUM(CASE WHEN "LedgerEntry"."type" = 'DEBIT' THEN "LedgerEntry"."amount" ELSE 0 END), 0)
-            -
-            COALESCE(SUM(CASE WHEN "LedgerEntry"."type" = 'CREDIT' THEN "LedgerEntry"."amount" ELSE 0 END), 0)
-          `),
-          "pending_amount",
-        ],
-      ],
-      include: [
-        {
-          model: Customer,
-          as: "customer",
-          attributes: ["id", "name", "phone", "address", "store_code"],
-          where: customerWhere,
-          required: true,
+          0
+        ) AS received_amount
+
+      FROM ledger_entries le
+
+      WHERE
+        ${ledgerOrganizationCondition}
+      `,
+      {
+        replacements: {
+          ...ledgerOrganizationReplacements,
         },
-      ],
-      group: ["LedgerEntry.customer_id", "customer.id"],
-      order: [[literal(`"pending_amount"`), "DESC"]],
-      subQuery: false,
-    });
+        type: QueryTypes.SELECT,
+      }
+    );
 
-    const clients = clientRows.map((row) => ({
-      customer_id: Number(row.customer_id),
-      client_name: row.customer?.name || "",
-      phone: row.customer?.phone || "",
-      address: row.customer?.address || "",
-      store_code: row.customer?.store_code || "",
-      total_deals: Number(row.get("total_deals") || 0),
-      total_amount: Number(row.get("total_amount") || 0),
-      received_amount: Number(row.get("received_amount") || 0),
-      pending_amount: Number(row.get("pending_amount") || 0),
+    const summaryRaw = summaryResult?.[0] || {};
+
+    // ============================================================
+    // 6. CUSTOMER SEARCH CONDITION
+    //
+    // Ye cards ke existing Total Amount / Received / Pending /
+    // Total Clients calculation ko preserve karne ke liye hai.
+    // ============================================================
+
+    let customerSearchCondition = "";
+
+    if (cleanSearch) {
+      customerSearchCondition = `
+        AND (
+          COALESCE(c.name::text, '') ILIKE :search
+
+          OR COALESCE(c.phone::text, '') ILIKE :search
+
+          OR COALESCE(c.store_code::text, '') ILIKE :search
+
+          OR COALESCE(c.address::text, '') ILIKE :search
+        )
+      `;
+    }
+
+    // ============================================================
+    // 7. CUSTOMER DATA
+    //
+    // IMPORTANT:
+    // Cards ke existing financial values preserve karne ke liye
+    // customer-level calculation rakhi gayi hai.
+    //
+    // Data ab Head Office ke District + Retail stores se aayega.
+    // ============================================================
+
+    const clientRows = await sequelize.query(
+      `
+      SELECT
+
+        le.customer_id,
+
+        c.name AS client_name,
+
+        c.phone,
+
+        c.address,
+
+        c.store_code,
+
+        COUNT(
+          DISTINCT
+          CASE
+            WHEN le.type = 'DEBIT'
+            THEN le.reference_id
+          END
+        ) AS total_deals,
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN le.type = 'DEBIT'
+              THEN COALESCE(le.amount, 0)
+              ELSE 0
+            END
+          ),
+          0
+        ) AS total_amount,
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN le.type = 'CREDIT'
+              THEN COALESCE(le.amount, 0)
+              ELSE 0
+            END
+          ),
+          0
+        ) AS received_amount,
+
+        (
+          COALESCE(
+            SUM(
+              CASE
+                WHEN le.type = 'DEBIT'
+                THEN COALESCE(le.amount, 0)
+                ELSE 0
+              END
+            ),
+            0
+          )
+
+          -
+
+          COALESCE(
+            SUM(
+              CASE
+                WHEN le.type = 'CREDIT'
+                THEN COALESCE(le.amount, 0)
+                ELSE 0
+              END
+            ),
+            0
+          )
+        ) AS pending_amount
+
+      FROM ledger_entries le
+
+      INNER JOIN customers c
+        ON c.id = le.customer_id
+
+      WHERE
+        ${ledgerOrganizationCondition}
+
+        ${customerSearchCondition}
+
+      GROUP BY
+        le.customer_id,
+        c.id,
+        c.name,
+        c.phone,
+        c.address,
+        c.store_code
+
+      ORDER BY
+        pending_amount DESC
+      `,
+      {
+        replacements: {
+          ...ledgerOrganizationReplacements,
+          search: `%${cleanSearch}%`,
+        },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    // ============================================================
+    // 8. NORMALIZE CUSTOMER DATA
+    // ============================================================
+
+    const clients = (clientRows || []).map((row) => ({
+      customer_id: Number(row.customer_id || 0),
+
+      client_name:
+        row.client_name || "",
+
+      phone:
+        row.phone == null
+          ? ""
+          : String(row.phone),
+
+      address:
+        row.address || "",
+
+      store_code:
+        row.store_code == null
+          ? ""
+          : String(row.store_code),
+
+      total_deals:
+        Number(row.total_deals || 0),
+
+      total_amount:
+        Number(row.total_amount || 0),
+
+      received_amount:
+        Number(row.received_amount || 0),
+
+      pending_amount:
+        Number(row.pending_amount || 0),
     }));
 
+    // ============================================================
+    // 9. CARD FINANCIAL TOTALS
+    //
+    // Existing card structure preserved.
+    // ============================================================
+
+    const totalAmount = clients.reduce(
+      (sum, item) =>
+        sum + Number(item.total_amount || 0),
+      0
+    );
+
+    const receivedAmount = clients.reduce(
+      (sum, item) =>
+        sum + Number(item.received_amount || 0),
+      0
+    );
+
+    const pendingAmount = clients.reduce(
+      (sum, item) =>
+        sum + Number(item.pending_amount || 0),
+      0
+    );
+
+    // ============================================================
+    // 10. FINAL DASHBOARD SUMMARY
+    // ============================================================
+
     const summary = {
-      total_sales: Number(summaryRaw?.total_sales || 0),
+      /*
+       * IMPORTANT:
+       * Total Sales now comes from combined District + Retail
+       * stores.
+       */
+      total_sales: Number(
+        summaryRaw.total_sales || 0
+      ),
+
       loss: 0,
-      goods_receipt: Number(summaryRaw?.goods_receipt || 0),
-      total_clients: clients.length,
-      total_amount: clients.reduce(
-        (sum, item) => sum + Number(item.total_amount || 0),
-        0
+
+      goods_receipt: Number(
+        summaryRaw.goods_receipt || 0
       ),
-      received_amount: clients.reduce(
-        (sum, item) => sum + Number(item.received_amount || 0),
-        0
-      ),
-      pending_amount: clients.reduce(
-        (sum, item) => sum + Number(item.pending_amount || 0),
-        0
-      ),
+
+      /*
+       * Existing card logic preserved.
+       */
+      total_clients:
+        clients.length,
+
+      total_amount:
+        totalAmount,
+
+      received_amount:
+        receivedAmount,
+
+      pending_amount:
+        pendingAmount,
     };
 
-    const workbook = new ExcelJS.Workbook();
+    // ============================================================
+    // 11. STORE LEDGER DATA
+    //
+    // UI / Excel columns:
+    //
+    // Store Code
+    // Store Manager
+    // Total Deals
+    // Total Amount
+    // Received Amount
+    // Pending Amount
+    // Action
+    // ============================================================
 
-    workbook.creator = "ERP System";
-    workbook.created = new Date();
-    workbook.modified = new Date();
+    let storeSearchCondition = "";
 
-    const worksheet = workbook.addWorksheet("Ledger Report", {
-      views: [{ state: "frozen", ySplit: 12 }],
-      pageSetup: {
-        paperSize: 9,
-        orientation: "landscape",
-        fitToPage: true,
-        fitToWidth: 1,
-        fitToHeight: 0,
-      },
-    });
+    if (cleanSearch) {
+      storeSearchCondition = `
+        AND (
+          COALESCE(s.store_code::text, '') ILIKE :storeSearch
 
-    worksheet.properties.defaultRowHeight = 22;
+          OR COALESCE(s.store_name::text, '') ILIKE :storeSearch
+
+          OR EXISTS (
+            SELECT 1
+            FROM users su
+            WHERE
+              LOWER(TRIM(COALESCE(su.store_code, '')))
+                =
+              LOWER(TRIM(COALESCE(s.store_code, '')))
+
+              AND LOWER(
+                COALESCE(su.role, '')
+              ) = 'manager'
+
+              AND (
+                COALESCE(su.username::text, '') ILIKE :storeSearch
+                OR COALESCE(su.email::text, '') ILIKE :storeSearch
+              )
+          )
+        )
+      `;
+    }
+
+    const storeLedgerRows = await sequelize.query(
+      `
+      SELECT
+
+        s.id AS organization_id,
+
+        s.store_code,
+
+        s.store_name,
+
+        s.organization_level,
+
+        /* ========================================================
+           STORE MANAGER
+           Actual users table fields:
+             users.store_code
+             users.username
+             users.role
+           ======================================================== */
+
+        COALESCE(
+          MAX(
+            CASE
+              WHEN LOWER(
+                COALESCE(u.role, '')
+              ) = 'manager'
+              THEN COALESCE(
+                NULLIF(u.username, ''),
+                NULLIF(u.email, ''),
+                NULLIF(u.user_code, '')
+              )
+              ELSE NULL
+            END
+          ),
+          '—'
+        ) AS store_manager,
+
+        /* ========================================================
+           TOTAL DEALS
+           ======================================================== */
+
+        COUNT(
+          DISTINCT
+          CASE
+            WHEN le.type = 'DEBIT'
+            THEN le.reference_id
+          END
+        ) AS total_deals,
+
+        /* ========================================================
+           TOTAL AMOUNT
+           ======================================================== */
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN le.type = 'DEBIT'
+              THEN COALESCE(le.amount, 0)
+              ELSE 0
+            END
+          ),
+          0
+        ) AS total_amount,
+
+        /* ========================================================
+           RECEIVED AMOUNT
+           ======================================================== */
+
+        COALESCE(
+          SUM(
+            CASE
+              WHEN le.type = 'CREDIT'
+              THEN COALESCE(le.amount, 0)
+              ELSE 0
+            END
+          ),
+          0
+        ) AS received_amount,
+
+        /* ========================================================
+           PENDING AMOUNT
+           ======================================================== */
+
+        (
+          COALESCE(
+            SUM(
+              CASE
+                WHEN le.type = 'DEBIT'
+                THEN COALESCE(le.amount, 0)
+                ELSE 0
+              END
+            ),
+            0
+          )
+
+          -
+
+          COALESCE(
+            SUM(
+              CASE
+                WHEN le.type = 'CREDIT'
+                THEN COALESCE(le.amount, 0)
+                ELSE 0
+              END
+            ),
+            0
+          )
+        ) AS pending_amount
+
+      FROM stores s
+
+      /* ==========================================================
+         IMPORTANT:
+         LEFT JOIN rakha hai.
+         Isse jis store ka ledger data nahi hai,
+         woh store bhi Excel mein aayega.
+         ========================================================== */
+
+      LEFT JOIN ledger_entries le
+        ON le.organization_id = s.id
+
+      /* ==========================================================
+         MANAGER JOIN
+         ========================================================== */
+
+      LEFT JOIN users u
+        ON LOWER(
+          TRIM(
+            COALESCE(u.store_code, '')
+          )
+        )
+        =
+        LOWER(
+          TRIM(
+            COALESCE(s.store_code, '')
+          )
+        )
+
+        AND LOWER(
+          COALESCE(u.role, '')
+        ) = 'manager'
+
+      WHERE
+
+        LOWER(
+          s.organization_level::text
+        ) IN (
+          'district',
+          'retail'
+        )
+
+        ${storeSearchCondition}
+
+      GROUP BY
+        s.id,
+        s.store_code,
+        s.store_name,
+        s.organization_level
+
+      ORDER BY
+        s.store_code ASC
+      `,
+      {
+        replacements: {
+          storeSearch:
+            `%${cleanSearch}%`,
+        },
+        type: QueryTypes.SELECT,
+      }
+    );
+
+    // ============================================================
+    // 12. NORMALIZE STORE LEDGER DATA
+    // ============================================================
+
+    const stores = (storeLedgerRows || []).map(
+      (row) => {
+        const totalAmount =
+          Number(
+            row.total_amount || 0
+          );
+
+        const receivedAmount =
+          Number(
+            row.received_amount || 0
+          );
+
+        const pendingAmount =
+          totalAmount -
+          receivedAmount;
+
+        return {
+          organization_id:
+            row.organization_id,
+
+          store_code:
+            row.store_code == null
+              ? "—"
+              : String(row.store_code),
+
+          store_name:
+            row.store_name == null
+              ? "—"
+              : String(row.store_name),
+
+          organization_level:
+            row.organization_level == null
+              ? "—"
+              : String(row.organization_level),
+
+          store_manager:
+            row.store_manager || "—",
+
+          total_deals:
+            Number(
+              row.total_deals || 0
+            ),
+
+          total_amount:
+            totalAmount,
+
+          received_amount:
+            receivedAmount,
+
+          pending_amount:
+            pendingAmount,
+        };
+      }
+    );
+
+    // ============================================================
+    // 13. CREATE WORKBOOK
+    // ============================================================
+
+    const workbook =
+      new ExcelJS.Workbook();
+
+    workbook.creator =
+      "ERP System";
+
+    workbook.created =
+      new Date();
+
+    workbook.modified =
+      new Date();
+
+    const worksheet =
+      workbook.addWorksheet(
+        "Ledger Report",
+        {
+          views: [
+            {
+              state: "frozen",
+              ySplit: 12,
+            },
+          ],
+
+          pageSetup: {
+            paperSize: 9,
+            orientation: "landscape",
+            fitToPage: true,
+            fitToWidth: 1,
+            fitToHeight: 0,
+          },
+        }
+      );
+
+    worksheet.properties.defaultRowHeight =
+      22;
+
+    // ============================================================
+    // 14. COLUMNS
+    // ============================================================
 
     worksheet.columns = [
-      { key: "customer_name", width: 26 },
-      { key: "phone", width: 16 },
-      { key: "store_code", width: 16 },
-      { key: "address", width: 34 },
-      { key: "total_deals", width: 14 },
-      { key: "total_amount", width: 18 },
-      { key: "received_amount", width: 20 },
-      { key: "pending_amount", width: 20 },
+      {
+        header: "Store Code",
+        key: "store_code",
+        width: 20,
+      },
+
+      {
+        header: "Store Manager",
+        key: "store_manager",
+        width: 28,
+      },
+
+      {
+        header: "Total Deals",
+        key: "total_deals",
+        width: 16,
+      },
+
+      {
+        header: "Total Amount",
+        key: "total_amount",
+        width: 20,
+      },
+
+      {
+        header: "Received Amount",
+        key: "received_amount",
+        width: 20,
+      },
+
+      {
+        header: "Pending Amount",
+        key: "pending_amount",
+        width: 20,
+      },
+
+      {
+        header: "Action",
+        key: "action",
+        width: 16,
+      },
     ];
+
+    // ============================================================
+    // 15. STYLES
+    // ============================================================
 
     const titleFill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FF111827" },
+      fgColor: {
+        argb: "FF111827",
+      },
     };
 
     const sectionFill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FFE5E7EB" },
+      fgColor: {
+        argb: "FFE5E7EB",
+      },
     };
 
     const headerFill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FF1F2937" },
+      fgColor: {
+        argb: "FF1F2937",
+      },
     };
 
     const cardFill = {
       type: "pattern",
       pattern: "solid",
-      fgColor: { argb: "FFF9FAFB" },
+      fgColor: {
+        argb: "FFF9FAFB",
+      },
     };
 
     const border = {
-      top: { style: "thin", color: { argb: "FFD1D5DB" } },
-      left: { style: "thin", color: { argb: "FFD1D5DB" } },
-      bottom: { style: "thin", color: { argb: "FFD1D5DB" } },
-      right: { style: "thin", color: { argb: "FFD1D5DB" } },
+      top: {
+        style: "thin",
+        color: {
+          argb: "FFD1D5DB",
+        },
+      },
+
+      left: {
+        style: "thin",
+        color: {
+          argb: "FFD1D5DB",
+        },
+      },
+
+      bottom: {
+        style: "thin",
+        color: {
+          argb: "FFD1D5DB",
+        },
+      },
+
+      right: {
+        style: "thin",
+        color: {
+          argb: "FFD1D5DB",
+        },
+      },
     };
 
-    const moneyFormat = '₹#,##0.00;[Red]-₹#,##0.00';
-    const numberFormat = '#,##0';
+    const moneyFormat =
+      "₹#,##0.00;[Red]-₹#,##0.00";
 
-    // =========================
-    // TITLE
-    // =========================
-    worksheet.mergeCells("A1:H1");
-    const titleCell = worksheet.getCell("A1");
-    titleCell.value = "Dashboard & Ledger Report";
+    const numberFormat =
+      "#,##0";
+
+    // ============================================================
+    // 16. TITLE
+    // ============================================================
+
+    worksheet.mergeCells(
+      "A1:G1"
+    );
+
+    const titleCell =
+      worksheet.getCell("A1");
+
+    titleCell.value =
+      "Dashboard & Ledger Report";
+
     titleCell.font = {
       bold: true,
       size: 18,
-      color: { argb: "FFFFFFFF" },
+      color: {
+        argb: "FFFFFFFF",
+      },
     };
-    titleCell.fill = titleFill;
+
+    titleCell.fill =
+      titleFill;
+
     titleCell.alignment = {
       horizontal: "center",
       vertical: "middle",
     };
-    worksheet.getRow(1).height = 34;
 
-    // =========================
-    // STORE INFO
-    // =========================
-    worksheet.mergeCells("A3:B3");
-    worksheet.getCell("A3").value = "Store / Organization";
-    worksheet.getCell("A3").font = { bold: true };
+    worksheet.getRow(1).height =
+      34;
 
-    worksheet.mergeCells("C3:D3");
-    worksheet.getCell("C3").value =
-      store?.store_name || req.user?.store_name || "N/A";
+    // ============================================================
+    // 17. STORE / ORGANIZATION DETAILS
+    // ============================================================
 
-    worksheet.mergeCells("E3:F3");
-    worksheet.getCell("E3").value = "Store Code";
-    worksheet.getCell("E3").font = { bold: true };
+    worksheet.mergeCells(
+      "A3:B3"
+    );
 
-    worksheet.mergeCells("G3:H3");
-    worksheet.getCell("G3").value =
-      store?.store_code || req.user?.store_code || "N/A";
+    worksheet.getCell(
+      "A3"
+    ).value =
+      "Store / Organization";
 
-    worksheet.mergeCells("A4:B4");
-    worksheet.getCell("A4").value = "Organization ID";
-    worksheet.getCell("A4").font = { bold: true };
+    worksheet.getCell(
+      "A3"
+    ).font = {
+      bold: true,
+    };
 
-    worksheet.mergeCells("C4:D4");
-    worksheet.getCell("C4").value = organization_id;
+    worksheet.mergeCells(
+      "C3:D3"
+    );
 
-    worksheet.mergeCells("E4:F4");
-    worksheet.getCell("E4").value = "Generated At";
-    worksheet.getCell("E4").font = { bold: true };
+    worksheet.getCell(
+      "C3"
+    ).value =
+      store?.store_name ||
+      req.user?.store_name ||
+      "Head Office";
 
-    worksheet.mergeCells("G4:H4");
-    worksheet.getCell("G4").value = new Date().toLocaleString("en-IN");
+    worksheet.mergeCells(
+      "E3:F3"
+    );
 
-    ["A3", "C3", "E3", "G3", "A4", "C4", "E4", "G4"].forEach((cell) => {
-      worksheet.getCell(cell).border = border;
-      worksheet.getCell(cell).alignment = {
-        vertical: "middle",
-        horizontal: "left",
-      };
-    });
+    worksheet.getCell(
+      "E3"
+    ).value =
+      "Store Code";
 
-    // =========================
-    // DASHBOARD CARDS
-    // =========================
-    worksheet.mergeCells("A6:H6");
-    worksheet.getCell("A6").value = "Dashboard Cards";
-    worksheet.getCell("A6").font = { bold: true, size: 13 };
-    worksheet.getCell("A6").fill = sectionFill;
-    worksheet.getCell("A6").border = border;
+    worksheet.getCell(
+      "E3"
+    ).font = {
+      bold: true,
+    };
+
+    worksheet.getCell(
+      "G3"
+    ).value =
+      store?.store_code ||
+      req.user?.store_code ||
+      "N/A";
+
+    worksheet.mergeCells(
+      "A4:B4"
+    );
+
+    worksheet.getCell(
+      "A4"
+    ).value =
+      "Organization ID";
+
+    worksheet.getCell(
+      "A4"
+    ).font = {
+      bold: true,
+    };
+
+    worksheet.mergeCells(
+      "C4:D4"
+    );
+
+    worksheet.getCell(
+      "C4"
+    ).value =
+      organization_id;
+
+    worksheet.mergeCells(
+      "E4:F4"
+    );
+
+    worksheet.getCell(
+      "E4"
+    ).value =
+      "Generated At";
+
+    worksheet.getCell(
+      "E4"
+    ).font = {
+      bold: true,
+    };
+
+    worksheet.getCell(
+      "G4"
+    ).value =
+      new Date().toLocaleString(
+        "en-IN"
+      );
+
+    [
+      "A3",
+      "C3",
+      "E3",
+      "G3",
+      "A4",
+      "C4",
+      "E4",
+      "G4",
+    ].forEach(
+      (cell) => {
+        worksheet.getCell(
+          cell
+        ).border =
+          border;
+
+        worksheet.getCell(
+          cell
+        ).alignment = {
+          vertical: "middle",
+          horizontal: "left",
+        };
+      }
+    );
+
+    // ============================================================
+    // 18. DASHBOARD CARDS
+    //
+    // IMPORTANT:
+    // Cards ka layout / labels / structure SAME hai.
+    //
+    // Sirf Total Sales ki value ab combined
+    // District + Retail stores se aa rahi hai.
+    // ============================================================
+
+    worksheet.mergeCells(
+      "A6:G6"
+    );
+
+    worksheet.getCell(
+      "A6"
+    ).value =
+      "Dashboard Cards";
+
+    worksheet.getCell(
+      "A6"
+    ).font = {
+      bold: true,
+      size: 13,
+    };
+
+    worksheet.getCell(
+      "A6"
+    ).fill =
+      sectionFill;
+
+    worksheet.getCell(
+      "A6"
+    ).border =
+      border;
 
     const cards = [
-      ["A7:B8", "Total Sales", summary.total_sales, numberFormat],
-      ["C7:D8", "Goods Receipt", summary.goods_receipt, numberFormat],
-      ["E7:F8", "Total Clients", summary.total_clients, numberFormat],
-      ["G7:H8", "Loss", summary.loss, moneyFormat],
-      ["A9:B10", "Total Amount", summary.total_amount, moneyFormat],
-      ["C9:D10", "Received Amount", summary.received_amount, moneyFormat],
-      ["E9:F10", "Pending Amount", summary.pending_amount, moneyFormat],
-      ["G9:H10", "Collectable", summary.pending_amount, moneyFormat],
+      [
+        "A7:B8",
+        "Total Sales",
+        summary.total_sales,
+        numberFormat,
+      ],
+
+      [
+        "C7:D8",
+        "Goods Receipt",
+        summary.goods_receipt,
+        numberFormat,
+      ],
+
+      [
+        "E7:F8",
+        "Total Clients",
+        summary.total_clients,
+        numberFormat,
+      ],
+
+      [
+        "G7",
+        "Loss",
+        summary.loss,
+        moneyFormat,
+      ],
+
+      [
+        "A9:B10",
+        "Total Amount",
+        summary.total_amount,
+        moneyFormat,
+      ],
+
+      [
+        "C9:D10",
+        "Received Amount",
+        summary.received_amount,
+        moneyFormat,
+      ],
+
+      [
+        "E9:F10",
+        "Pending Amount",
+        summary.pending_amount,
+        moneyFormat,
+      ],
+
+      [
+        "G9",
+        "Collectable",
+        summary.pending_amount,
+        moneyFormat,
+      ],
     ];
 
-    cards.forEach(([range, label, value, format]) => {
-      worksheet.mergeCells(range);
+    cards.forEach(
+      ([range, label, value]) => {
+        worksheet.mergeCells(
+          range
+        );
 
-      const startCell = range.split(":")[0];
-      const cell = worksheet.getCell(startCell);
+        const startCell =
+          range.split(":")[0];
 
-      cell.value = {
-        richText: [
-          {
-            text: `${label}\n`,
-            font: {
-              bold: true,
-              size: 10,
-              color: { argb: "FF6B7280" },
+        const cell =
+          worksheet.getCell(
+            startCell
+          );
+
+        cell.value = {
+          richText: [
+            {
+              text:
+                `${label}\n`,
+              font: {
+                bold: true,
+                size: 10,
+                color: {
+                  argb:
+                    "FF6B7280",
+                },
+              },
             },
-          },
-          {
-            text: String(value),
-            font: {
-              bold: true,
-              size: 15,
-              color: { argb: "FF111827" },
+
+            {
+              text:
+                String(value),
+
+              font: {
+                bold: true,
+                size: 15,
+                color: {
+                  argb:
+                    "FF111827",
+                },
+              },
             },
-          },
-        ],
-      };
+          ],
+        };
 
-      cell.fill = cardFill;
-      cell.border = border;
-      cell.alignment = {
-        horizontal: "center",
-        vertical: "middle",
-        wrapText: true,
-      };
+        cell.fill =
+          cardFill;
 
-      if (typeof value === "number") {
-        cell.numFmt = format;
+        cell.border =
+          border;
+
+        cell.alignment = {
+          horizontal: "center",
+          vertical: "middle",
+          wrapText: true,
+        };
       }
-    });
+    );
 
-    worksheet.getRow(7).height = 25;
-    worksheet.getRow(8).height = 25;
-    worksheet.getRow(9).height = 25;
-    worksheet.getRow(10).height = 25;
+    // ============================================================
+    // 19. STORE LEDGER TITLE
+    // ============================================================
 
-    // =========================
-    // CUSTOMER LEDGER TABLE
-    // =========================
-    worksheet.mergeCells("A12:H12");
-    worksheet.getCell("A12").value = "Customer Ledger";
-    worksheet.getCell("A12").font = { bold: true, size: 13 };
-    worksheet.getCell("A12").fill = sectionFill;
-    worksheet.getCell("A12").border = border;
+    worksheet.mergeCells(
+      "A12:G12"
+    );
 
-    const headerRowIndex = 13;
-    const headerRow = worksheet.getRow(headerRowIndex);
+    worksheet.getCell(
+      "A12"
+    ).value =
+      "Store Ledger";
+
+    worksheet.getCell(
+      "A12"
+    ).font = {
+      bold: true,
+      size: 13,
+    };
+
+    worksheet.getCell(
+      "A12"
+    ).fill =
+      sectionFill;
+
+    worksheet.getCell(
+      "A12"
+    ).border =
+      border;
+
+    // ============================================================
+    // 20. STORE LEDGER HEADER
+    // ============================================================
+
+    const headerRowIndex =
+      13;
+
+    const headerRow =
+      worksheet.getRow(
+        headerRowIndex
+      );
 
     headerRow.values = [
-      "Customer Name",
-      "Phone",
       "Store Code",
-      "Address",
+      "Store Manager",
       "Total Deals",
       "Total Amount",
       "Received Amount",
       "Pending Amount",
+      "Action",
     ];
 
-    headerRow.height = 26;
+    headerRow.height =
+      26;
 
-    headerRow.eachCell((cell) => {
-      cell.font = {
-        bold: true,
-        color: { argb: "FFFFFFFF" },
-      };
-      cell.fill = headerFill;
-      cell.border = border;
-      cell.alignment = {
-        horizontal: "center",
-        vertical: "middle",
-        wrapText: true,
-      };
-    });
+    headerRow.eachCell(
+      (cell) => {
+        cell.font = {
+          bold: true,
+          color: {
+            argb: "FFFFFFFF",
+          },
+        };
 
-    clients.forEach((item) => {
-      const row = worksheet.addRow({
-        customer_name: item.client_name,
-        phone: item.phone,
-        store_code: item.store_code,
-        address: item.address,
-        total_deals: item.total_deals,
-        total_amount: item.total_amount,
-        received_amount: item.received_amount,
-        pending_amount: item.pending_amount,
-      });
+        cell.fill =
+          headerFill;
 
-      row.eachCell((cell, colNumber) => {
-        cell.border = border;
+        cell.border =
+          border;
+
         cell.alignment = {
+          horizontal: "center",
           vertical: "middle",
-          horizontal: colNumber >= 5 ? "right" : "left",
           wrapText: true,
         };
-      });
+      }
+    );
 
-      row.getCell(2).numFmt = "@";
-      row.getCell(3).numFmt = "@";
-      row.getCell(5).numFmt = numberFormat;
-      row.getCell(6).numFmt = moneyFormat;
-      row.getCell(7).numFmt = moneyFormat;
-      row.getCell(8).numFmt = moneyFormat;
-    });
+    // ============================================================
+    // 21. ADD ALL DISTRICT + RETAIL STORES
+    // ============================================================
 
-    const lastRow = worksheet.rowCount;
+    stores.forEach(
+      (item) => {
+        const row =
+          worksheet.addRow([
+            item.store_code,
 
-    if (clients.length > 0) {
-      const totalRow = worksheet.addRow({
-        customer_name: "Grand Total",
-        phone: "",
-        store_code: "",
-        address: "",
-        total_deals: clients.reduce(
-          (sum, item) => sum + Number(item.total_deals || 0),
-          0
-        ),
-        total_amount: summary.total_amount,
-        received_amount: summary.received_amount,
-        pending_amount: summary.pending_amount,
-      });
+            item.store_manager,
 
-      totalRow.height = 26;
+            item.total_deals,
 
-      totalRow.eachCell((cell, colNumber) => {
-        cell.font = { bold: true };
-        cell.fill = sectionFill;
-        cell.border = border;
+            item.total_amount,
+
+            item.received_amount,
+
+            item.pending_amount,
+
+            "View",
+          ]);
+
+        row.height =
+          24;
+
+        row.eachCell(
+          (cell, colNumber) => {
+            cell.border =
+              border;
+
+            cell.alignment = {
+              vertical: "middle",
+
+              horizontal:
+                colNumber >= 3
+                  ? "right"
+                  : "left",
+
+              wrapText: true,
+            };
+          }
+        );
+
+        // Store Code
+        row.getCell(
+          1
+        ).numFmt = "@";
+
+        // Store Manager
+        row.getCell(
+          2
+        ).numFmt = "@";
+
+        // Total Deals
+        row.getCell(
+          3
+        ).numFmt =
+          numberFormat;
+
+        // Total Amount
+        row.getCell(
+          4
+        ).numFmt =
+          moneyFormat;
+
+        // Received Amount
+        row.getCell(
+          5
+        ).numFmt =
+          moneyFormat;
+
+        // Pending Amount
+        row.getCell(
+          6
+        ).numFmt =
+          moneyFormat;
+
+        // Action
+        row.getCell(
+          7
+        ).alignment = {
+          horizontal: "center",
+          vertical: "middle",
+        };
+
+        row.getCell(
+          7
+        ).font = {
+          name: "Calibri",
+          size: 10,
+          color: {
+            argb: "FF2563EB",
+          },
+          underline: true,
+        };
+      }
+    );
+
+    // ============================================================
+    // 22. GRAND TOTAL
+    // ============================================================
+
+    const grandTotalDeals =
+      stores.reduce(
+        (sum, item) =>
+          sum +
+          Number(
+            item.total_deals || 0
+          ),
+        0
+      );
+
+    const grandTotalAmount =
+      stores.reduce(
+        (sum, item) =>
+          sum +
+          Number(
+            item.total_amount || 0
+          ),
+        0
+      );
+
+    const grandReceivedAmount =
+      stores.reduce(
+        (sum, item) =>
+          sum +
+          Number(
+            item.received_amount || 0
+          ),
+        0
+      );
+
+    const grandPendingAmount =
+      stores.reduce(
+        (sum, item) =>
+          sum +
+          Number(
+            item.pending_amount || 0
+          ),
+        0
+      );
+
+    const totalRow =
+      worksheet.addRow([
+        "Grand Total",
+
+        "",
+
+        grandTotalDeals,
+
+        grandTotalAmount,
+
+        grandReceivedAmount,
+
+        grandPendingAmount,
+
+        "",
+      ]);
+
+    totalRow.height =
+      26;
+
+    totalRow.eachCell(
+      (cell, colNumber) => {
+        cell.font = {
+          bold: true,
+        };
+
+        cell.fill =
+          sectionFill;
+
+        cell.border =
+          border;
+
         cell.alignment = {
           vertical: "middle",
-          horizontal: colNumber >= 5 ? "right" : "left",
-        };
-      });
 
-      totalRow.getCell(5).numFmt = numberFormat;
-      totalRow.getCell(6).numFmt = moneyFormat;
-      totalRow.getCell(7).numFmt = moneyFormat;
-      totalRow.getCell(8).numFmt = moneyFormat;
-    }
+          horizontal:
+            colNumber >= 3
+              ? "right"
+              : "left",
+        };
+      }
+    );
+
+    totalRow.getCell(
+      3
+    ).numFmt =
+      numberFormat;
+
+    totalRow.getCell(
+      4
+    ).numFmt =
+      moneyFormat;
+
+    totalRow.getCell(
+      5
+    ).numFmt =
+      moneyFormat;
+
+    totalRow.getCell(
+      6
+    ).numFmt =
+      moneyFormat;
+
+    // ============================================================
+    // 23. FILTER
+    // ============================================================
 
     worksheet.autoFilter = {
       from: {
         row: headerRowIndex,
         column: 1,
       },
+
       to: {
-        row: headerRowIndex,
-        column: 8,
+        row:
+          headerRowIndex +
+          stores.length,
+
+        column: 7,
       },
     };
 
-    worksheet.eachRow((row) => {
-      row.eachCell((cell) => {
-        cell.font = {
-          name: "Calibri",
-          size: cell.font?.size || 11,
-          bold: cell.font?.bold || false,
-          color: cell.font?.color,
-        };
-      });
-    });
+    // ============================================================
+    // 24. FONT
+    // ============================================================
 
-    worksheet.getRow(1).font = {
+    worksheet.eachRow(
+      (row) => {
+        row.eachCell(
+          (cell) => {
+            const oldFont =
+              cell.font || {};
+
+            cell.font = {
+              name: "Calibri",
+
+              size:
+                oldFont.size || 11,
+
+              bold:
+                oldFont.bold ||
+                false,
+
+              color:
+                oldFont.color,
+            };
+          }
+        );
+      }
+    );
+
+    // Restore title font
+    worksheet.getRow(
+      1
+    ).font = {
       name: "Calibri",
       bold: true,
       size: 18,
-      color: { argb: "FFFFFFFF" },
+      color: {
+        argb: "FFFFFFFF",
+      },
     };
 
-    const fileName = `ledger_report_${
-      store?.store_code || req.user?.store_code || organization_id
-    }_${Date.now()}.xlsx`;
+    // ============================================================
+    // 25. FILE NAME
+    // ============================================================
+
+    const fileName =
+      `ledger_report_${
+        store?.store_code ||
+        req.user?.store_code ||
+        organization_id
+      }_${Date.now()}.xlsx`;
+
+    // ============================================================
+    // 26. DOWNLOAD
+    // ============================================================
 
     res.setHeader(
       "Content-Type",
@@ -764,16 +1824,37 @@ export const downloadLedgerExcel = async (req, res) => {
       `attachment; filename="${fileName}"`
     );
 
-    await workbook.xlsx.write(res);
+    await workbook.xlsx.write(
+      res
+    );
+
     return res.end();
+
   } catch (error) {
-    console.error("Download Ledger Excel Error:", error);
+    console.error(
+      "Download Ledger Excel Error:",
+      error
+    );
+
+    console.error(
+      "DB Error:",
+      error?.original?.message ||
+      error?.parent?.message ||
+      null
+    );
 
     if (!res.headersSent) {
       return res.status(500).json({
         success: false,
-        message: "Failed to download ledger excel",
-        error: error.message,
+
+        message:
+          "Failed to download ledger excel",
+
+        error:
+          error?.original?.message ||
+          error?.parent?.message ||
+          error?.message ||
+          "Unknown error",
       });
     }
 
@@ -2043,7 +3124,7 @@ export const downloadInvoiceById = async (
       70,
       "State Code",
       customer?.state_code ||
-        "STR004"
+        customer?.store_code?.substring(0, 2)
     );
 
     // =========================
