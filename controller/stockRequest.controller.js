@@ -1180,12 +1180,14 @@ export const getMyStockRequests = async (req, res) => {
     const user = req.user;
 
     const userOrgId = Number(user.organization_id);
-    const userStoreCode = String(user.store_code || user.storeCode || "")
+    const userStoreCode = String(
+      user.store_code || user.storeCode || ""
+    )
       .trim()
       .toUpperCase();
 
     // ==========================================
-    // BATCH MAP (ADDED)
+    // BATCH MAP
     // ==========================================
 
     const batchRows = await sequelize.query(
@@ -1213,32 +1215,26 @@ export const getMyStockRequests = async (req, res) => {
       }
     }
 
-    const whereCondition = {
-      [Op.or]: [
-        {
-          created_by: user.id,
-        },
-
-        {
-          to_organization_id: userOrgId,
-        },
-
-        {
-          to_district_code: userStoreCode,
-        },
-      ],
-    };
+    // ==========================================
+    // MY REQUESTS
+    // Only requests CREATED BY CURRENT USER
+    // ==========================================
 
     const requests = await StockRequest.findAll({
-      where: whereCondition,
+      where: {
+        created_by: user.id,
+      },
+
       include: [
         {
           model: StockRequestItem,
           as: "request_items",
+
           include: [
             {
               model: Item,
               as: "item",
+
               attributes: [
                 "id",
                 "item_name",
@@ -1251,14 +1247,17 @@ export const getMyStockRequests = async (req, res) => {
                 "gross_weight",
                 "net_weight",
               ],
+
               required: false,
             },
           ],
         },
+
         {
           model: StockTransfer,
           as: "transfer",
           required: false,
+
           attributes: [
             "id",
             "request_id",
@@ -1270,85 +1269,119 @@ export const getMyStockRequests = async (req, res) => {
           ],
         },
       ],
+
       order: [["created_at", "DESC"]],
     });
 
-    const finalData = addTransferDirection(requests, user);
+    // ==========================================
+    // TRANSFER DIRECTION
+    // ==========================================
+
+    const finalData = addTransferDirection(
+      requests,
+      user
+    );
 
     // ==========================================
-    // PARENT BATCH DETAILS ADDED
+    // ADD BATCH DETAILS
     // ==========================================
 
     const updatedData = finalData.map((request) => ({
       ...request,
-      request_items: (request.request_items || []).map((reqItem) => ({
-        ...reqItem,
 
-        parent_batch_id:
-          batchMap.get(Number(reqItem.item_id))
-            ?.parent_batch_id || null,
+      request_items: (
+        request.request_items || []
+      ).map((reqItem) => {
+        const batch = batchMap.get(
+          Number(reqItem.item_id)
+        );
 
-        root_batch_id:
-          batchMap.get(Number(reqItem.item_id))
-            ?.root_batch_id || null,
+        return {
+          ...reqItem,
 
-        batch_id:
-          batchMap.get(Number(reqItem.item_id))
-            ?.parent_batch_id || null,
+          parent_batch_id:
+            batch?.parent_batch_id || null,
 
-        batch_no:
-          batchMap.get(Number(reqItem.item_id))
-            ?.batch_no || null,
-      })),
+          root_batch_id:
+            batch?.root_batch_id || null,
+
+          batch_id:
+            batch?.parent_batch_id || null,
+
+          batch_no:
+            batch?.batch_no || null,
+        };
+      }),
     }));
 
-    const createdRequests = updatedData.filter(
-      (reqItem) =>
-        Number(reqItem.created_by) === Number(user.id)
-    );
+    // ==========================================
+    // MY REQUESTS SUMMARY
+    // ==========================================
 
-    const receivedRequests = updatedData.filter(
-      (reqItem) =>
-        Number(reqItem.to_organization_id) === userOrgId ||
-        String(reqItem.to_district_code || "").toUpperCase() ===
-          userStoreCode
-    );
+    const createdRequests = updatedData;
 
-    const approvedRequests = updatedData.filter((reqItem) =>
-      ["approved", "partially_approved", "completed"].includes(
-        reqItem.status
-      )
+    const approvedRequests = updatedData.filter(
+      (reqItem) =>
+        [
+          "approved",
+          "partially_approved",
+          "completed",
+        ].includes(reqItem.status)
     );
 
     const transitGoods = updatedData.filter(
       (reqItem) =>
         reqItem.transfer &&
-        ["dispatched", "in_transit"].includes(
-          reqItem.transfer.status
-        )
+        [
+          "dispatched",
+          "in_transit",
+        ].includes(reqItem.transfer.status)
     );
 
-    const summary = {
-      total_requests: updatedData.length,
-      created_requests: createdRequests.length,
-      received_requests: receivedRequests.length,
-      approved_requests: approvedRequests.length,
-      low_stock_items: 0,
-      transit_goods: transitGoods.length,
-    };
+    // ==========================================
+    // MY REQUEST COUNT
+    // ==========================================
+
+    const myRequestCount = updatedData.length;
+
+    // ==========================================
+    // RESPONSE
+    // ==========================================
 
     return res.status(200).json({
       success: true,
-      summary,
-      count: updatedData.length,
+
+      summary: {
+        total_requests: myRequestCount,
+        created_requests: createdRequests.length,
+
+        // Received count yahan sirf informational hai.
+        // My API ka actual data sirf created requests ka hai.
+        received_requests: 0,
+
+        approved_requests:
+          approvedRequests.length,
+
+        low_stock_items: 0,
+
+        transit_goods:
+          transitGoods.length,
+      },
+
+      count: myRequestCount,
+
       data: updatedData,
     });
   } catch (error) {
-    console.error("getMyStockRequests error:", error);
+    console.error(
+      "getMyStockRequests error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch my stock requests",
+      message:
+        "Failed to fetch my stock requests",
       error: error.message,
     });
   }
@@ -1357,8 +1390,18 @@ export const getReceivedStockRequests = async (req, res) => {
   try {
     const user = req.user;
 
+    const userOrgId = Number(
+      user.organization_id
+    );
+
+    const userStoreCode = String(
+      user.store_code || user.storeCode || ""
+    )
+      .trim()
+      .toUpperCase();
+
     // ==========================================
-    // BATCH MAP (ADDED ONLY)
+    // BATCH MAP
     // ==========================================
 
     const batchRows = await sequelize.query(
@@ -1386,18 +1429,38 @@ export const getReceivedStockRequests = async (req, res) => {
       }
     }
 
+    // ==========================================
+    // RECEIVED REQUESTS
+    //
+    // Requests that came to:
+    // 1. Current organization
+    // OR
+    // 2. Current store/district code
+    // ==========================================
+
     const requests = await StockRequest.findAll({
       where: {
-        to_organization_id: user.organization_id,
+        [Op.or]: [
+          {
+            to_organization_id: userOrgId,
+          },
+
+          {
+            to_district_code: userStoreCode,
+          },
+        ],
       },
+
       include: [
         {
           model: StockRequestItem,
           as: "request_items",
+
           include: [
             {
               model: Item,
               as: "item",
+
               attributes: [
                 "id",
                 "item_name",
@@ -1410,14 +1473,17 @@ export const getReceivedStockRequests = async (req, res) => {
                 "gross_weight",
                 "net_weight",
               ],
+
               required: false,
             },
           ],
         },
+
         {
           model: StockTransfer,
           as: "transfer",
           required: false,
+
           attributes: [
             "id",
             "request_id",
@@ -1429,65 +1495,143 @@ export const getReceivedStockRequests = async (req, res) => {
           ],
         },
       ],
+
       order: [["created_at", "DESC"]],
     });
 
-    const finalData = addTransferDirection(requests, user)
-      .map((row) => {
-        const plainRow = row.toJSON?.() || row;
+    // ==========================================
+    // TRANSFER DIRECTION
+    // ==========================================
+
+    const finalData = addTransferDirection(
+      requests,
+      user
+    ).map((row) => {
+      const plainRow =
+        row.toJSON?.() || row;
+
+      // ========================================
+      // BATCH DETAILS
+      // ========================================
+
+      const updatedRequestItems = (
+        plainRow.request_items || []
+      ).map((reqItem) => {
+        const batch = batchMap.get(
+          Number(reqItem.item_id)
+        );
 
         return {
-          ...plainRow,
-          request_type: "received",
+          ...reqItem,
 
-          request_items: (
-            plainRow.request_items || []
-          ).map((reqItem) => ({
-            ...reqItem,
+          parent_batch_id:
+            batch?.parent_batch_id || null,
 
-            parent_batch_id:
-              batchMap.get(Number(reqItem.item_id))
-                ?.parent_batch_id || null,
+          root_batch_id:
+            batch?.root_batch_id || null,
 
-            root_batch_id:
-              batchMap.get(Number(reqItem.item_id))
-                ?.root_batch_id || null,
+          batch_id:
+            batch?.parent_batch_id || null,
 
-            batch_id:
-              batchMap.get(Number(reqItem.item_id))
-                ?.parent_batch_id || null,
-
-            batch_no:
-              batchMap.get(Number(reqItem.item_id))
-                ?.batch_no || null,
-          })),
+          batch_no:
+            batch?.batch_no || null,
         };
       });
 
-    const summary = calculateStockRequestSummary(finalData);
+      return {
+        ...plainRow,
 
-    const lowStockAlert = {
-      show_alert: summary.low_stock_items > 0,
-      message:
-        summary.low_stock_items > 0
-          ? `${summary.low_stock_items} low-quantity requested item(s) found.`
-          : "No low stock items.",
-      request_button_text: "Review Requests",
-    };
+        request_items:
+          updatedRequestItems,
+      };
+    });
+
+    // ==========================================
+    // RECEIVED REQUEST SUMMARY
+    // ==========================================
+
+    const receivedRequests =
+      finalData;
+
+    const approvedRequests =
+      finalData.filter(
+        (reqItem) =>
+          [
+            "approved",
+            "partially_approved",
+            "completed",
+          ].includes(reqItem.status)
+      );
+
+    const transitGoods =
+      finalData.filter(
+        (reqItem) =>
+          reqItem.transfer &&
+          [
+            "dispatched",
+            "in_transit",
+          ].includes(
+            reqItem.transfer.status
+          )
+      );
+
+    // ==========================================
+    // RECEIVED REQUEST COUNT
+    // ==========================================
+
+    const receivedRequestCount =
+      receivedRequests.length;
+
+    // ==========================================
+    // RESPONSE
+    // ==========================================
 
     return res.status(200).json({
       success: true,
-      summary,
-      low_stock_alert: lowStockAlert,
-      count: finalData.length,
+
+      summary: {
+        total_requests:
+          receivedRequestCount,
+
+        created_requests: 0,
+
+        received_requests:
+          receivedRequestCount,
+
+        approved_requests:
+          approvedRequests.length,
+
+        low_stock_items: 0,
+
+        transit_goods:
+          transitGoods.length,
+      },
+
+      low_stock_alert: {
+        show_alert: false,
+
+        message:
+          "No low stock items.",
+
+        request_button_text:
+          "Review Requests",
+      },
+
+      count:
+        receivedRequestCount,
+
       data: finalData,
     });
   } catch (error) {
-    console.error("getReceivedStockRequests error:", error);
+    console.error(
+      "getReceivedStockRequests error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
-      message: "Failed to fetch received stock requests",
+      message:
+        "Failed to fetch received stock requests",
       error: error.message,
     });
   }
